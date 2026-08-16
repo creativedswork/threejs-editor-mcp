@@ -24,7 +24,7 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "threejs-editor-mcp": "./dist/server.js"
+    "threejs-editor-mcp": "dist/server.js"
   },
   "files": [
     "dist",
