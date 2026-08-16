@@ -1,6 +1,6 @@
 # threejs-editor-mcp 设计方案 / Design Proposal
 
-> Status: M4 implemented; final validation pending approval
+> Status: Implemented and validated through M4
 >
 > Updated: 2026-08-15
 >
@@ -301,7 +301,7 @@ The M0 bundle is 862,453 bytes, above the Host's default 512 KiB Resource limit.
 
 `fullscreen`, `ui/message`, `ui/update-model-context`, sampling, app-provided tools, arbitrary link opening and device permissions remain deferred.
 
-M0 evidence and commands are recorded in [`reports/M0-validation.md`](reports/M0-validation.md).
+M0 evidence and commands are recorded in [`reports/M0-validation.md`](../reports/M0-validation.md).
 
 ### 安全约束
 
@@ -340,7 +340,8 @@ threejs-editor-mcp/
 │       └── player/
 ├── templates/
 ├── tests/
-├── DESIGN.md
+├── docs/
+│   └── DESIGN.md
 ├── package.json
 └── LICENSE
 ```
@@ -434,4 +435,4 @@ M0 proves the official npm runtime inside the real Sandbox. M1 establishes the S
 - [Official Three.js Editor interaction reference](https://threejs.org/editor/)
 - [Official Three.js Editor source reference](https://github.com/mrdoob/three.js/tree/dev/editor)
 - [MCP Apps stable specification 2026-01-26](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)
-- [Current dsh-mcp-apps package](../dsh-mcp-apps/README.md)
+- [Current dsh-mcp-apps package](../../dsh-mcp-apps/README.md)

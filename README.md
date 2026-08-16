@@ -98,7 +98,7 @@ pnpm run build
 node dist/server.js --root .tmp/projects
 ```
 
-The complete design and phased evidence are in [DESIGN.md](DESIGN.md) and
+The complete design and phased evidence are in [DESIGN.md](docs/DESIGN.md) and
 [`reports/`](reports/).
 
 ## Security

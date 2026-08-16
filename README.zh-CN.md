@@ -87,7 +87,7 @@ pnpm run build
 node dist/server.js --root .tmp/projects
 ```
 
-完整设计和各阶段验证记录位于 [DESIGN.md](DESIGN.md) 与 [`reports/`](reports/)。
+完整设计和各阶段验证记录位于 [DESIGN.md](docs/DESIGN.md) 与 [`reports/`](reports/)。
 
 ## 安全
 
