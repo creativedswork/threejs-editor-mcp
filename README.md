@@ -29,7 +29,7 @@ is vendored and no separate web service is required.
 Install the MCP Apps Host and this MCP Server:
 
 ```sh
-dsh plugin --profile web add @deepseek-ai/dsh-mcp-apps
+dsh plugin --profile web add @creative-dswork/dsh-mcp-apps
 npm install --global threejs-editor-mcp
 ```
 

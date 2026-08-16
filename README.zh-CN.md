@@ -25,7 +25,7 @@ flowchart LR
 安装 MCP Apps Host 和本 MCP Server：
 
 ```sh
-dsh plugin --profile web add @deepseek-ai/dsh-mcp-apps
+dsh plugin --profile web add @creative-dswork/dsh-mcp-apps
 npm install --global threejs-editor-mcp
 ```
 
