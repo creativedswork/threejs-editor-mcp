@@ -48,6 +48,7 @@ try {
     readFile(join(packageRoot, 'dist', 'server.js')),
     readFile(join(packageRoot, 'dist', 'view.js')),
     readFile(join(packageRoot, 'README.md')),
+    readFile(join(packageRoot, 'README.zh-CN.md')),
     readFile(join(packageRoot, 'LICENSE')),
   ])
 

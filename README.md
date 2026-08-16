@@ -1,5 +1,7 @@
 # threejs-editor-mcp
 
+English | [简体中文](README.zh-CN.md)
+
 Create, edit, run, and inspect small Three.js games inside a DeepSeek Harness
 chat card. One npm package provides the stdio MCP Server, model tools, app-only
 tools, and the bundled `ui://threejs-editor/app` MCP App.
