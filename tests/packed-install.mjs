@@ -36,7 +36,6 @@ try {
     '--dir',
     installed,
     'add',
-    '--offline',
     '--ignore-scripts',
     archive,
   ], { stdio: 'inherit' })
