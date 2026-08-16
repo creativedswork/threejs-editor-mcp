@@ -1,0 +1,138 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_editor_m3_create",
+          "name": "mcp__threejs__create_project",
+          "arguments": "{\"projectId\":\"m3-pong\",\"title\":\"Pong M3\",\"template\":\"pong\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "Three.js M3 editor opened."
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "Three.js M3 editor opened."
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_editor_m3_inspect",
+          "name": "mcp__threejs__inspect_project",
+          "arguments": "{\"projectId\":\"m3-pong\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_editor_m3_apply",
+          "name": "mcp__threejs__apply_scene_changes",
+          "arguments": "{\"projectId\":\"m3-pong\",\"baseRevision\":\"{{fromRequest:\"revision\":\"([a-f0-9]{64})\"}}\",\"operations\":[{\"type\":\"replace_script\",\"source\":\"const speed = 1.8; return { start({ scene }) { scene.getObjectByName('Ball').position.x = 0 }, update({ scene, input }, delta) { const ball = scene.getObjectByName('Ball'); const left = scene.getObjectByName('Left Paddle'); ball.position.x += speed * delta; if (input.keys.has('w')) left.position.z -= 4 * delta; if (input.keys.has('s')) left.position.z += 4 * delta }, dispose() {} }\"},{\"type\":\"update_object\",\"target\":\"Ball\",\"color\":\"#ff3366\"}]}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "I inspected the saved revision and fixed the runtime script."
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "I inspected the saved revision and fixed the runtime script."
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,65 @@
+{
+  "name": "threejs-editor-mcp",
+  "version": "0.1.0",
+  "description": "A lightweight Three.js editor delivered as an MCP App",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "mcp-apps",
+    "three.js",
+    "editor",
+    "deepseek"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/creativedswork/threejs-editor-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/creativedswork/threejs-editor-mcp/issues"
+  },
+  "homepage": "https://github.com/creativedswork/threejs-editor-mcp#readme",
+  "type": "module",
+  "packageManager": "pnpm@10.25.0",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "threejs-editor-mcp": "./dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm run clean && tsdown",
+    "test": "pnpm run build && node --test",
+    "test:e2e:m2": "node tests/m2-browser.mjs",
+    "test:e2e:m3": "node tests/m3-browser.mjs",
+    "test:e2e:m4": "node tests/m4-browser.mjs",
+    "test:pack": "pnpm run build && node tests/packed-install.mjs",
+    "check": "pnpm run typecheck && pnpm run test",
+    "release:check": "pnpm run check && pnpm run test:pack",
+    "prepack": "pnpm run build",
+    "start": "node dist/server.js --root .tmp/projects"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "three": "0.185.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "@types/three": "0.185.4",
+    "playwright": "1.61.1",
+    "tsdown": "0.22.14",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,12 @@
+- id: mcp-apps
+  config:
+    maxBodyBytes: 2097152
+    servers:
+      - serverName: threejs
+        transport: stdio
+        command: node
+        args:
+          - !!js process.env.THREEJS_EDITOR_MCP_ROOT + '/dist/server.js'
+          - --root
+          - !!js process.env.THREEJS_EDITOR_MCP_PROJECTS
+        cwd: !!js process.env.THREEJS_EDITOR_MCP_ROOT
