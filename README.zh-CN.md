@@ -20,16 +20,23 @@ flowchart LR
 
 编辑器使用官方 `three` npm 包。它是项目自带的轻量编辑器，交互参考官方 Three.js Editor；项目没有复制官方 Editor 源码，也不需要单独部署 Web 服务。
 
-## 安装
+## 使用 npm 安装和运行
 
 安装 MCP Apps Host 和本 MCP Server：
 
 ```sh
 dsh plugin --profile web add @creative-dswork/dsh-mcp-apps
-npm install --global threejs-editor-mcp
+npm install --global threejs-editor-mcp@0.1.0
+threejs-editor-mcp --root /absolute/path/to/threejs-projects
 ```
 
-在 Harness Web profile 中配置 `mcp-apps`：
+也可以不进行全局安装，直接运行 Server：
+
+```sh
+npx --yes threejs-editor-mcp@0.1.0 --root /absolute/path/to/threejs-projects
+```
+
+全局安装后，在 Harness Web profile 中配置 `mcp-apps`：
 
 ```yaml
 - id: mcp-apps
@@ -40,6 +47,23 @@ npm install --global threejs-editor-mcp
         transport: stdio
         command: threejs-editor-mcp
         args:
+          - --root
+          - /absolute/path/to/threejs-projects
+```
+
+也可以在同一配置中使用 `npx`，由 npm 直接解析软件包：
+
+```yaml
+- id: mcp-apps
+  config:
+    maxBodyBytes: 2097152
+    servers:
+      - serverName: threejs
+        transport: stdio
+        command: npx
+        args:
+          - --yes
+          - threejs-editor-mcp@0.1.0
           - --root
           - /absolute/path/to/threejs-projects
 ```

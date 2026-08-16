@@ -24,16 +24,23 @@ The Editor uses the official `three` npm package. It is a product-owned,
 lightweight editor inspired by the official Three.js Editor; no Editor source
 is vendored and no separate web service is required.
 
-## Install
+## Install and Run with npm
 
 Install the MCP Apps Host and this MCP Server:
 
 ```sh
 dsh plugin --profile web add @creative-dswork/dsh-mcp-apps
-npm install --global threejs-editor-mcp
+npm install --global threejs-editor-mcp@0.1.0
+threejs-editor-mcp --root /absolute/path/to/threejs-projects
 ```
 
-Configure the `mcp-apps` row in the Harness Web profile:
+Or run the Server without a global install:
+
+```sh
+npx --yes threejs-editor-mcp@0.1.0 --root /absolute/path/to/threejs-projects
+```
+
+For a global install, configure the `mcp-apps` row in the Harness Web profile:
 
 ```yaml
 - id: mcp-apps
@@ -44,6 +51,23 @@ Configure the `mcp-apps` row in the Harness Web profile:
         transport: stdio
         command: threejs-editor-mcp
         args:
+          - --root
+          - /absolute/path/to/threejs-projects
+```
+
+To let npm resolve the package directly, use `npx` in the same configuration:
+
+```yaml
+- id: mcp-apps
+  config:
+    maxBodyBytes: 2097152
+    servers:
+      - serverName: threejs
+        transport: stdio
+        command: npx
+        args:
+          - --yes
+          - threejs-editor-mcp@0.1.0
           - --root
           - /absolute/path/to/threejs-projects
 ```
