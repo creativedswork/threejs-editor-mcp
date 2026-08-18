@@ -27,6 +27,26 @@ import {
   projectSchema,
   type ProjectSummary,
 } from './projects.js'
+import {
+  applyOfficialEditorCommands,
+  inspectOfficialEditor,
+  officialCommandProof,
+  type EditorCommandOperation,
+} from './official-editor.js'
+import {
+  M5_COMMAND_PROOF_RESOURCE_URI,
+  M5_RUNTIME_MANIFEST,
+  M5_RUNTIME_RESOURCE_URI,
+} from './m5-runtime.js'
+import {
+  WorkspaceStore,
+  workspaceChangeSchema,
+  workspaceFileSchema,
+  workspacePathSchema,
+  type WorkspaceRegistration,
+  type WorkspaceSnapshot,
+  type WorkspaceSummary,
+} from './workspaces.js'
 
 const RESOURCE_URI = 'ui://threejs-editor/app'
 const CSP = {
@@ -45,6 +65,16 @@ const summarySchema = z.object({
   projectId: projectIdSchema,
   title: z.string(),
   revision: revisionSchema,
+  kind: z.enum(['scene-project', 'linked-workspace', 'managed-workspace']).optional(),
+})
+const workspaceSummarySchema = summarySchema.extend({
+  kind: z.enum(['linked-workspace', 'managed-workspace']),
+})
+const workspaceViewSchema = z.object({
+  kind: z.enum(['linked-workspace', 'managed-workspace']),
+  entry: workspacePathSchema,
+  backend: z.enum(['webgl', 'webgpu', 'raw-webgpu']),
+  files: z.array(workspaceFileSchema),
 })
 const sceneObjectSchema = z.object({
   name: z.string(),
@@ -52,6 +82,17 @@ const sceneObjectSchema = z.object({
   visible: z.boolean(),
   position: z.tuple([z.number(), z.number(), z.number()]),
   color: z.string().optional(),
+})
+const editorObjectSchema = z.object({
+  uuid: z.string().uuid(),
+  name: z.string(),
+  type: z.string(),
+  visible: z.boolean(),
+  position: z.array(z.number()).length(3),
+  rotationDegrees: z.array(z.number()).length(3),
+  scale: z.array(z.number()).length(3),
+  color: z.string().optional(),
+  commands: z.array(z.string()),
 })
 const vector3Schema = z.tuple([z.number(), z.number(), z.number()])
 const sceneOperationSchema = z.discriminatedUnion('type', [
@@ -88,6 +129,71 @@ const sceneOperationSchema = z.discriminatedUnion('type', [
   }),
 ])
 type SceneOperation = z.infer<typeof sceneOperationSchema>
+const editorCommandSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('set_position'),
+    objectUuid: z.string().uuid(),
+    value: vector3Schema,
+  }),
+  z.object({
+    type: z.literal('set_rotation'),
+    objectUuid: z.string().uuid(),
+    value: vector3Schema,
+  }),
+  z.object({
+    type: z.literal('set_scale'),
+    objectUuid: z.string().uuid(),
+    value: vector3Schema,
+  }),
+  z.object({
+    type: z.literal('set_name'),
+    objectUuid: z.string().uuid(),
+    value: z.string().min(1).max(120),
+  }),
+  z.object({
+    type: z.literal('set_visible'),
+    objectUuid: z.string().uuid(),
+    value: z.boolean(),
+  }),
+  z.object({
+    type: z.literal('set_material_color'),
+    objectUuid: z.string().uuid(),
+    value: z.string().regex(/^#[a-fA-F0-9]{6}$/),
+  }),
+  z.object({
+    type: z.literal('set_material_value'),
+    objectUuid: z.string().uuid(),
+    property: z.literal('roughness'),
+    value: z.number().min(0).max(1),
+  }),
+])
+const workspaceReadSchema = z.object({
+  path: workspacePathSchema,
+  sha256: revisionSchema,
+  size: z.number().int().nonnegative(),
+  mediaType: z.string(),
+  text: z.string().optional(),
+  base64: z.string().optional(),
+})
+const workspaceConflictOutputSchema = z.object({
+  projectId: projectIdSchema,
+  title: z.string().optional(),
+  revision: revisionSchema.optional(),
+  kind: z.enum(['linked-workspace', 'managed-workspace']).optional(),
+  conflict: z.literal(true).optional(),
+  currentRevision: revisionSchema.optional(),
+})
+
+function workspaceRegistration(value: string): WorkspaceRegistration {
+  const separator = value.indexOf('=')
+  if (separator < 1 || separator === value.length - 1) {
+    throw new Error('--workspace must use projectId=path')
+  }
+  return {
+    projectId: value.slice(0, separator),
+    path: value.slice(separator + 1),
+  }
+}
 
 function decodeBase64(value: string): Buffer {
   const bytes = Buffer.from(value, 'base64')
@@ -102,15 +208,80 @@ function textResult(text: string, structuredContent: Record<string, unknown>): C
   }
 }
 
-function summaryResult(message: string, summary: ProjectSummary): CallToolResult {
+function summaryResult(
+  message: string,
+  summary: ProjectSummary | WorkspaceSummary,
+): CallToolResult {
   return textResult(
     `${message}: ${summary.projectId} at revision ${summary.revision}`,
     {
       projectId: summary.projectId,
       title: summary.title,
       revision: summary.revision,
+      ...'kind' in summary ? { kind: summary.kind } : {},
     },
   )
+}
+
+function workspaceView(snapshot: WorkspaceSnapshot): z.infer<typeof workspaceViewSchema> {
+  return {
+    kind: snapshot.kind,
+    entry: snapshot.manifest.entry,
+    backend: snapshot.manifest.backend,
+    files: Object.entries(snapshot.manifest.files).map(([path, file]) => ({
+      path,
+      ...file,
+    })),
+  }
+}
+
+function conflictResult(projectId: string, error: RevisionConflictError): CallToolResult {
+  return {
+    isError: true,
+    content: [{
+      type: 'text',
+      text: `Revision conflict: current revision is ${error.currentRevision}.`,
+    }],
+    structuredContent: {
+      projectId,
+      conflict: true,
+      currentRevision: error.currentRevision,
+    },
+  }
+}
+
+function workspaceProjectChanges(project: z.infer<typeof projectSchema>): unknown[] {
+  return [
+    {
+      type: 'write',
+      path: 'src/scene.json',
+      text: `${JSON.stringify(project, null, 2)}\n`,
+    },
+    {
+      type: 'write',
+      path: 'src/main.js',
+      text: project.script.source,
+    },
+  ]
+}
+
+function applyEditorCommands(
+  project: z.infer<typeof projectSchema>,
+  operations: EditorCommandOperation[],
+): ReturnType<typeof applyOfficialEditorCommands> {
+  const applied = applyOfficialEditorCommands({
+    ...structuredClone(project),
+    scene: withoutTextureImages(project.scene),
+  }, operations)
+  applied.project.scene = restoreTextureImages(applied.project.scene, project.scene)
+  return applied
+}
+
+function inspectEditor(project: z.infer<typeof projectSchema>): ReturnType<typeof inspectOfficialEditor> {
+  return inspectOfficialEditor({
+    ...structuredClone(project),
+    scene: withoutTextureImages(project.scene),
+  })
 }
 
 function syntaxError(source: string): string | undefined {
@@ -320,93 +491,324 @@ function applyOperations(
 
 function viewHtml(script: string): string {
   return `<!doctype html>
-<html data-theme="light">
+<html data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="dark">
   <title>Three.js Editor MCP</title>
   <style>
-    :root{font-family:ui-sans-serif,system-ui,sans-serif;color:#171717;background:#fff}
-    :root[data-theme=dark]{color:#f5f5f5;background:#171717}
+    :root{
+      --surface:#05080e;
+      --surface-raised:rgb(4 9 16 / .46);
+      --surface-control:rgb(232 244 255 / .065);
+      --line:rgb(214 235 255 / .1);
+      --line-strong:rgb(214 235 255 / .19);
+      --text:#f2f7fc;
+      --muted:#8495a8;
+      --accent:#63b8ff;
+      --accent-soft:rgb(99 184 255 / .17);
+      --accent-ink:#03101a;
+      font-family:"SF Pro Display","Avenir Next",ui-sans-serif,system-ui,sans-serif;
+      color:var(--text);
+      background:var(--surface);
+      color-scheme:dark;
+      letter-spacing:0;
+    }
+    :root[data-display-mode=fullscreen],:root[data-display-mode=fullscreen] body{height:100%}
     *{box-sizing:border-box}
     [hidden]{display:none!important}
-    body{margin:0;padding:8px}
-    main{display:grid;grid-template-rows:48px auto minmax(0,1fr);height:620px;border:1px solid #d4d4d4;border-radius:6px;overflow:hidden;background:#0b0d10}
-    :root[data-theme=dark] main{border-color:#404040}
-    header{display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid #292c31;background:#15181d;color:#f5f5f5}
-    .mark{flex:0 0 auto;width:10px;height:10px;background:#3ddc84}
-    .phase{font:11px/1 ui-monospace,SFMono-Regular,monospace;color:#a3a3a3}
-    .title{min-width:80px;max-width:250px;width:34%;height:30px;padding:0 8px;border:1px solid #4b5058;border-radius:4px;background:#0f1216;color:#f5f5f5;font:600 13px/1 system-ui}
-    .title:focus{outline:2px solid #56a8ff;outline-offset:-2px}
-    .spacer{flex:1}
-    .revision{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:10px/1 ui-monospace,SFMono-Regular,monospace;color:#a3a3a3}
-    button{height:30px;padding:0 10px;border:1px solid #4b5058;border-radius:4px;background:#22262c;color:#f5f5f5;font:600 12px/1 system-ui;cursor:pointer}
-    button:hover{background:#30353d}
-    button:disabled{cursor:not-allowed;opacity:.45}
-    button[aria-pressed=true]{border-color:#56a8ff;background:#17334c;color:#fff}
-    button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,canvas:focus-visible{outline:2px solid #56a8ff;outline-offset:-2px}
-    .icon{width:30px;padding:0;font-size:15px}
-    .asset-input{display:none}
-    .conflict{grid-row:2;display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid #7a5c16;background:#33270d;color:#ffe6a3;font-size:12px}
-    .conflict span{min-width:0;flex:1}
-    .workspace{grid-row:3;display:grid;grid-template-columns:150px minmax(280px,1fr) 200px;min-width:0;min-height:0}
-    .panel{min-width:0;min-height:0;overflow:auto;background:#111419;color:#d4d4d4}
-    .hierarchy{border-right:1px solid #292c31}
-    .inspector{border-left:1px solid #292c31}
-    .panel h2{position:sticky;top:0;z-index:1;margin:0;padding:9px 10px;border-bottom:1px solid #292c31;background:#15181d;color:#f5f5f5;font-size:11px;line-height:1;text-transform:uppercase}
-    .panel-tabs{position:sticky;top:0;z-index:1;display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid #292c31;background:#15181d}
-    .panel-tabs button{height:29px;border:0;border-radius:0;background:transparent;color:#a3a3a3;font-size:10px;text-transform:uppercase}
-    .panel-tabs button[aria-selected=true]{box-shadow:inset 0 -2px #56a8ff;color:#fff}
-    .tree{margin:0;padding:5px 0;list-style:none}
-    .tree button{display:block;width:100%;height:27px;padding:0 8px;border:0;border-radius:0;background:transparent;overflow:hidden;text-align:left;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
-    .tree button:hover{background:#22262c}
-    .tree button[aria-selected=true]{background:#1d3a53;color:#fff}
-    .viewport{position:relative;min-width:0;min-height:0}
-    canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
-    .transform-tools{position:absolute;z-index:2;top:8px;left:8px;display:flex;gap:4px;padding:4px;border:1px solid #343941;border-radius:5px;background:#11151acc}
-    .scene-settings{position:absolute;z-index:2;right:8px;bottom:8px;display:flex;gap:6px}
-    .scene-settings select{height:28px;border:1px solid #4b5058;border-radius:4px;background:#171b20;color:#f5f5f5;font-size:11px}
-    .status{position:absolute;left:10px;bottom:8px;margin:0;padding:4px 6px;border:1px solid #343941;border-radius:3px;background:#11151acc;color:#c8ccd2;font:10px/1 ui-monospace,SFMono-Regular,monospace;pointer-events:none}
-    .inspector-body{padding:8px}
-    .empty{margin:8px;color:#8b8f96;font-size:12px}
-    .field{display:grid;grid-template-columns:58px minmax(0,1fr);align-items:center;gap:6px;margin-bottom:8px;font-size:11px}
-    .field input[type=text],.field input[type=number]{width:100%;height:27px;padding:0 6px;border:1px solid #424750;border-radius:3px;background:#0f1216;color:#f5f5f5}
-    .field input[type=color]{width:38px;height:27px;padding:2px;border:1px solid #424750;border-radius:3px;background:#0f1216}
-    .vectors{width:100%;border-collapse:collapse;font-size:10px}
-    .vectors th{padding:5px 2px;text-align:left;color:#9ca3ad;font-weight:600}
-    .vectors td{padding:2px}
-    .vectors input{width:100%;min-width:0;height:26px;padding:0 4px;border:1px solid #424750;border-radius:3px;background:#0f1216;color:#f5f5f5;font:10px/1 ui-monospace,SFMono-Regular,monospace}
-    .script-pane{display:grid;grid-template-rows:minmax(120px,1fr) auto;height:calc(100% - 30px);padding:8px;gap:7px}
-    .script-source{width:100%;min-height:120px;resize:none;padding:7px;border:1px solid #424750;border-radius:3px;background:#0b0d10;color:#d8e5ef;font:10px/1.45 ui-monospace,SFMono-Regular,monospace;tab-size:2}
-    .runtime-output{max-height:62px;margin:0;overflow:auto;white-space:pre-wrap;color:#aab1bb;font:10px/1.35 ui-monospace,SFMono-Regular,monospace}
-    [data-play-state=playing] .mark{background:#ffd166}
-    @media (max-width:760px){
-      .phase,.revision{display:none}
-      .title{width:45%}
-      .workspace{grid-template-columns:1fr 1fr;grid-template-rows:minmax(340px,1fr) 210px}
-      .viewport{grid-column:1/-1;grid-row:1}
-      .hierarchy{grid-column:1;grid-row:2;border-top:1px solid #292c31;border-right:1px solid #292c31}
-      .inspector{grid-column:2;grid-row:2;border-top:1px solid #292c31;border-left:0}
+    body{margin:0;padding:8px;background:var(--surface)}
+    main{
+      display:grid;
+      grid-template-rows:54px auto minmax(0,1fr);
+      height:620px;
+      overflow:hidden;
+      border:1px solid var(--line-strong);
+      border-radius:6px;
+      background:var(--surface);
+      box-shadow:0 24px 80px rgb(0 2 8 / .58);
     }
+    :root[data-display-mode=fullscreen] body{padding:0}
+    :root[data-display-mode=fullscreen] main{height:100vh;border:0;border-radius:0}
+    .topbar{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      min-width:0;
+      padding:0 10px 0 14px;
+      border-bottom:1px solid var(--line);
+      background:rgb(4 8 14 / .78);
+      color:var(--text);
+      box-shadow:inset 0 1px rgb(255 255 255 / .055),0 12px 42px rgb(0 3 10 / .24);
+      backdrop-filter:blur(20px) saturate(125%);
+      -webkit-backdrop-filter:blur(20px) saturate(125%);
+    }
+    .title{
+      min-width:90px;
+      max-width:270px;
+      width:32%;
+      height:32px;
+      padding:0 10px;
+      border:1px solid transparent;
+      border-radius:4px;
+      background:transparent;
+      color:var(--text);
+      font:650 13px/1 "SF Pro Display","Avenir Next",ui-sans-serif,system-ui,sans-serif;
+    }
+    .title:hover:not(:disabled){background:rgb(220 236 255 / .06)}
+    .title:focus{border-color:var(--accent);background:rgb(220 236 255 / .08);outline:0}
+    .spacer{flex:1}
+    .revision{
+      max-width:88px;
+      overflow:hidden;
+      color:var(--muted);
+      font:10px/1 "SFMono-Regular",Consolas,monospace;
+      font-variant-numeric:tabular-nums;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+    .toolbar{display:flex;align-items:center;gap:5px;min-width:0}
+    .toolbar-divider{width:1px;height:20px;margin:0 2px;background:var(--line)}
+    button{
+      height:32px;
+      padding:0 10px;
+      border:1px solid var(--line-strong);
+      border-radius:4px;
+      background:var(--surface-control);
+      color:var(--text);
+      box-shadow:inset 0 1px rgb(255 255 255 / .06);
+      font:650 12px/1 "SF Pro Display","Avenir Next",ui-sans-serif,system-ui,sans-serif;
+      cursor:pointer;
+      transition:transform .28s cubic-bezier(.16,1,.3,1),border-color .28s cubic-bezier(.16,1,.3,1),background .28s cubic-bezier(.16,1,.3,1),box-shadow .28s cubic-bezier(.16,1,.3,1),color .28s cubic-bezier(.16,1,.3,1);
+    }
+    button:hover:not(:disabled){border-color:rgb(99 184 255 / .48);background:rgb(232 244 255 / .12);box-shadow:inset 0 1px rgb(255 255 255 / .1),0 8px 24px rgb(0 4 12 / .22)}
+    button:active:not(:disabled){transform:scale(.97)}
+    button:disabled{cursor:not-allowed;opacity:.45}
+    button[aria-pressed=true]{border-color:rgb(99 184 255 / .48);background:var(--accent-soft);box-shadow:inset 0 0 18px rgb(99 184 255 / .08),0 0 22px rgb(99 184 255 / .09);color:#f4faff}
+    button:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .icon{width:32px;padding:0;font-size:15px}
+    .save{min-width:52px;border-color:rgb(132 202 255 / .9);background:var(--accent);box-shadow:inset 0 1px rgb(255 255 255 / .42),0 7px 22px rgb(38 137 218 / .26);color:var(--accent-ink)}
+    .save:hover:not(:disabled){border-color:#8fd0ff;background:#8fd0ff;box-shadow:inset 0 1px rgb(255 255 255 / .5),0 9px 28px rgb(38 137 218 / .36);color:var(--accent-ink)}
+    .asset-input{display:none}
+    .conflict{
+      grid-row:2;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 12px;
+      border-bottom:1px solid rgb(255 200 87 / .3);
+      background:rgb(52 35 7 / .9);
+      color:#ffe2a1;
+      font-size:12px;
+    }
+    .conflict span{min-width:0;flex:1}
+    .workspace{position:relative;grid-row:3;min-width:0;min-height:0;isolation:isolate;background:#050b13}
+    .editor-surface,.viewport{position:absolute;inset:0;min-width:0;min-height:0}
+    .editor-surface{z-index:1}
+    .viewport{overflow:hidden}
+    .viewport::after{
+      content:"";
+      position:absolute;
+      inset:0;
+      z-index:1;
+      pointer-events:none;
+      background-image:
+        linear-gradient(rgb(176 219 255 / .018) 1px,transparent 1px),
+        linear-gradient(90deg,rgb(176 219 255 / .018) 1px,transparent 1px);
+      background-size:32px 32px;
+      box-shadow:inset 0 0 140px rgb(0 3 9 / .7),inset 0 1px 0 rgb(160 213 255 / .07);
+    }
+    .panel{
+      position:absolute;
+      z-index:4;
+      top:12px;
+      bottom:auto;
+      min-width:0;
+      min-height:0;
+      max-height:calc(100% - 24px);
+      overflow:auto;
+      border:1px solid var(--line-strong);
+      border-radius:7px;
+      background:var(--surface-raised);
+      color:#c7d3df;
+      box-shadow:0 22px 58px rgb(0 3 10 / .48),inset 0 1px rgb(255 255 255 / .14),inset 0 0 0 1px rgb(255 255 255 / .025);
+      backdrop-filter:blur(18px) saturate(125%);
+      -webkit-backdrop-filter:blur(18px) saturate(125%);
+      contain:paint;
+    }
+    .panel::after,.transform-tools::after,.status::after{
+      content:"";
+      position:absolute;
+      inset:1px;
+      border:1px solid rgb(224 241 255 / .055);
+      border-radius:5px;
+      pointer-events:none;
+    }
+    .hierarchy{left:12px;width:clamp(156px,22vw,220px)}
+    .inspector{right:12px;width:clamp(210px,27vw,292px)}
+    .panel h2{
+      position:sticky;
+      top:0;
+      z-index:1;
+      margin:0;
+      padding:12px;
+      border-bottom:1px solid var(--line);
+      background:rgb(5 11 19 / .36);
+      color:var(--text);
+      font-size:11px;
+      font-weight:750;
+      line-height:1;
+      letter-spacing:.01em;
+    }
+    .tree{margin:0;padding:5px 0;list-style:none}
+    .tree button{
+      display:block;
+      width:100%;
+      height:29px;
+      padding:0 10px;
+      overflow:hidden;
+      border:0;
+      border-radius:0;
+      background:transparent;
+      color:#bac9d9;
+      text-align:left;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      font-weight:540;
+    }
+    .tree button:hover{border-color:transparent;background:rgb(232 244 255 / .07);box-shadow:none}
+    .tree button[aria-selected=true]{background:var(--accent-soft);box-shadow:inset 2px 0 var(--accent),inset 0 1px rgb(255 255 255 / .035);color:#f4faff}
+    canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
+    .runtime-sandbox{position:absolute;inset:0;z-index:2;width:100%;height:100%;border:0;background:#050b13}
+    .transform-tools{
+      position:absolute;
+      z-index:3;
+      top:12px;
+      left:50%;
+      display:flex;
+      gap:4px;
+      padding:4px;
+      border:1px solid var(--line-strong);
+      border-radius:7px;
+      background:rgb(4 9 16 / .42);
+      box-shadow:0 18px 44px rgb(0 3 10 / .46),inset 0 1px rgb(255 255 255 / .14),inset 0 0 0 1px rgb(255 255 255 / .025);
+      transform:translateX(-50%);
+      backdrop-filter:blur(16px) saturate(125%);
+      -webkit-backdrop-filter:blur(16px) saturate(125%);
+      contain:paint;
+    }
+    .transform-tools .icon{border-color:transparent;background:transparent}
+    .status{
+      position:absolute;
+      z-index:3;
+      left:calc(clamp(156px,22vw,220px) + 24px);
+      bottom:12px;
+      max-width:280px;
+      margin:0;
+      overflow:hidden;
+      padding:7px 9px;
+      border:1px solid var(--line);
+      border-radius:4px;
+      background:rgb(4 9 16 / .46);
+      color:#aebdcd;
+      box-shadow:0 14px 34px rgb(0 3 10 / .38),inset 0 1px rgb(255 255 255 / .1);
+      font:10px/1 "SFMono-Regular",Consolas,monospace;
+      font-variant-numeric:tabular-nums;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      pointer-events:none;
+      backdrop-filter:blur(14px) saturate(120%);
+      -webkit-backdrop-filter:blur(14px) saturate(120%);
+      contain:paint;
+    }
+    .inspector-body{padding:12px;border:0}
+    .empty{margin:12px;color:var(--muted);font-size:12px}
+    .field{display:grid;grid-template-columns:58px minmax(0,1fr);align-items:center;gap:8px;margin-bottom:10px;font-size:11px}
+    .field input[type=text],.field input[type=number]{
+      width:100%;
+      height:29px;
+      padding:0 7px;
+      border:1px solid var(--line);
+      border-radius:3px;
+      background:rgb(1 5 10 / .42);
+      box-shadow:inset 0 1px 3px rgb(0 0 0 / .22),inset 0 1px rgb(255 255 255 / .035);
+      color:var(--text);
+    }
+    .field input[type=checkbox]{width:15px;height:15px;margin:0;accent-color:var(--accent)}
+    .field input[type=color]{width:40px;height:29px;padding:2px;border:1px solid var(--line);border-radius:3px;background:rgb(1 5 10 / .42);box-shadow:inset 0 1px rgb(255 255 255 / .035)}
+    .vectors{width:100%;border-collapse:collapse;font-size:10px}
+    .vectors th{padding:5px 2px;text-align:left;color:var(--muted);font-weight:650}
+    .vectors td{padding:2px}
+    .vectors input{
+      width:100%;
+      min-width:0;
+      height:27px;
+      padding:0 5px;
+      border:1px solid var(--line);
+      border-radius:3px;
+      background:rgb(1 5 10 / .42);
+      box-shadow:inset 0 1px 3px rgb(0 0 0 / .22),inset 0 1px rgb(255 255 255 / .035);
+      color:var(--text);
+      font:10px/1 "SFMono-Regular",Consolas,monospace;
+      font-variant-numeric:tabular-nums;
+    }
+    [data-play-state=playing] .transform-tools,[data-play-state=playing] .panel{opacity:.38;pointer-events:none}
+    [data-sync=dirty] .save{box-shadow:inset 0 1px rgb(255 255 255 / .44),0 0 0 1px rgb(99 184 255 / .28),0 9px 30px rgb(45 148 229 / .34)}
+    @media (max-width:760px){
+      .revision,.toolbar-divider{display:none}
+      .title{width:42%;padding-left:4px}
+      .topbar{gap:5px;padding-inline:8px}
+      .toolbar{gap:3px}
+      .toolbar .icon{width:29px}
+      .hierarchy{left:8px;width:150px}
+      .inspector{right:8px;width:210px}
+      .status{left:168px;max-width:180px}
+    }
+    @media (max-width:540px){
+      main{grid-template-rows:50px auto minmax(0,1fr)}
+      .title{min-width:72px;width:36%}
+      .toolbar [data-import],.toolbar [data-export],.toolbar [data-undo],.toolbar [data-redo]{display:none}
+      .panel{top:auto;bottom:8px;height:176px}
+      .hierarchy{left:8px;width:calc(50% - 12px)}
+      .inspector{right:8px;width:calc(50% - 12px)}
+      .transform-tools{top:8px}
+      .status{left:8px;bottom:192px;max-width:calc(100% - 16px)}
+    }
+    @media (prefers-reduced-transparency:reduce){
+      .topbar,.panel,.panel h2,.transform-tools,.status{background:#09111c;backdrop-filter:none;-webkit-backdrop-filter:none}
+    }
+    @media (prefers-reduced-motion:no-preference){
+      .panel{animation:panel-arrive .46s cubic-bezier(.16,1,.3,1) both}
+      .inspector{animation-delay:.06s}
+      .transform-tools{animation:toolbar-arrive .42s cubic-bezier(.16,1,.3,1) both}
+    }
+    @media (prefers-reduced-motion:reduce){
+      *,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important}
+    }
+    @keyframes panel-arrive{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes toolbar-arrive{from{opacity:0;transform:translate(-50%,-6px)}to{opacity:1;transform:translate(-50%,0)}}
   </style>
 </head>
 <body>
-  <main data-three-editor data-phase="M4" data-sync="loading" data-play-state="stopped" data-webgl="pending">
-    <header>
-      <span class="mark" aria-hidden="true"></span>
-      <span class="phase">M4</span>
+  <main data-three-editor data-phase="M6" data-ui-mode="scene-only" data-ui-direction="ethereal-glass" data-visual-style="taste-ethereal-glass" data-sync="loading" data-play-state="stopped" data-webgl="pending">
+    <header class="topbar">
       <input class="title" data-title aria-label="Project title" maxlength="120" disabled>
       <span class="spacer"></span>
       <output class="revision" data-revision aria-label="Project revision">not loaded</output>
-      <button class="icon" type="button" data-undo aria-label="Undo" title="Undo" disabled>↶</button>
-      <button class="icon" type="button" data-redo aria-label="Redo" title="Redo" disabled>↷</button>
-      <button class="icon" type="button" data-import aria-label="Import asset" title="Import GLB or texture" disabled>+</button>
-      <input class="asset-input" type="file" data-asset-input accept=".glb,.png,.jpg,.jpeg,model/gltf-binary,image/png,image/jpeg">
-      <button class="icon" type="button" data-export aria-label="Export project" title="Export project" disabled>↓</button>
-      <button class="icon" type="button" data-play aria-label="Play" title="Play" disabled>▶</button>
-      <button class="icon" type="button" data-stop aria-label="Stop" title="Stop" disabled>■</button>
-      <button type="button" data-save disabled>Save</button>
+      <nav class="toolbar" aria-label="Editor actions">
+        <button class="icon" type="button" data-undo aria-label="Undo" title="Undo" disabled>↶</button>
+        <button class="icon" type="button" data-redo aria-label="Redo" title="Redo" disabled>↷</button>
+        <span class="toolbar-divider" aria-hidden="true"></span>
+        <button class="icon" type="button" data-import aria-label="Import asset" title="Import GLB or texture" disabled>+</button>
+        <input class="asset-input" type="file" data-asset-input accept=".glb,.png,.jpg,.jpeg,model/gltf-binary,image/png,image/jpeg">
+        <button class="icon" type="button" data-export aria-label="Export project" title="Export project" disabled>↓</button>
+        <span class="toolbar-divider" aria-hidden="true"></span>
+        <button class="icon" type="button" data-play aria-label="Play" title="Play" disabled>▶</button>
+        <button class="icon" type="button" data-stop aria-label="Stop" title="Stop" disabled>■</button>
+        <button class="icon" type="button" data-fullscreen aria-label="Enter fullscreen" title="Enter fullscreen" hidden>⛶</button>
+        <button class="save" type="button" data-save disabled>Save</button>
+      </nav>
     </header>
     <aside class="conflict" data-conflict hidden>
       <span>External revision available</span>
@@ -415,35 +817,29 @@ function viewHtml(script: string): string {
     </aside>
     <section class="workspace">
       <aside class="panel hierarchy">
-        <h2>Scene</h2>
-        <ul class="tree" data-hierarchy></ul>
+        <h2>Scene graph</h2>
+        <ul class="tree" data-hierarchy data-scene-tree></ul>
       </aside>
-      <section class="viewport" data-viewport>
-        <nav class="transform-tools" aria-label="Transform mode">
-          <button class="icon" type="button" data-mode="translate" aria-label="Move" title="Move" aria-pressed="true">M</button>
-          <button class="icon" type="button" data-mode="rotate" aria-label="Rotate" title="Rotate" aria-pressed="false">R</button>
-          <button class="icon" type="button" data-mode="scale" aria-label="Scale" title="Scale" aria-pressed="false">S</button>
-        </nav>
-        <canvas data-three-canvas tabindex="0" aria-label="Three.js project viewport"></canvas>
+      <section class="editor-surface">
+        <section class="viewport" data-viewport>
+          <nav class="transform-tools" aria-label="Transform mode">
+            <button class="icon" type="button" data-mode="translate" aria-label="Move" title="Move" aria-pressed="true">↔</button>
+            <button class="icon" type="button" data-mode="rotate" aria-label="Rotate" title="Rotate" aria-pressed="false">↻</button>
+            <button class="icon" type="button" data-mode="scale" aria-label="Scale" title="Scale" aria-pressed="false">⤢</button>
+          </nav>
+          <canvas data-three-canvas tabindex="0" aria-label="Three.js project viewport"></canvas>
+          <iframe
+            class="runtime-sandbox"
+            data-runtime-sandbox
+            title="Isolated Three.js runtime"
+            sandbox="allow-scripts"
+            hidden
+          ></iframe>
+        </section>
         <p class="status" data-status role="status">Connecting</p>
-        <div class="scene-settings">
-          <select data-layout aria-label="Layout" disabled>
-            <option value="classic">Classic</option>
-            <option value="wide">Wide</option>
-            <option value="compact">Compact</option>
-          </select>
-          <select data-camera-view aria-label="Camera view" disabled>
-            <option value="broadcast">Broadcast</option>
-            <option value="overhead">Overhead</option>
-            <option value="courtside">Courtside</option>
-          </select>
-        </div>
       </section>
       <aside class="panel inspector">
-        <nav class="panel-tabs" role="tablist" aria-label="Editor detail">
-          <button type="button" role="tab" data-detail-tab="inspector" aria-selected="true">Inspector</button>
-          <button type="button" role="tab" data-detail-tab="script" aria-selected="false">Script</button>
-        </nav>
+        <h2>Properties</h2>
         <section data-inspector-pane>
           <p class="empty" data-inspector-empty>Select an object</p>
           <fieldset class="inspector-body" data-inspector-fields hidden>
@@ -460,11 +856,29 @@ function viewHtml(script: string): string {
             <label class="field" data-material-row hidden><span>Color</span><input type="color" data-material-color aria-label="Material color"></label>
           </fieldset>
         </section>
-        <section class="script-pane" data-script-pane hidden>
-          <textarea class="script-source" data-script-source aria-label="Game script" spellcheck="false" disabled></textarea>
-          <pre class="runtime-output" data-runtime-output>No Play diagnostics</pre>
-        </section>
       </aside>
+      <section hidden aria-hidden="true">
+        <button type="button" data-navigation-tab="scene" aria-selected="true" tabindex="-1">Scene</button>
+        <ul data-file-tree></ul>
+        <section data-file-workspace>
+          <span data-file-path>No file selected</span>
+          <textarea data-file-source aria-label="Workspace file" spellcheck="false" disabled></textarea>
+        </section>
+        <section data-script-pane>
+          <textarea data-script-source aria-label="Game script" spellcheck="false" disabled></textarea>
+          <pre data-runtime-output>No Play diagnostics</pre>
+        </section>
+        <select data-layout aria-label="Layout" disabled>
+          <option value="classic">Classic</option>
+          <option value="wide">Wide</option>
+          <option value="compact">Compact</option>
+        </select>
+        <select data-camera-view aria-label="Camera view" disabled>
+          <option value="broadcast">Broadcast</option>
+          <option value="overhead">Overhead</option>
+          <option value="courtside">Courtside</option>
+        </select>
+      </section>
     </section>
   </main>
   <script>${script.replaceAll('</script', '<\\/script')}</script>
@@ -472,24 +886,38 @@ function viewHtml(script: string): string {
 </html>`
 }
 
-function createServer(store: ProjectStore): McpServer {
+function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServer {
   const server = new McpServer({
     name: 'threejs-editor-mcp',
     version: '0.1.0',
   })
+  const loadWorkspace = async (projectId: string): Promise<WorkspaceSnapshot | undefined> => (
+    await workspaces.has(projectId) ? workspaces.load(projectId) : undefined
+  )
 
   registerAppTool(server, 'list_projects', {
     title: 'List Three.js projects',
-    description: 'Lists projects available in the configured Three.js project root.',
+    description: 'Lists Scene projects and explicitly registered local or managed workspaces.',
     inputSchema: {},
     outputSchema: z.object({ projects: z.array(summarySchema) }),
     _meta: { ui: { visibility: ['model'] } },
   }, async () => {
-    const projects = await store.list()
+    const [sceneProjects, workspaceProjects] = await Promise.all([
+      store.list(),
+      workspaces.list(),
+    ])
+    const projects = [
+      ...sceneProjects,
+      ...workspaceProjects,
+    ].sort((left, right) => left.projectId.localeCompare(right.projectId))
     return textResult(
       projects.length === 0
         ? 'No Three.js projects exist.'
-        : `Three.js projects: ${projects.map(project => `${project.projectId} (${project.title})`).join(', ')}`,
+        : `Three.js projects: ${projects.map(project => (
+          'kind' in project
+            ? `${project.projectId} (${project.title}, ${project.kind})`
+            : `${project.projectId} (${project.title})`
+        )).join(', ')}`,
       { projects },
     )
   })
@@ -510,8 +938,34 @@ function createServer(store: ProjectStore): McpServer {
       },
     },
   }, async ({ projectId, title, template }) => {
+    if (await workspaces.has(projectId)) throw new Error(`project ${projectId} already exists`)
     const summary = await store.create(projectId, title ?? projectId, template)
     return summaryResult('Created Three.js project', summary)
+  })
+
+  registerAppTool(server, 'create_workspace', {
+    title: 'Create managed Three.js workspace',
+    description: 'Creates a managed multi-file Three.js workspace and opens its editor.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      title: z.string().trim().min(1).max(120).optional(),
+      template: z.enum(['empty', 'pong']).default('pong'),
+    },
+    outputSchema: workspaceSummarySchema,
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+        visibility: ['model'],
+      },
+    },
+  }, async ({ projectId, title, template }) => {
+    if ((await store.list()).some(project => project.projectId === projectId)) {
+      throw new Error(`project ${projectId} already exists`)
+    }
+    return summaryResult(
+      'Created managed Three.js workspace',
+      await workspaces.createManaged(projectId, title ?? projectId, template),
+    )
   })
 
   registerAppTool(server, 'open_editor', {
@@ -525,10 +979,13 @@ function createServer(store: ProjectStore): McpServer {
         visibility: ['model'],
       },
     },
-  }, async ({ projectId }) => summaryResult(
-    'Opened Three.js project',
-    await store.load(projectId),
-  ))
+  }, async ({ projectId }) => {
+    const workspace = await loadWorkspace(projectId)
+    return summaryResult(
+      workspace === undefined ? 'Opened Three.js project' : 'Opened Three.js workspace',
+      workspace ?? await store.load(projectId),
+    )
+  })
 
   registerAppTool(server, 'inspect_project', {
     title: 'Inspect Three.js project',
@@ -538,6 +995,8 @@ function createServer(store: ProjectStore): McpServer {
       projectId: projectIdSchema,
       title: z.string(),
       revision: revisionSchema,
+      kind: z.enum(['scene-project', 'linked-workspace', 'managed-workspace']),
+      workspace: workspaceViewSchema.optional(),
       layout: editorLayoutSchema,
       cameraView: cameraViewSchema,
       operations: z.array(z.string()),
@@ -551,7 +1010,8 @@ function createServer(store: ProjectStore): McpServer {
     }),
     _meta: { ui: { visibility: ['model'] } },
   }, async ({ projectId }) => {
-    const snapshot = await store.load(projectId)
+    const workspace = await loadWorkspace(projectId)
+    const snapshot = workspace ?? await store.load(projectId)
     const parsedScene = new THREE.ObjectLoader().parse(withoutTextureImages(snapshot.project.scene))
     if (!(parsedScene instanceof THREE.Scene)) {
       throw new Error('project scene is not a Three.js Scene')
@@ -564,13 +1024,15 @@ function createServer(store: ProjectStore): McpServer {
     const objects = sceneSummary(parsedScene)
     const scriptError = syntaxError(snapshot.project.script.source)
     const [diagnostics, assets] = await Promise.all([
-      store.readDiagnostics(projectId),
-      store.listAssets(projectId),
+      workspace === undefined ? store.readDiagnostics(projectId) : undefined,
+      workspace === undefined ? store.listAssets(projectId) : [],
     ])
     const detail = {
       projectId: snapshot.projectId,
       title: snapshot.title,
       revision: snapshot.revision,
+      kind: workspace?.kind ?? 'scene-project' as const,
+      ...workspace === undefined ? {} : { workspace: workspaceView(workspace) },
       ...editor,
       objects,
       assets,
@@ -584,6 +1046,158 @@ function createServer(store: ProjectStore): McpServer {
       `Three.js project inspection:\n${JSON.stringify(detail)}`,
       detail,
     )
+  })
+
+  registerAppTool(server, 'inspect_editor', {
+    title: 'Inspect Three.js editor objects',
+    description: 'Lists object UUIDs and the official Three.js Editor commands available for each object.',
+    inputSchema: { projectId: projectIdSchema },
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      title: z.string(),
+      revision: revisionSchema,
+      objects: z.array(editorObjectSchema),
+    }),
+    _meta: { ui: { visibility: ['model'] } },
+  }, async ({ projectId }) => {
+    const workspace = await loadWorkspace(projectId)
+    const snapshot = workspace ?? await store.load(projectId)
+    const detail = {
+      projectId,
+      title: snapshot.title,
+      revision: snapshot.revision,
+      objects: inspectEditor(snapshot.project),
+    }
+    return textResult(`Three.js editor objects:\n${JSON.stringify(detail)}`, detail)
+  })
+
+  registerAppTool(server, 'apply_editor_commands', {
+    title: 'Apply Three.js Editor commands',
+    description: 'Applies one revision-checked official Three.js Editor MultiCmdsCommand batch.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      baseRevision: revisionSchema,
+      operations: z.array(editorCommandSchema).min(1).max(50),
+    },
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      title: z.string().optional(),
+      revision: revisionSchema.optional(),
+      kind: z.enum(['linked-workspace', 'managed-workspace']).optional(),
+      commandTypes: z.array(z.string()).optional(),
+      history: z.unknown().optional(),
+      conflict: z.literal(true).optional(),
+      currentRevision: revisionSchema.optional(),
+    }),
+    _meta: { ui: { visibility: ['model'] } },
+  }, async ({ projectId, baseRevision, operations }) => {
+    try {
+      const workspace = await loadWorkspace(projectId)
+      const snapshot = workspace ?? await store.load(projectId)
+      if (snapshot.revision !== baseRevision) {
+        throw new RevisionConflictError(snapshot.revision)
+      }
+      const applied = applyEditorCommands(snapshot.project, operations)
+      const summary = workspace === undefined
+        ? await store.push(projectId, baseRevision, applied.project)
+        : await workspaces.apply(
+          projectId,
+          baseRevision,
+          workspaceProjectChanges(applied.project),
+        )
+      return textResult(
+        `Applied official Three.js Editor commands to ${projectId}: `
+        + applied.commandTypes.join(', '),
+        {
+          projectId,
+          title: summary.title,
+          revision: summary.revision,
+          ...'kind' in summary ? { kind: summary.kind } : {},
+          commandTypes: applied.commandTypes,
+          history: applied.history,
+        },
+      )
+    } catch (error) {
+      if (!(error instanceof RevisionConflictError)) throw error
+      return conflictResult(projectId, error)
+    }
+  })
+
+  registerAppTool(server, 'read_project_files', {
+    title: 'Read Three.js workspace files',
+    description: 'Reads bounded files from an explicitly registered workspace by projectId.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      files: z.array(z.object({
+        path: workspacePathSchema,
+        startLine: z.number().int().positive().optional(),
+        endLine: z.number().int().positive().optional(),
+      })).min(1).max(20),
+    },
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      files: z.array(workspaceReadSchema),
+    }),
+    _meta: { ui: { visibility: ['model', 'app'] } },
+  }, async ({ projectId, files }) => {
+    const snapshot = await workspaces.load(projectId)
+    const result = await workspaces.readFiles(projectId, files)
+    return textResult(`Workspace files:\n${JSON.stringify(result)}`, {
+      projectId,
+      revision: snapshot.revision,
+      files: result,
+    })
+  })
+
+  registerAppTool(server, 'search_project', {
+    title: 'Search Three.js workspace',
+    description: 'Searches paths and bounded text content in an explicitly registered workspace.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      query: z.string().min(1).max(200),
+      limit: z.number().int().min(1).max(100).default(50),
+    },
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      matches: z.array(z.object({
+        path: workspacePathSchema,
+        line: z.number().int().positive().optional(),
+        text: z.string().optional(),
+      })),
+    }),
+    _meta: { ui: { visibility: ['model'] } },
+  }, async ({ projectId, query, limit }) => {
+    const snapshot = await workspaces.load(projectId)
+    const matches = await workspaces.search(projectId, query, limit)
+    return textResult(`Workspace search results:\n${JSON.stringify(matches)}`, {
+      projectId,
+      revision: snapshot.revision,
+      matches,
+    })
+  })
+
+  registerAppTool(server, 'apply_project_files', {
+    title: 'Apply Three.js workspace file changes',
+    description: 'Atomically writes, moves, or deletes workspace files at one exact revision.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      baseRevision: revisionSchema,
+      changes: z.array(workspaceChangeSchema).min(1).max(100),
+    },
+    outputSchema: workspaceConflictOutputSchema,
+    _meta: { ui: { visibility: ['model', 'app'] } },
+  }, async ({ projectId, baseRevision, changes }) => {
+    try {
+      return summaryResult(
+        'Updated Three.js workspace files',
+        await workspaces.apply(projectId, baseRevision, changes),
+      )
+    } catch (error) {
+      if (!(error instanceof RevisionConflictError)) throw error
+      return conflictResult(projectId, error)
+    }
   })
 
   registerAppTool(server, 'apply_scene_changes', {
@@ -653,7 +1267,8 @@ function createServer(store: ProjectStore): McpServer {
     }),
     _meta: { ui: { visibility: ['model'] } },
   }, async ({ projectId }) => {
-    const snapshot = await store.load(projectId)
+    const workspace = await loadWorkspace(projectId)
+    const snapshot = workspace ?? await store.load(projectId)
     const errors: string[] = []
     const warnings: string[] = []
     try {
@@ -670,19 +1285,25 @@ function createServer(store: ProjectStore): McpServer {
     }
     const scriptError = syntaxError(snapshot.project.script.source)
     if (scriptError !== undefined) errors.push(`script syntax error: ${scriptError}`)
-    const diagnostics = await store.readDiagnostics(projectId)
+    const diagnostics = workspace === undefined
+      ? await store.readDiagnostics(projectId)
+      : undefined
     if (diagnostics === undefined) {
-      warnings.push('Play diagnostics have not been reported')
-    } else if (diagnostics.testedRevision !== snapshot.revision) {
-      warnings.push(`Play diagnostics apply to older revision ${diagnostics.testedRevision}`)
+      if (workspace === undefined) warnings.push('Play diagnostics have not been reported')
     } else {
-      errors.push(...diagnostics.errors)
-      warnings.push(...diagnostics.warnings)
+      if (diagnostics.testedRevision !== snapshot.revision) {
+        warnings.push(`Play diagnostics apply to older revision ${diagnostics.testedRevision}`)
+      } else {
+        errors.push(...diagnostics.errors)
+        warnings.push(...diagnostics.warnings)
+      }
     }
-    try {
-      await store.listAssets(projectId)
-    } catch (error) {
-      errors.push(`asset validation error: ${error instanceof Error ? error.message : String(error)}`)
+    if (workspace === undefined) {
+      try {
+        await store.listAssets(projectId)
+      } catch (error) {
+        errors.push(`asset validation error: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
     return textResult(
       `Checked ${projectId} at revision ${snapshot.revision}: `
@@ -713,16 +1334,21 @@ function createServer(store: ProjectStore): McpServer {
       changed: z.boolean(),
       revision: revisionSchema,
       project: projectSchema.optional(),
+      workspace: workspaceViewSchema.optional(),
     }),
     _meta: { ui: { visibility: ['app'] } },
   }, async ({ projectId, currentRevision }) => {
-    const snapshot = await store.load(projectId)
+    const workspace = await loadWorkspace(projectId)
+    const snapshot = workspace ?? await store.load(projectId)
     const changed = currentRevision !== snapshot.revision
     return textResult(changed ? 'Project snapshot returned.' : 'Project is current.', {
       projectId,
       changed,
       revision: snapshot.revision,
-      ...changed ? { project: snapshot.project } : {},
+      ...changed ? {
+        project: snapshot.project,
+        ...workspace === undefined ? {} : { workspace: workspaceView(workspace) },
+      } : {},
     })
   })
 
@@ -734,34 +1360,24 @@ function createServer(store: ProjectStore): McpServer {
       baseRevision: revisionSchema,
       project: projectSchema,
     },
-    outputSchema: z.object({
-      projectId: projectIdSchema,
-      title: z.string().optional(),
-      revision: revisionSchema.optional(),
-      conflict: z.literal(true).optional(),
-      currentRevision: revisionSchema.optional(),
-    }),
+    outputSchema: workspaceConflictOutputSchema,
     _meta: { ui: { visibility: ['app'] } },
   }, async ({ projectId, baseRevision, project }) => {
     try {
+      const workspace = await loadWorkspace(projectId)
       return summaryResult(
         'Saved Three.js project',
-        await store.push(projectId, baseRevision, project),
+        workspace === undefined
+          ? await store.push(projectId, baseRevision, project)
+          : await workspaces.apply(
+            projectId,
+            baseRevision,
+            workspaceProjectChanges(project),
+          ),
       )
     } catch (error) {
       if (!(error instanceof RevisionConflictError)) throw error
-      return {
-        isError: true,
-        content: [{
-          type: 'text',
-          text: `Revision conflict: current revision is ${error.currentRevision}.`,
-        }],
-        structuredContent: {
-          projectId,
-          conflict: true,
-          currentRevision: error.currentRevision,
-        },
-      }
+      return conflictResult(projectId, error)
     }
   })
 
@@ -871,13 +1487,46 @@ function createServer(store: ProjectStore): McpServer {
     }),
     _meta: { ui: { visibility: ['app'] } },
   }, async ({ projectId }) => {
-    const json = `${JSON.stringify(await store.exportProject(projectId), null, 2)}\n`
+    const workspace = await loadWorkspace(projectId)
+    const json = `${JSON.stringify(
+      workspace === undefined
+        ? await store.exportProject(projectId)
+        : await workspaces.export(projectId),
+      null,
+      2,
+    )}\n`
     return textResult(`Exported Three.js project ${projectId}.`, {
-      filename: `${projectId}.threejs-project.json`,
+      filename: workspace === undefined
+        ? `${projectId}.threejs-project.json`
+        : `${projectId}.threejs-workspace.json`,
       mediaType: 'application/json',
       json,
     })
   })
+
+  server.registerResource('m5-runtime-module-graph', M5_RUNTIME_RESOURCE_URI, {
+    title: 'M5 isolated runtime module graph',
+    description: 'A deterministic two-module WebGL2 and WebGPU capability fixture.',
+    mimeType: 'application/json',
+  }, async (): Promise<ReadResourceResult> => ({
+    contents: [{
+      uri: M5_RUNTIME_RESOURCE_URI,
+      mimeType: 'application/json',
+      text: JSON.stringify(M5_RUNTIME_MANIFEST),
+    }],
+  }))
+
+  server.registerResource('m5-official-editor-command-proof', M5_COMMAND_PROOF_RESOURCE_URI, {
+    title: 'M5 Three.js Editor command proof',
+    description: 'Round-trip evidence from the pinned Three.js r185 Command and History sources.',
+    mimeType: 'application/json',
+  }, async (): Promise<ReadResourceResult> => ({
+    contents: [{
+      uri: M5_COMMAND_PROOF_RESOURCE_URI,
+      mimeType: 'application/json',
+      text: JSON.stringify(officialCommandProof()),
+    }],
+  }))
 
   registerAppResource(server, 'threejs-editor-view', RESOURCE_URI, {
     mimeType: RESOURCE_MIME_TYPE,
@@ -910,6 +1559,8 @@ function createServer(store: ProjectStore): McpServer {
 const { values } = parseArgs({
   options: {
     root: { type: 'string' },
+    'workspace-root': { type: 'string', multiple: true },
+    workspace: { type: 'string', multiple: true },
   },
   strict: true,
 })
@@ -918,4 +1569,11 @@ if (root === undefined || root === '') {
   throw new Error('project root is required: pass --root or THREEJS_EDITOR_PROJECT_ROOT')
 }
 
-await createServer(new ProjectStore(root)).connect(new StdioServerTransport())
+await createServer(
+  new ProjectStore(root),
+  new WorkspaceStore(
+    root,
+    values['workspace-root'] ?? [],
+    (values.workspace ?? []).map(workspaceRegistration),
+  ),
+).connect(new StdioServerTransport())

@@ -1,0 +1,199 @@
+{
+  "date": "2026-08-18",
+  "status": "pass-approved",
+  "source": {
+    "repository": "threejs-editor-mcp",
+    "branch": "main",
+    "baseCommit": "da30eba6b94bad968c037c1f4946a69a749bea0d",
+    "workingTreeClean": false
+  },
+  "harness": {
+    "url": "http://127.0.0.1:51829",
+    "profileRoot": "/tmp/threejs-editor-vfx-home-20260818-0012",
+    "projectRoot": "/tmp/threejs-editor-vfx-projects-20260818-0012",
+    "workspaceRoot": "/tmp/threejs-editor-vfx-workspaces-20260818-0012",
+    "browser": "system Chrome through Playwright",
+    "transport": "deterministic replay",
+    "realExternalModelRound": false
+  },
+  "catalog": [
+    "mcp__threejs__create_project",
+    "mcp__threejs__create_workspace",
+    "mcp__threejs__open_editor"
+  ],
+  "workspace": {
+    "projectId": "linked-game",
+    "kind": "linked-workspace",
+    "entry": "src/main.js",
+    "backend": "webgl",
+    "registeredByServerConfiguration": true,
+    "modelReceivedAbsolutePath": false,
+    "files": [
+      "package.json",
+      "src/game-state.js",
+      "src/main.js",
+      "src/scene.json"
+    ],
+    "gitDiffObserved": true
+  },
+  "revisions": {
+    "initial": "972935366f628f9520938bc9bc706ba56b3bbe0e9908cfa73cd4c55755fd851b",
+    "humanScene": "b26a3d08d9870570599e2ab7e6e5da198ca0b33052c635c6ff294756d2f9c5e5",
+    "ai": "a9c8ffb8d90a088c72fccfd6adedfb7f9a25451b998ca505e50a03bcde339885",
+    "external": "67e43f380496c829a566e701d8ba2fa83aa04df0e75de6bbcaacc49a0081bf11",
+    "head": "67e43f380496c829a566e701d8ba2fa83aa04df0e75de6bbcaacc49a0081bf11",
+    "manifestFilenameHashesValid": true
+  },
+  "humanManifest": {
+    "package.json": {
+      "sha256": "5fb9b48283f03c7b49911a935267dc17140935420d522cdb0ab0386eb471cb64",
+      "size": 118,
+      "text": true
+    },
+    "src/game-state.js": {
+      "sha256": "f7a6a7f61f6193f8ecdbbc8b8d18a2f6a7366e9d3aeb9447b01fa82f0e4e933d",
+      "size": 78,
+      "text": true
+    },
+    "src/main.js": {
+      "sha256": "6d47703c46e6d7b956e605ceebde88cff1c99a1ba137d9c3c959cae3357b7cd7",
+      "size": 150,
+      "text": true
+    },
+    "src/scene.json": {
+      "sha256": "b118f2ba6fbddd5dab3690b2409c49a8f643402ee50f4539548f0763e9652de6",
+      "size": 7147,
+      "text": true
+    }
+  },
+  "transactions": {
+    "humanScene": {
+      "id": "eae3ad35-0515-40ef-8be1-f155f5eea78a",
+      "baseRevision": "972935366f628f9520938bc9bc706ba56b3bbe0e9908cfa73cd4c55755fd851b",
+      "targetRevision": "b26a3d08d9870570599e2ab7e6e5da198ca0b33052c635c6ff294756d2f9c5e5",
+      "paths": [
+        "src/scene.json"
+      ],
+      "status": "committed"
+    },
+    "ai": {
+      "id": "78354593-8f39-4eef-af69-a03586a2ba59",
+      "baseRevision": "b26a3d08d9870570599e2ab7e6e5da198ca0b33052c635c6ff294756d2f9c5e5",
+      "targetRevision": "a9c8ffb8d90a088c72fccfd6adedfb7f9a25451b998ca505e50a03bcde339885",
+      "paths": [
+        "src/main.js",
+        "src/game-state.js"
+      ],
+      "status": "committed"
+    },
+    "external": {
+      "id": "d554ee0b-7d46-4b7e-8826-4d89dce0c964",
+      "baseRevision": "a9c8ffb8d90a088c72fccfd6adedfb7f9a25451b998ca505e50a03bcde339885",
+      "targetRevision": "67e43f380496c829a566e701d8ba2fa83aa04df0e75de6bbcaacc49a0081bf11",
+      "paths": [
+        "src/game-state.js"
+      ],
+      "status": "committed"
+    }
+  },
+  "collaboration": {
+    "humanUiMode": "scene-only",
+    "visibleSourceEditor": false,
+    "visibleLegacyScenePresets": false,
+    "visibleVfxLabel": false,
+    "selectedUiDirection": "A",
+    "uiDirection": "ethereal-glass",
+    "alternativeDirectionsRuntimeEnabled": false,
+    "visualStyle": "taste-ethereal-glass",
+    "tasteSkills": [
+      "redesign-existing-projects",
+      "high-end-visual-design"
+    ],
+    "tasteSkillSymlinks": 13,
+    "floatingPanelAlpha": 0.46,
+    "sceneBackground": "#050b13",
+    "humanOfficialCommand": "SetPositionCommand",
+    "humanSaveAgentReplies": 0,
+    "nextComposerMessageStartedAgentRound": true,
+    "aiUsedExactHumanRevision": true,
+    "aiAtomicFileCount": 2,
+    "cleanAppAutoRefreshed": true,
+    "sameEditorCard": true,
+    "dirtyAppEnteredConflict": true,
+    "dirtySceneTransformPreserved": true,
+    "explicitExternalLoadRequired": true
+  },
+  "fullscreen": {
+    "x": 0,
+    "y": 0,
+    "width": 1280,
+    "height": 1000,
+    "sameIframe": true,
+    "sameBridge": true
+  },
+  "compactLayout": {
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "canvas": {
+      "width": 390,
+      "height": 745
+    },
+    "documentScrollWidth": 390,
+    "hierarchy": {
+      "left": 8,
+      "right": 191,
+      "top": 660
+    },
+    "inspector": {
+      "left": 199,
+      "right": 382,
+      "top": 660
+    },
+    "panelsOverlap": false
+  },
+  "safety": {
+    "staleRevisionRejected": true,
+    "pathTraversalRejected": true,
+    "absolutePathRejected": true,
+    "metadataPathRejected": true,
+    "symlinkRejected": true,
+    "oversizeRejected": true,
+    "binaryRoundTrip": true,
+    "unknownTextRoundTrip": true,
+    "crashRecovery": true,
+    "externalEditNotOverwrittenDuringRecovery": true
+  },
+  "checks": {
+    "threejsReleaseCheck": "pass",
+    "dshMcpAppsCheck": "pass",
+    "browserE2E": "pass",
+    "unexpectedAppProblems": []
+  },
+  "artifacts": {
+    "screenshot": {
+      "path": "reports/assets/m6-human-ai-workspace.png",
+      "bytes": 97174,
+      "sha256": "cf4e1922a32f27252b4386df41a5eab8c65c2736f2e08fcbd7fe807bdf0c89d7"
+    },
+    "compactScreenshot": {
+      "path": "reports/assets/m6-vfx-editor-mobile.png",
+      "bytes": 63666,
+      "sha256": "31081366b774411d3823ad9b676d728bbe9fc14e4f0693d2d30e7a6c42a10dd0"
+    },
+    "gif": {
+      "path": ".playwright-mcp/m6-scene-editor-ethereal-glass.gif",
+      "gitignored": true,
+      "bytes": 279435,
+      "width": 960,
+      "height": 750,
+      "durationSeconds": 9.8,
+      "sourceFrames": 4,
+      "encodedFrames": 98,
+      "sha256": "6881a6650a6a5b4b83b38c98f2584438a5fe967cfbab54de611bd32ae5000e31",
+      "encodedArtifactVisuallyChecked": true,
+      "cleanCommitEvidence": false
+    }
+  }
+}

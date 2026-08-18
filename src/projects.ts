@@ -215,29 +215,38 @@ return {
   dispose() {},
 }`
 
-function createProject(title: string, template: ProjectTemplate): Project {
+export function createProject(title: string, template: ProjectTemplate): Project {
   const scene = new THREE.Scene()
   scene.name = title
-  scene.background = new THREE.Color(0x0b0d10)
+  scene.background = new THREE.Color(0x050b13)
+  scene.fog = new THREE.Fog(0x050b13, 12, 28)
 
   const camera = new THREE.PerspectiveCamera(45, 16 / 9, 0.1, 100)
   camera.name = 'Camera'
   camera.position.set(0, 8.2, 9.4)
   camera.lookAt(0, 0, 0)
 
-  scene.add(new THREE.HemisphereLight(0xa8c7ff, 0x171d28, 1.8))
-  const keyLight = new THREE.DirectionalLight(0xffffff, 3.2)
+  scene.add(new THREE.HemisphereLight(0xb8e2ff, 0x10233b, 2.4))
+  const keyLight = new THREE.DirectionalLight(0xe8f6ff, 4.1)
   keyLight.name = 'Key Light'
   keyLight.position.set(-3, 8, 5)
+  keyLight.castShadow = true
   scene.add(keyLight)
 
   if (template === 'pong') {
     const field = new THREE.Mesh(
       new THREE.PlaneGeometry(10, 6),
-      new THREE.MeshStandardMaterial({ color: 0x18202a, roughness: 0.82 }),
+      new THREE.MeshStandardMaterial({
+        color: 0x102844,
+        emissive: 0x061524,
+        emissiveIntensity: 0.42,
+        metalness: 0.2,
+        roughness: 0.48,
+      }),
     )
     field.name = 'Field'
     field.rotation.x = -Math.PI / 2
+    field.receiveShadow = true
     scene.add(field)
 
     const paddleGeometry = new THREE.BoxGeometry(0.22, 0.28, 1.2)
@@ -259,10 +268,18 @@ function createProject(title: string, template: ProjectTemplate): Project {
 
     const ball = new THREE.Mesh(
       new THREE.SphereGeometry(0.18, 24, 16),
-      new THREE.MeshStandardMaterial({ color: 0xffd166 }),
+      new THREE.MeshPhysicalMaterial({
+        color: 0xffd166,
+        emissive: 0x5c3a00,
+        emissiveIntensity: 0.2,
+        roughness: 0.24,
+        clearcoat: 0.85,
+        clearcoatRoughness: 0.18,
+      }),
     )
     ball.name = 'Ball'
     ball.position.set(0, 0.26, 0)
+    ball.castShadow = true
     scene.add(ball)
   }
 

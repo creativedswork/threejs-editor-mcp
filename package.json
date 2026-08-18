@@ -31,7 +31,8 @@
     "docs",
     "README.md",
     "README.zh-CN.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
@@ -41,8 +42,11 @@
     "test:e2e:m2": "node tests/m2-browser.mjs",
     "test:e2e:m3": "node tests/m3-browser.mjs",
     "test:e2e:m4": "node tests/m4-browser.mjs",
+    "test:e2e:m5": "node tests/m5-browser.mjs",
+    "test:e2e:m6": "node tests/m6-browser.mjs",
+    "check:upstream": "node scripts/sync-three-editor.mjs",
     "test:pack": "pnpm run build && node tests/packed-install.mjs",
-    "check": "pnpm run typecheck && pnpm run test",
+    "check": "pnpm run check:upstream && pnpm run typecheck && pnpm run test",
     "release:check": "pnpm run check && pnpm run test:pack",
     "prepack": "pnpm run build",
     "start": "node dist/server.js --root .tmp/projects"

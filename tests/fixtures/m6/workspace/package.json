@@ -1,0 +1,8 @@
+{
+  "name": "m6-linked-game",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "three": "0.185.1"
+  }
+}

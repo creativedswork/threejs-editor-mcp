@@ -90,8 +90,14 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.deepEqual(listed.tools.map(tool => tool.name), [
       'list_projects',
       'create_project',
+      'create_workspace',
       'open_editor',
       'inspect_project',
+      'inspect_editor',
+      'apply_editor_commands',
+      'read_project_files',
+      'search_project',
+      'apply_project_files',
       'apply_scene_changes',
       'check_project',
       'pull_project',
@@ -108,11 +114,20 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       resourceUri: 'ui://threejs-editor/app',
       visibility: ['model'],
     })
+    assert.deepEqual(byName.get('create_workspace')?._meta?.ui, {
+      resourceUri: 'ui://threejs-editor/app',
+      visibility: ['model'],
+    })
     assert.deepEqual(byName.get('open_editor')?._meta?.ui, {
       resourceUri: 'ui://threejs-editor/app',
       visibility: ['model'],
     })
     assert.deepEqual(byName.get('inspect_project')?._meta?.ui?.visibility, ['model'])
+    assert.deepEqual(byName.get('inspect_editor')?._meta?.ui?.visibility, ['model'])
+    assert.deepEqual(byName.get('apply_editor_commands')?._meta?.ui?.visibility, ['model'])
+    assert.deepEqual(byName.get('read_project_files')?._meta?.ui?.visibility, ['model', 'app'])
+    assert.deepEqual(byName.get('search_project')?._meta?.ui?.visibility, ['model'])
+    assert.deepEqual(byName.get('apply_project_files')?._meta?.ui?.visibility, ['model', 'app'])
     assert.deepEqual(byName.get('apply_scene_changes')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('check_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('pull_project')?._meta?.ui?.visibility, ['app'])
@@ -631,6 +646,31 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.equal(content?.text?.includes('data-three-editor'), true)
     assert.equal(content?.text?.includes('__THREE_M2__'), true)
     assert.equal(content?.text?.includes('__THREE_M4__'), true)
+    assert.equal(content?.text?.includes('__THREE_M5__'), true)
+    assert.equal(content?.text?.includes('__THREE_M6__'), true)
+    assert.equal(content?.text?.includes('data-file-tree'), true)
+    assert.equal(content?.text?.includes('data-file-source'), true)
+    assert.equal(content?.text?.includes('data-ui-mode="scene-only"'), true)
+    assert.equal(
+      content?.text?.includes('data-visual-style="taste-ethereal-glass"'),
+      true,
+    )
+    assert.equal(
+      content?.text?.includes('data-ui-direction="ethereal-glass"'),
+      true,
+    )
+    assert.equal(content?.text?.includes('>Files</button>'), false)
+    assert.equal(content?.text?.includes('>Script</button>'), false)
+    assert.equal(content?.text?.includes('class="brand"'), false)
+    assert.equal(content?.text?.includes('class="scene-settings"'), false)
+    assert.equal(content?.text?.includes('Scene graph'), true)
+    assert.equal(content?.text?.includes('Properties'), true)
+    assert.equal(content?.text?.includes('data-fullscreen'), true)
+    assert.equal(content?.text?.includes('requestDisplayMode'), true)
+    assert.equal(content?.text?.includes('data-runtime-sandbox'), true)
+    assert.equal(content?.text?.includes('sandbox="allow-scripts"'), true)
+    assert.equal(content?.text?.includes('allow-same-origin'), false)
+    assert.equal(content?.text?.match(/\.onteardown\s*=/g)?.length, 1)
     assert.equal(content?.text?.includes('<script src='), false)
     assert.equal(content?.text?.includes('<link '), false)
     assert.deepEqual(content?._meta?.ui?.csp, {
@@ -638,6 +678,51 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       resourceDomains: [],
       frameDomains: [],
       baseUriDomains: [],
+    })
+
+    const resources = await client.listResources()
+    assert.deepEqual(
+      resources.resources.map(item => item.uri).sort(),
+      [
+        'threejs-m5://official-editor/command-proof',
+        'threejs-m5://runtime/module-graph',
+        'ui://threejs-editor/app',
+      ],
+    )
+    const runtimeResource = await client.readResource({
+      uri: 'threejs-m5://runtime/module-graph',
+    })
+    const runtimeManifest = JSON.parse(runtimeResource.contents[0]?.text)
+    assert.equal(runtimeManifest.schemaVersion, 1)
+    assert.equal(runtimeManifest.entry, 'main.js')
+    assert.deepEqual(
+      runtimeManifest.modules.map(module => module.path),
+      ['color.js', 'main.js'],
+    )
+    assert.deepEqual(runtimeManifest.modules[1].dependencies, [{
+      token: '__M5_COLOR_MODULE__',
+      path: 'color.js',
+    }])
+
+    const commandResource = await client.readResource({
+      uri: 'threejs-m5://official-editor/command-proof',
+    })
+    const commandProof = JSON.parse(commandResource.contents[0]?.text)
+    assert.deepEqual(commandProof, {
+      upstream: 'three.js r185',
+      commandTypes: [
+        'AddObjectCommand',
+        'SetPositionCommand',
+        'SetMaterialValueCommand',
+        'MultiCmdsCommand',
+        'History',
+      ],
+      addObjectRoundTrip: true,
+      historyRoundTrip: true,
+      humanAiEquivalent: true,
+      batchUndoRedo: true,
+      finalPosition: [1.25, 2.5, -0.75],
+      finalRoughness: 0.35,
     })
   } finally {
     await client.close()

@@ -1,5 +1,8 @@
 import { App } from '@modelcontextprotocol/ext-apps'
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import type {
+  CallToolResult,
+  ReadResourceResult,
+} from '@modelcontextprotocol/sdk/types.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import {
@@ -7,12 +10,39 @@ import {
   type TransformControlsMode,
 } from 'three/addons/controls/TransformControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import {
+  applyOfficialEditorCommands,
+  officialCommandProof,
+  type EditorCommandOperation,
+  type OfficialCommandProof,
+} from './official-editor.js'
+import {
+  M5_COMMAND_PROOF_RESOURCE_URI,
+  M5_RUNTIME_RESOURCE_URI,
+  type M5RuntimeManifest,
+} from './m5-runtime.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
 type CameraView = 'broadcast' | 'overhead' | 'courtside'
 type Axis = 'x' | 'y' | 'z'
 type VectorProperty = 'position' | 'rotation' | 'scale'
 type AssetMediaType = 'model/gltf-binary' | 'image/png' | 'image/jpeg'
+type NavigationTab = 'scene' | 'files'
+
+interface WorkspaceFile {
+  path: string
+  sha256: string
+  size: number
+  mediaType: string
+  text: boolean
+}
+
+interface WorkspaceView {
+  kind: 'linked-workspace' | 'managed-workspace'
+  entry: string
+  backend: 'webgl' | 'webgpu' | 'raw-webgpu'
+  files: WorkspaceFile[]
+}
 
 interface EditorState {
   layout: LayoutPreset
@@ -38,6 +68,7 @@ interface Project {
 interface RemoteSnapshot {
   project: Project
   revision: string
+  workspace?: WorkspaceView
 }
 
 interface HistoryEntry {
@@ -66,6 +97,14 @@ interface GameLifecycle {
   start?: (context: RuntimeContext) => void
   update?: (context: RuntimeContext, delta: number) => void
   dispose?: (context: RuntimeContext) => void
+}
+
+interface M5RuntimeEvent {
+  channel: 'threejs-editor-m5-runtime'
+  runId: string
+  nonce: string
+  type: string
+  data?: Record<string, unknown>
 }
 
 function required<T extends Element>(selector: string): T {
@@ -158,6 +197,7 @@ function compileLifecycle(source: string): GameLifecycle {
 const root = required<HTMLElement>('[data-three-editor]')
 const viewport = required<HTMLElement>('[data-viewport]')
 const canvas = required<HTMLCanvasElement>('[data-three-canvas]')
+const runtimeFrame = required<HTMLIFrameElement>('[data-runtime-sandbox]')
 const title = required<HTMLInputElement>('[data-title]')
 const revisionOutput = required<HTMLOutputElement>('[data-revision]')
 const undo = required<HTMLButtonElement>('[data-undo]')
@@ -167,8 +207,13 @@ const assetInput = required<HTMLInputElement>('[data-asset-input]')
 const exportProjectButton = required<HTMLButtonElement>('[data-export]')
 const play = required<HTMLButtonElement>('[data-play]')
 const stop = required<HTMLButtonElement>('[data-stop]')
+const fullscreen = required<HTMLButtonElement>('[data-fullscreen]')
 const save = required<HTMLButtonElement>('[data-save]')
 const hierarchy = required<HTMLUListElement>('[data-hierarchy]')
+const fileTree = required<HTMLUListElement>('[data-file-tree]')
+const fileWorkspace = required<HTMLElement>('[data-file-workspace]')
+const filePath = required<HTMLElement>('[data-file-path]')
+const fileSource = required<HTMLTextAreaElement>('[data-file-source]')
 const status = required<HTMLElement>('[data-status]')
 const conflict = required<HTMLElement>('[data-conflict]')
 const loadExternal = required<HTMLButtonElement>('[data-load-external]')
@@ -188,6 +233,7 @@ const runtimeOutput = required<HTMLElement>('[data-runtime-output]')
 const vectorInputs = [...document.querySelectorAll<HTMLInputElement>('[data-vector][data-axis]')]
 const modeButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-mode]')]
 const detailTabs = [...document.querySelectorAll<HTMLButtonElement>('[data-detail-tab]')]
+const navigationTabs = [...document.querySelectorAll<HTMLButtonElement>('[data-navigation-tab]')]
 
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -210,6 +256,12 @@ let project: Project | undefined
 let revision: string | undefined
 let loadingId: string | undefined
 let remoteSnapshot: RemoteSnapshot | undefined
+let workspace: WorkspaceView | undefined
+let navigationTab: NavigationTab = 'scene'
+let activeFile: string | undefined
+let fileHistory: string[] = []
+let fileHistoryIndex = -1
+let fileLoading = false
 let layoutPreset: LayoutPreset = 'classic'
 let cameraView: CameraView = 'broadcast'
 let transformMode: TransformControlsMode = 'translate'
@@ -230,6 +282,15 @@ let runtimeWarnings: string[] = []
 let restoreConsoleWarn: (() => void) | undefined
 let editorDisabled = true
 let importedAssets: string[] = []
+let m5ActiveRun: { runId: string; nonce: string } | undefined
+let m5Manifest: M5RuntimeManifest | undefined
+let m5ResourceReads = 0
+let m5Events: M5RuntimeEvent[] = []
+let m5Errors: string[] = []
+let m5Ready: Record<string, unknown> | undefined
+let m5ServerCommandProof: OfficialCommandProof | undefined
+let m5MessagesAfterStop = 0
+let m5FrameAtStop: number | undefined
 
 const loader = new THREE.ObjectLoader()
 const raycaster = new THREE.Raycaster()
@@ -315,16 +376,22 @@ function refreshModeButtons(): void {
 }
 
 function refreshHistoryButtons(): void {
+  if (navigationTab === 'files') {
+    undo.disabled = fileHistoryIndex <= 0
+    redo.disabled = fileHistoryIndex < 0 || fileHistoryIndex >= fileHistory.length - 1
+    return
+  }
   undo.disabled = historyIndex <= 0
   redo.disabled = historyIndex < 0 || historyIndex >= history.length - 1
 }
 
 function refreshPlayButtons(): void {
   const playing = root.dataset.playState === 'playing'
-  play.disabled = playing || root.dataset.sync !== 'clean'
+  play.disabled = playing || navigationTab !== 'scene' || root.dataset.sync !== 'clean'
   stop.disabled = !playing
   importAssetButton.disabled = editorDisabled
     || playing
+    || navigationTab !== 'scene'
     || project === undefined
     || root.dataset.sync === 'loading'
     || root.dataset.sync === 'saving'
@@ -351,6 +418,99 @@ function setDetailTab(tab: 'inspector' | 'script'): void {
   }
 }
 
+function fileSummary(path: string | undefined): WorkspaceFile | undefined {
+  return workspace?.files.find(file => file.path === path)
+}
+
+function renderFileTree(): void {
+  fileTree.replaceChildren()
+  for (const file of workspace?.files ?? []) {
+    const item = document.createElement('li')
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = file.path
+    button.title = `${file.mediaType}, ${String(file.size)} bytes`
+    button.ariaSelected = String(file.path === activeFile)
+    button.addEventListener('click', () => {
+      void selectWorkspaceFile(file.path)
+    })
+    item.append(button)
+    fileTree.append(item)
+  }
+}
+
+async function selectWorkspaceFile(path: string): Promise<void> {
+  if (projectId === undefined || workspace === undefined || fileLoading) return
+  if (root.dataset.sync !== 'clean' && path !== activeFile) {
+    status.textContent = 'Save or undo file changes before switching files'
+    return
+  }
+  const summary = fileSummary(path)
+  if (summary === undefined) return
+  activeFile = path
+  root.dataset.activeFile = path
+  filePath.textContent = path
+  renderFileTree()
+  if (!summary.text) {
+    fileSource.value = `Binary file: ${summary.mediaType}, ${String(summary.size)} bytes`
+    fileSource.disabled = true
+    fileHistory = []
+    fileHistoryIndex = -1
+    refreshHistoryButtons()
+    status.textContent = 'Binary file is preserved but not editable'
+    return
+  }
+  fileLoading = true
+  fileSource.disabled = true
+  status.textContent = `Loading ${path}`
+  try {
+    const result = await app.callServerTool({
+      name: 'read_project_files',
+      arguments: { projectId, files: [{ path }] },
+    })
+    if (result.isError) throw new Error(resultError(result))
+    const structured = record(result.structuredContent)
+    const files = Array.isArray(structured?.files) ? structured.files : []
+    const first = record(files[0])
+    if (typeof first?.text !== 'string') throw new Error('read_project_files returned invalid text')
+    fileSource.value = first.text
+    fileHistory = [first.text]
+    fileHistoryIndex = 0
+    fileSource.disabled = editorDisabled
+    refreshHistoryButtons()
+    status.textContent = `Editing ${path}`
+  } finally {
+    fileLoading = false
+  }
+}
+
+function setNavigationTab(tab: NavigationTab, force = false): void {
+  if (tab === 'files' && workspace === undefined) return
+  if (!force && tab !== navigationTab && root.dataset.sync !== 'clean') {
+    status.textContent = 'Save or undo changes before switching views'
+    return
+  }
+  navigationTab = tab
+  root.dataset.navigation = tab
+  viewport.hidden = tab !== 'scene'
+  fileWorkspace.hidden = tab !== 'files'
+  hierarchy.hidden = tab !== 'scene'
+  fileTree.hidden = tab !== 'files'
+  for (const button of navigationTabs) {
+    button.ariaSelected = String(button.dataset.navigationTab === tab)
+  }
+  if (tab === 'scene') {
+    resizeRenderer()
+  } else if (activeFile === undefined) {
+    const first = workspace?.files.find(file => file.path === workspace?.entry && file.text)
+      ?? workspace?.files.find(file => file.text)
+      ?? workspace?.files[0]
+    if (first !== undefined) void selectWorkspaceFile(first.path)
+  }
+  refreshHistoryButtons()
+  refreshPlayButtons()
+}
+
 function setEditorDisabled(disabled: boolean): void {
   editorDisabled = disabled
   title.disabled = disabled
@@ -358,6 +518,7 @@ function setEditorDisabled(disabled: boolean): void {
   cameraViewSelect.disabled = disabled
   inspectorFields.disabled = disabled
   scriptSource.disabled = disabled
+  fileSource.disabled = disabled || fileSummary(activeFile)?.text !== true
   for (const button of modeButtons) button.disabled = disabled
   if (disabled) {
     undo.disabled = true
@@ -381,7 +542,9 @@ function setClean(nextRevision: string): void {
 
 function markDirty(message = 'Unsaved changes'): void {
   if (root.dataset.sync !== 'conflict') root.dataset.sync = 'dirty'
-  save.disabled = title.value.trim() === ''
+  save.disabled = navigationTab === 'files'
+    ? activeFile === undefined || fileSummary(activeFile)?.text !== true
+    : title.value.trim() === ''
   refreshPlayButtons()
   status.textContent = message
 }
@@ -434,6 +597,32 @@ function commitHistory(operation: string): void {
   historyIndex = history.length - 1
   refreshHistoryButtons()
   markDirty(operation)
+}
+
+function commitOfficialOperation(
+  operation: EditorCommandOperation,
+  label: string,
+): void {
+  const baseline = history[historyIndex]
+  if (baseline === undefined) return
+  pendingOperations.push(label)
+  const applied = applyOfficialEditorCommands(
+    cloneProject(baseline.project),
+    [operation],
+  )
+  root.dataset.lastOfficialCommands = applied.commandTypes.join(',')
+  replaceRuntime(applied.project as Project)
+  selectObject(scene.getObjectByProperty('uuid', operation.objectUuid))
+  const nextProject = serializeProject()
+  history = history.slice(0, historyIndex + 1)
+  history.push({
+    project: cloneProject(nextProject),
+    pendingOperations: [...pendingOperations],
+  })
+  if (history.length > 50) history.shift()
+  historyIndex = history.length - 1
+  refreshHistoryButtons()
+  markDirty(label)
 }
 
 function renderHierarchy(): void {
@@ -507,7 +696,27 @@ function setupControls(): void {
     markDirty('Transforming object')
   })
   transform.addEventListener('mouseUp', () => {
-    if (selected !== undefined) commitHistory(`Transformed ${selected.name || selected.type}`)
+    if (selected === undefined) return
+    const name = selected.name || selected.type
+    if (transformMode === 'rotate') {
+      commitOfficialOperation({
+        type: 'set_rotation',
+        objectUuid: selected.uuid,
+        value: [
+          THREE.MathUtils.radToDeg(selected.rotation.x),
+          THREE.MathUtils.radToDeg(selected.rotation.y),
+          THREE.MathUtils.radToDeg(selected.rotation.z),
+        ],
+      }, `Transformed ${name}`)
+    } else {
+      commitOfficialOperation({
+        type: transformMode === 'scale' ? 'set_scale' : 'set_position',
+        objectUuid: selected.uuid,
+        value: (transformMode === 'scale'
+          ? selected.scale.toArray()
+          : selected.position.toArray()) as [number, number, number],
+      }, `Transformed ${name}`)
+    }
   })
 }
 
@@ -538,7 +747,27 @@ function replaceRuntime(nextProject: Project): void {
   resizeRenderer()
 }
 
-function acceptSnapshot(nextProject: Project, nextRevision: string, message: string): void {
+function acceptSnapshot(
+  nextProject: Project,
+  nextRevision: string,
+  message: string,
+  nextWorkspace?: WorkspaceView,
+): void {
+  const previousFile = activeFile
+  workspace = nextWorkspace
+  const filesTab = navigationTabs.find(button => button.dataset.navigationTab === 'files')
+  if (filesTab !== undefined) filesTab.hidden = workspace === undefined
+  if (workspace === undefined) {
+    activeFile = undefined
+    fileHistory = []
+    fileHistoryIndex = -1
+    setNavigationTab('scene', true)
+  } else {
+    activeFile = workspace.files.some(file => file.path === previousFile)
+      ? previousFile
+      : undefined
+    renderFileTree()
+  }
   const editor = nextProject.editor ?? defaultEditor()
   baseOperations = [...editor.operations]
   pendingOperations = []
@@ -550,6 +779,10 @@ function acceptSnapshot(nextProject: Project, nextRevision: string, message: str
   setEditorDisabled(false)
   setClean(nextRevision)
   status.textContent = message
+  if (workspace !== undefined && navigationTab === 'files') {
+    if (activeFile === undefined) setNavigationTab('files', true)
+    else void selectWorkspaceFile(activeFile)
+  }
 }
 
 function showConflict(snapshot: RemoteSnapshot): void {
@@ -557,8 +790,41 @@ function showConflict(snapshot: RemoteSnapshot): void {
   root.dataset.sync = 'conflict'
   conflict.hidden = false
   save.disabled = false
+  saveCopy.hidden = snapshot.workspace !== undefined
   refreshPlayButtons()
   status.textContent = 'External revision conflicts with local edits'
+}
+
+function workspaceFromResult(value: unknown): WorkspaceView | undefined {
+  const candidate = record(value)
+  if (candidate === undefined
+    || (candidate.kind !== 'linked-workspace' && candidate.kind !== 'managed-workspace')
+    || typeof candidate.entry !== 'string'
+    || (candidate.backend !== 'webgl'
+      && candidate.backend !== 'webgpu'
+      && candidate.backend !== 'raw-webgpu')
+    || !Array.isArray(candidate.files)) return undefined
+  const files = candidate.files.map(record)
+  if (files.some(file => file === undefined
+    || typeof file.path !== 'string'
+    || typeof file.sha256 !== 'string'
+    || typeof file.size !== 'number'
+    || typeof file.mediaType !== 'string'
+    || typeof file.text !== 'boolean')) {
+    throw new Error('pull_project returned an invalid workspace')
+  }
+  return {
+    kind: candidate.kind,
+    entry: candidate.entry,
+    backend: candidate.backend,
+    files: files.map(file => ({
+      path: file?.path as string,
+      sha256: file?.sha256 as string,
+      size: file?.size as number,
+      mediaType: file?.mediaType as string,
+      text: file?.text as boolean,
+    })),
+  }
 }
 
 function snapshotFromResult(result: CallToolResult): RemoteSnapshot | undefined {
@@ -573,14 +839,283 @@ function snapshotFromResult(result: CallToolResult): RemoteSnapshot | undefined 
   return {
     project: candidate as unknown as Project,
     revision: nextRevision,
+    workspace: workspaceFromResult(structured.workspace),
   }
 }
 
 const app = new App(
   { name: 'Three.js Editor MCP', version: '0.1.0' },
-  { availableDisplayModes: ['inline'] },
+  { availableDisplayModes: ['inline', 'fullscreen'] },
   { autoResize: true, strict: true },
 )
+
+function setDisplayMode(mode: 'inline' | 'fullscreen'): void {
+  document.documentElement.dataset.displayMode = mode
+  root.dataset.displayMode = mode
+  fullscreen.ariaLabel = mode === 'fullscreen' ? 'Exit fullscreen' : 'Enter fullscreen'
+  fullscreen.title = fullscreen.ariaLabel
+  fullscreen.textContent = mode === 'fullscreen' ? '×' : '⛶'
+  window.setTimeout(resizeRenderer, 0)
+}
+
+async function requestDisplayMode(mode: 'inline' | 'fullscreen'): Promise<void> {
+  const result = await app.requestDisplayMode({ mode })
+  setDisplayMode(result.mode === 'fullscreen' ? 'fullscreen' : 'inline')
+}
+
+function m5BootstrapHtml(): string {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#07111a}
+    canvas{display:block;width:100%;height:100%}
+  </style>
+</head>
+<body>
+  <canvas width="720" height="420" aria-label="M5 isolated runtime canvas"></canvas>
+  <script>
+  (() => {
+    const channel = 'threejs-editor-m5-runtime'
+    const canvas = document.querySelector('canvas')
+    let active
+    let urls = []
+
+    const emit = (runId, nonce, type, data = {}) => {
+      window.parent.postMessage({ channel, runId, nonce, type, data }, '*')
+    }
+    const message = error => error instanceof Error
+      ? error.stack || error.message
+      : String(error)
+    const revoke = () => {
+      for (const url of urls) URL.revokeObjectURL(url)
+      urls = []
+    }
+    const stop = async (runId, nonce) => {
+      let result = {}
+      if (active && typeof active.dispose === 'function') {
+        result = await active.dispose()
+      }
+      active = undefined
+      revoke()
+      emit(runId, nonce, 'disposed', result)
+    }
+    const link = manifest => {
+      if (!manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.modules)) {
+        throw new Error('invalid M5 module manifest')
+      }
+      const byPath = new Map()
+      for (const module of manifest.modules) {
+        let source = module.source
+        for (const dependency of module.dependencies) {
+          const url = byPath.get(dependency.path)
+          if (!url) throw new Error('unresolved module ' + dependency.path)
+          source = source.split(dependency.token).join(url)
+        }
+        const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }))
+        urls.push(url)
+        byPath.set(module.path, url)
+      }
+      const entry = byPath.get(manifest.entry)
+      if (!entry) throw new Error('missing M5 entry module')
+      return entry
+    }
+
+    window.addEventListener('error', event => {
+      if (!active) return
+      event.preventDefault()
+      emit(active.runId, active.nonce, 'runtime-error', { message: event.message })
+    })
+    window.addEventListener('unhandledrejection', event => {
+      if (!active) return
+      event.preventDefault()
+      emit(active.runId, active.nonce, 'unhandled-rejection', {
+        message: message(event.reason),
+      })
+    })
+    window.addEventListener('message', async event => {
+      if (event.source !== window.parent) return
+      const request = event.data
+      if (!request || request.channel !== channel) return
+      const { action, runId, nonce } = request
+      if (action === 'run') {
+        try {
+          await stop(runId, nonce)
+          const entry = link(request.manifest)
+          const module = await import(entry)
+          if (typeof module.start !== 'function') throw new Error('M5 entry must export start')
+          active = { runId, nonce }
+          const api = await module.start(canvas, (type, data) => emit(runId, nonce, type, data))
+          active = { ...active, ...api }
+          emit(runId, nonce, 'ready', api.ready)
+        } catch (error) {
+          revoke()
+          emit(runId, nonce, 'build-error', { message: message(error) })
+        }
+        return
+      }
+      if (action === 'stop') {
+        await stop(runId, nonce)
+        return
+      }
+      if (!active || active.runId !== runId || active.nonce !== nonce) return
+      if (action === 'trigger-unhandled') {
+        active.triggerUnhandled?.()
+      }
+    })
+  })()
+  </script>
+</body>
+</html>`
+}
+
+function resourceText(result: ReadResourceResult, uri: string): string {
+  const content = result.contents.find(item => item.uri === uri) ?? result.contents[0]
+  if (content === undefined || !('text' in content) || typeof content.text !== 'string') {
+    throw new Error(`resource ${uri} did not return text`)
+  }
+  return content.text
+}
+
+function waitForM5Event(type: string, runId: string, timeout = 8_000): Promise<M5RuntimeEvent> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      window.removeEventListener('message', listener)
+      reject(new Error(`timed out waiting for M5 ${type}`))
+    }, timeout)
+    const listener = (event: MessageEvent<unknown>) => {
+      if (event.source !== runtimeFrame.contentWindow) return
+      const candidate = record(event.data)
+      if (candidate?.channel !== 'threejs-editor-m5-runtime'
+        || candidate.runId !== runId
+        || candidate.type !== type) return
+      window.clearTimeout(timer)
+      window.removeEventListener('message', listener)
+      resolve(event.data as M5RuntimeEvent)
+    }
+    window.addEventListener('message', listener)
+  })
+}
+
+function postM5(action: string, payload: Record<string, unknown> = {}): void {
+  if (m5ActiveRun === undefined || runtimeFrame.contentWindow === null) {
+    throw new Error('M5 runtime is not active')
+  }
+  runtimeFrame.contentWindow.postMessage({
+    channel: 'threejs-editor-m5-runtime',
+    action,
+    ...m5ActiveRun,
+    ...payload,
+  }, '*')
+}
+
+function loadM5Frame(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('M5 runtime frame load timed out')), 5_000)
+    runtimeFrame.addEventListener('load', () => {
+      window.clearTimeout(timer)
+      resolve()
+    }, { once: true })
+    runtimeFrame.hidden = false
+    runtimeFrame.srcdoc = m5BootstrapHtml()
+  })
+}
+
+async function readM5Resources(): Promise<M5RuntimeManifest> {
+  const [runtimeResource, proofResource] = await Promise.all([
+    app.readServerResource({ uri: M5_RUNTIME_RESOURCE_URI }),
+    app.readServerResource({ uri: M5_COMMAND_PROOF_RESOURCE_URI }),
+  ])
+  m5ResourceReads += 2
+  const manifest = JSON.parse(resourceText(runtimeResource, M5_RUNTIME_RESOURCE_URI)) as unknown
+  const candidate = record(manifest)
+  if (candidate?.schemaVersion !== 1
+    || typeof candidate.entry !== 'string'
+    || !Array.isArray(candidate.modules)) {
+    throw new Error('M5 runtime resource returned an invalid manifest')
+  }
+  m5ServerCommandProof = JSON.parse(
+    resourceText(proofResource, M5_COMMAND_PROOF_RESOURCE_URI),
+  ) as OfficialCommandProof
+  const localProof = officialCommandProof()
+  if (JSON.stringify(m5ServerCommandProof) !== JSON.stringify(localProof)) {
+    throw new Error('Node and App official Command proofs differ')
+  }
+  return manifest as M5RuntimeManifest
+}
+
+async function stopIsolatedRuntime(): Promise<Record<string, unknown> | undefined> {
+  if (m5ActiveRun === undefined) {
+    runtimeFrame.hidden = true
+    return undefined
+  }
+  const run = m5ActiveRun
+  const disposed = waitForM5Event('disposed', run.runId)
+  postM5('stop')
+  const event = await disposed
+  const frameValue = event.data?.frame
+  m5FrameAtStop = typeof frameValue === 'number' ? frameValue : undefined
+  m5ActiveRun = undefined
+  runtimeFrame.hidden = true
+  runtimeFrame.srcdoc = '<!doctype html><title>Stopped</title>'
+  status.textContent = 'M5 Runtime stopped'
+  return event.data
+}
+
+async function startIsolatedRuntime(
+  transform?: (manifest: M5RuntimeManifest) => M5RuntimeManifest,
+): Promise<Record<string, unknown>> {
+  await stopIsolatedRuntime()
+  m5Events = []
+  m5Errors = []
+  m5Ready = undefined
+  m5MessagesAfterStop = 0
+  m5FrameAtStop = undefined
+  const manifest = structuredClone(await readM5Resources())
+  m5Manifest = manifest
+  const runId = crypto.randomUUID()
+  m5ActiveRun = { runId, nonce: crypto.randomUUID() }
+  await loadM5Frame()
+  const result = waitForM5Event(transform === undefined ? 'ready' : 'build-error', runId)
+  postM5('run', { manifest: transform?.(manifest) ?? manifest })
+  const event = await result
+  if (event.type === 'build-error') {
+    const error = typeof event.data?.message === 'string' ? event.data.message : 'build error'
+    m5Errors.push(error)
+    status.textContent = 'M5 build error observed'
+  } else {
+    m5Ready = event.data ?? {}
+    status.textContent = 'M5 isolated WebGL2 Runtime'
+  }
+  return event.data ?? {}
+}
+
+window.addEventListener('message', event => {
+  if (event.source !== runtimeFrame.contentWindow) return
+  const candidate = record(event.data)
+  if (candidate?.channel !== 'threejs-editor-m5-runtime'
+    || typeof candidate.runId !== 'string'
+    || typeof candidate.nonce !== 'string'
+    || typeof candidate.type !== 'string') return
+  const runtimeEvent = event.data as M5RuntimeEvent
+  if (m5ActiveRun === undefined) {
+    m5MessagesAfterStop += 1
+    return
+  }
+  if (runtimeEvent.runId !== m5ActiveRun.runId
+    || runtimeEvent.nonce !== m5ActiveRun.nonce) return
+  m5Events.push(runtimeEvent)
+  if (runtimeEvent.type === 'frame' && typeof runtimeEvent.data?.frame === 'number') {
+    root.dataset.m5Frame = String(runtimeEvent.data.frame)
+  }
+  if (runtimeEvent.type === 'runtime-error'
+    || runtimeEvent.type === 'unhandled-rejection'
+    || runtimeEvent.type === 'build-error') {
+    const message = runtimeEvent.data?.message
+    m5Errors.push(typeof message === 'string' ? message : runtimeEvent.type)
+  }
+})
 
 function recordRuntimeError(error: unknown): void {
   runtimeErrors = [...runtimeErrors, runtimeMessage(error)].slice(-20)
@@ -695,7 +1230,7 @@ async function pullLatest(): Promise<void> {
     if (snapshot === undefined) return
     if (root.dataset.sync === 'saving' || snapshot.revision === revision) return
     if (root.dataset.sync === 'clean') {
-      acceptSnapshot(snapshot.project, snapshot.revision, 'Updated from server')
+      acceptSnapshot(snapshot.project, snapshot.revision, 'Updated from server', snapshot.workspace)
     } else {
       showConflict(snapshot)
     }
@@ -719,7 +1254,7 @@ async function loadProject(nextProjectId: string): Promise<void> {
     if (snapshot === undefined) throw new Error('project snapshot was not returned')
     projectId = nextProjectId
     root.dataset.projectId = projectId
-    acceptSnapshot(snapshot.project, snapshot.revision, 'Project loaded')
+    acceptSnapshot(snapshot.project, snapshot.revision, 'Project loaded', snapshot.workspace)
   } finally {
     loadingId = undefined
   }
@@ -739,9 +1274,16 @@ app.ontoolresult = result => {
 }
 app.onhostcontextchanged = context => {
   if (context.theme !== undefined) document.documentElement.dataset.theme = context.theme
+  if (context.availableDisplayModes !== undefined) {
+    fullscreen.hidden = !context.availableDisplayModes.includes('fullscreen')
+  }
+  if (context.displayMode === 'inline' || context.displayMode === 'fullscreen') {
+    setDisplayMode(context.displayMode)
+  }
 }
 app.onteardown = async () => {
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  await stopIsolatedRuntime()
   await stopGame('Stopped', false)
   cancelAnimationFrame(animation)
   resizeObserver.disconnect()
@@ -771,6 +1313,19 @@ for (const button of detailTabs) {
     setDetailTab(button.dataset.detailTab as 'inspector' | 'script')
   })
 }
+for (const button of navigationTabs) {
+  button.addEventListener('click', () => {
+    setNavigationTab(button.dataset.navigationTab as NavigationTab)
+  })
+}
+fullscreen.addEventListener('click', () => {
+  const next = document.documentElement.dataset.displayMode === 'fullscreen'
+    ? 'inline'
+    : 'fullscreen'
+  void requestDisplayMode(next).catch(error => {
+    status.textContent = error instanceof Error ? error.message : String(error)
+  })
+})
 play.addEventListener('click', startGame)
 stop.addEventListener('click', () => {
   void stopGame()
@@ -899,12 +1454,21 @@ objectName.addEventListener('input', () => {
   markDirty()
 })
 objectName.addEventListener('change', () => {
-  if (selected !== undefined) commitHistory(`Renamed object to ${selected.name || selected.type}`)
+  if (selected === undefined) return
+  commitOfficialOperation({
+    type: 'set_name',
+    objectUuid: selected.uuid,
+    value: selected.name,
+  }, `Renamed object to ${selected.name || selected.type}`)
 })
 objectVisible.addEventListener('change', () => {
   if (selected === undefined) return
   selected.visible = objectVisible.checked
-  commitHistory(`${selected.visible ? 'Showed' : 'Hid'} ${selected.name || selected.type}`)
+  commitOfficialOperation({
+    type: 'set_visible',
+    objectUuid: selected.uuid,
+    value: selected.visible,
+  }, `${selected.visible ? 'Showed' : 'Hid'} ${selected.name || selected.type}`)
 })
 for (const input of vectorInputs) {
   input.addEventListener('input', () => {
@@ -922,7 +1486,22 @@ for (const input of vectorInputs) {
   input.addEventListener('change', () => {
     if (selected === undefined) return
     const property = input.dataset.vector as VectorProperty
-    commitHistory(`Updated ${selected.name || selected.type} ${property}`)
+    const value = property === 'rotation'
+      ? [
+          THREE.MathUtils.radToDeg(selected.rotation.x),
+          THREE.MathUtils.radToDeg(selected.rotation.y),
+          THREE.MathUtils.radToDeg(selected.rotation.z),
+        ] as [number, number, number]
+      : selected[property].toArray() as [number, number, number]
+    commitOfficialOperation({
+      type: property === 'rotation'
+        ? 'set_rotation'
+        : property === 'scale'
+          ? 'set_scale'
+          : 'set_position',
+      objectUuid: selected.uuid,
+      value,
+    }, `Updated ${selected.name || selected.type} ${property}`)
   })
 }
 materialColor.addEventListener('input', () => {
@@ -932,10 +1511,41 @@ materialColor.addEventListener('input', () => {
   markDirty()
 })
 materialColor.addEventListener('change', () => {
-  if (selected !== undefined) commitHistory(`Changed ${selected.name || selected.type} color`)
+  if (selected === undefined) return
+  commitOfficialOperation({
+    type: 'set_material_color',
+    objectUuid: selected.uuid,
+    value: materialColor.value,
+  }, `Changed ${selected.name || selected.type} color`)
+})
+
+fileSource.addEventListener('input', () => {
+  if (fileLoading || fileSource.disabled || activeFile === undefined) return
+  if (fileHistory[fileHistoryIndex] === fileSource.value) return
+  fileHistory = fileHistory.slice(0, fileHistoryIndex + 1)
+  fileHistory.push(fileSource.value)
+  if (fileHistory.length > 50) fileHistory.shift()
+  fileHistoryIndex = fileHistory.length - 1
+  refreshHistoryButtons()
+  markDirty(`Editing ${activeFile}`)
 })
 
 undo.addEventListener('click', () => {
+  if (navigationTab === 'files') {
+    if (fileHistoryIndex <= 0) return
+    fileHistoryIndex -= 1
+    fileSource.value = fileHistory[fileHistoryIndex] ?? ''
+    refreshHistoryButtons()
+    if (fileHistoryIndex === 0 && remoteSnapshot === undefined) {
+      root.dataset.sync = 'clean'
+      save.disabled = true
+      refreshPlayButtons()
+      status.textContent = 'Reverted file edits'
+    } else {
+      markDirty('Undo file edit')
+    }
+    return
+  }
   if (historyIndex <= 0) return
   historyIndex -= 1
   const entry = history[historyIndex]
@@ -953,6 +1563,14 @@ undo.addEventListener('click', () => {
   }
 })
 redo.addEventListener('click', () => {
+  if (navigationTab === 'files') {
+    if (fileHistoryIndex >= fileHistory.length - 1) return
+    fileHistoryIndex += 1
+    fileSource.value = fileHistory[fileHistoryIndex] ?? ''
+    refreshHistoryButtons()
+    markDirty('Redo file edit')
+    return
+  }
   if (historyIndex >= history.length - 1) return
   historyIndex += 1
   const entry = history[historyIndex]
@@ -965,9 +1583,53 @@ redo.addEventListener('click', () => {
 
 save.addEventListener('click', () => {
   if (projectId === undefined || project === undefined || revision === undefined) return
+  if (navigationTab === 'files') {
+    if (activeFile === undefined || fileSummary(activeFile)?.text !== true) return
+    const savedProjectId = projectId
+    const savedRevision = revision
+    const savedPath = activeFile
+    save.disabled = true
+    root.dataset.sync = 'saving'
+    setEditorDisabled(true)
+    status.textContent = `Saving ${savedPath}`
+    void app.callServerTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId: savedProjectId,
+        baseRevision: savedRevision,
+        changes: [{
+          type: 'write',
+          path: savedPath,
+          text: fileSource.value,
+        }],
+      },
+    }).then(async result => {
+      if (result.isError) {
+        root.dataset.sync = 'dirty'
+        setEditorDisabled(false)
+        await pullLatest()
+        return
+      }
+      const pulled = await app.callServerTool({
+        name: 'pull_project',
+        arguments: { projectId: savedProjectId },
+      })
+      const snapshot = snapshotFromResult(pulled)
+      if (snapshot === undefined) throw new Error('saved workspace snapshot was not returned')
+      setEditorDisabled(false)
+      acceptSnapshot(snapshot.project, snapshot.revision, `Saved ${savedPath}`, snapshot.workspace)
+    }).catch(error => {
+      root.dataset.sync = 'error'
+      save.disabled = false
+      setEditorDisabled(false)
+      status.textContent = error instanceof Error ? error.message : String(error)
+    })
+    return
+  }
   if (title.value.trim() === '') return
   const savedProjectId = projectId
   const nextProject = serializeProject()
+  const saveWorkspace = workspace !== undefined
   save.disabled = true
   root.dataset.sync = 'saving'
   setEditorDisabled(true)
@@ -981,6 +1643,7 @@ save.addEventListener('click', () => {
     },
   }).then(async result => {
     if (result.isError) {
+      root.dataset.sync = 'dirty'
       setEditorDisabled(false)
       await pullLatest()
       return
@@ -988,6 +1651,17 @@ save.addEventListener('click', () => {
     const structured = record(result.structuredContent)
     if (typeof structured?.revision !== 'string') {
       throw new Error('push_project returned an invalid revision')
+    }
+    if (saveWorkspace) {
+      const pulled = await app.callServerTool({
+        name: 'pull_project',
+        arguments: { projectId: savedProjectId },
+      })
+      const snapshot = snapshotFromResult(pulled)
+      if (snapshot === undefined) throw new Error('saved workspace snapshot was not returned')
+      setEditorDisabled(false)
+      acceptSnapshot(snapshot.project, snapshot.revision, 'Saved', snapshot.workspace)
+      return
     }
     project = cloneProject(nextProject)
     baseOperations = [...(nextProject.editor?.operations ?? [])]
@@ -1008,10 +1682,15 @@ save.addEventListener('click', () => {
 
 loadExternal.addEventListener('click', () => {
   if (remoteSnapshot === undefined) return
-  acceptSnapshot(remoteSnapshot.project, remoteSnapshot.revision, 'Loaded external revision')
+  acceptSnapshot(
+    remoteSnapshot.project,
+    remoteSnapshot.revision,
+    'Loaded external revision',
+    remoteSnapshot.workspace,
+  )
 })
 saveCopy.addEventListener('click', () => {
-  if (projectId === undefined || project === undefined) return
+  if (projectId === undefined || project === undefined || workspace !== undefined) return
   const nextProject = serializeProject()
   nextProject.title = `${nextProject.title} (Local copy)`.slice(0, 120)
   const nextProjectId = `${projectId.slice(0, 45)}-copy-${Date.now().toString(36)}`.slice(0, 64)
@@ -1054,6 +1733,12 @@ function updateRuntimePointer(event: PointerEvent): void {
 }
 
 window.addEventListener('keydown', event => {
+  if (event.key === 'Escape'
+    && document.documentElement.dataset.displayMode === 'fullscreen') {
+    event.preventDefault()
+    void requestDisplayMode('inline')
+    return
+  }
   if (root.dataset.playState !== 'playing') return
   runtimeInput.keys.add(event.key.toLowerCase())
   if (['w', 's', 'arrowup', 'arrowdown'].includes(event.key.toLowerCase())) {
@@ -1153,6 +1838,7 @@ refreshModeButtons()
 refreshHistoryButtons()
 refreshPlayButtons()
 setDetailTab('inspector')
+setNavigationTab('scene', true)
 animation = requestAnimationFrame(render)
 
 const diagnostics = {
@@ -1187,7 +1873,30 @@ const diagnostics = {
     remoteRevision: remoteSnapshot?.revision,
     importedAssets: [...importedAssets],
     lastExport: root.dataset.lastExport,
+    navigationTab,
+    workspaceKind: workspace?.kind,
+    workspaceFiles: workspace?.files.map(file => file.path) ?? [],
+    activeFile,
+    fileHistoryIndex,
+    fileHistoryLength: fileHistory.length,
+    fileText: fileSource.value,
+    displayMode: document.documentElement.dataset.displayMode,
+    lastOfficialCommands: root.dataset.lastOfficialCommands,
     hierarchy: scene.children.filter(object => !isHelper(object)).map(object => object.name || object.type),
+    m5: {
+      active: m5ActiveRun !== undefined,
+      resourceReads: m5ResourceReads,
+      modules: m5Manifest?.modules.map(module => module.path) ?? [],
+      eventTypes: m5Events.map(event => event.type),
+      errors: [...m5Errors],
+      ready: m5Ready,
+      serverCommandProof: m5ServerCommandProof,
+      localCommandProof: officialCommandProof(),
+      frame: Number(root.dataset.m5Frame ?? 0),
+      frameAtStop: m5FrameAtStop,
+      messagesAfterStop: m5MessagesAfterStop,
+      runtimeFrameVisible: !runtimeFrame.hidden,
+    },
   }),
   object: (name: string) => {
     const object = scene.getObjectByName(name)
@@ -1223,17 +1932,35 @@ const diagnostics = {
     }
     return { width, height, sampled, lit, colors: colors.size }
   },
+  runM5Fixture: () => startIsolatedRuntime(),
+  runM5BrokenFixture: () => startIsolatedRuntime(manifest => {
+    const entry = manifest.modules.find(module => module.path === manifest.entry)
+    if (entry?.dependencies[0] !== undefined) entry.dependencies[0].path = 'missing.js'
+    return manifest
+  }),
+  triggerM5Unhandled: async () => {
+    if (m5ActiveRun === undefined) throw new Error('M5 runtime is not active')
+    const event = waitForM5Event('unhandled-rejection', m5ActiveRun.runId)
+    postM5('trigger-unhandled')
+    return (await event).data
+  },
+  stopM5Fixture: () => stopIsolatedRuntime(),
 }
 Object.assign(window, {
   __THREE_M1__: diagnostics,
   __THREE_M2__: diagnostics,
   __THREE_M3__: diagnostics,
   __THREE_M4__: diagnostics,
+  __THREE_M5__: diagnostics,
+  __THREE_M6__: diagnostics,
 })
 
 void app.connect().then(() => {
-  const theme = app.getHostContext()?.theme
+  const context = app.getHostContext()
+  const theme = context?.theme
   if (theme !== undefined) document.documentElement.dataset.theme = theme
+  fullscreen.hidden = !context?.availableDisplayModes?.includes('fullscreen')
+  setDisplayMode(context?.displayMode === 'fullscreen' ? 'fullscreen' : 'inline')
   pollTimer = window.setInterval(() => {
     void pullLatest().catch(error => {
       status.textContent = error instanceof Error ? error.message : String(error)

@@ -1,0 +1,898 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Three.js Editor UI Directions</title>
+<style>
+  :root {
+    color-scheme: dark;
+    font-family: "SF Pro Display", "Avenir Next", ui-sans-serif, system-ui, sans-serif;
+    background: #080b10;
+    color: #f4f7fb;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    background: #080b10;
+  }
+
+  button,
+  input {
+    font: inherit;
+  }
+
+  .selector {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    min-height: 72px;
+    padding: 12px 18px;
+    border-bottom: 1px solid rgb(255 255 255 / 0.1);
+    background: #0b0f15;
+  }
+
+  .selector strong {
+    flex: 1;
+    min-width: 150px;
+    font-size: 14px;
+    letter-spacing: 0;
+  }
+
+  .directions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .directions button {
+    min-height: 38px;
+    padding: 0 14px;
+    border: 1px solid rgb(255 255 255 / 0.12);
+    border-radius: 5px;
+    background: rgb(255 255 255 / 0.05);
+    color: #aeb8c5;
+    cursor: pointer;
+    transition:
+      transform 240ms cubic-bezier(.16, 1, .3, 1),
+      border-color 240ms cubic-bezier(.16, 1, .3, 1),
+      background 240ms cubic-bezier(.16, 1, .3, 1),
+      color 240ms cubic-bezier(.16, 1, .3, 1);
+  }
+
+  .directions button:hover {
+    border-color: rgb(255 255 255 / 0.28);
+    color: #fff;
+  }
+
+  .directions button:active {
+    transform: scale(0.97);
+  }
+
+  .directions button[aria-pressed="true"] {
+    border-color: #66baff;
+    background: #66baff;
+    color: #06101a;
+  }
+
+  .direction-note {
+    min-width: 180px;
+    color: #8491a0;
+    font: 11px/1.4 "SFMono-Regular", Consolas, monospace;
+    text-align: right;
+  }
+
+  .preview {
+    --bg: #05080e;
+    --stage: #050b13;
+    --surface: rgb(4 9 16 / 0.46);
+    --surface-solid: #09111c;
+    --surface-control: rgb(232 244 255 / 0.065);
+    --line: rgb(214 235 255 / 0.19);
+    --line-soft: rgb(214 235 255 / 0.1);
+    --text: #f2f7fc;
+    --muted: #8495a8;
+    --accent: #63b8ff;
+    --accent-ink: #03101a;
+    --panel-radius: 7px;
+    --control-radius: 4px;
+    --panel-shadow: 0 22px 58px rgb(0 3 10 / 0.48);
+    --panel-blur: blur(18px) saturate(125%);
+    --ui-font: "SF Pro Display", "Avenir Next", ui-sans-serif, system-ui, sans-serif;
+    --data-font: "SFMono-Regular", Consolas, monospace;
+    position: relative;
+    height: calc(100dvh - 72px);
+    min-height: 620px;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--ui-font);
+  }
+
+  .editor {
+    display: grid;
+    grid-template-rows: 54px minmax(0, 1fr);
+    height: 100%;
+    background: var(--stage);
+  }
+
+  .topbar {
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 0 12px 0 16px;
+    border-bottom: 1px solid var(--line-soft);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    box-shadow: inset 0 1px rgb(255 255 255 / 0.055);
+    backdrop-filter: blur(20px);
+  }
+
+  .project-title {
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .revision {
+    margin-left: auto;
+    color: var(--muted);
+    font: 10px/1 var(--data-font);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .tool-button,
+  .mode-button,
+  .save-button {
+    display: inline-grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--control-radius);
+    background: var(--surface-control);
+    box-shadow: inset 0 1px rgb(255 255 255 / 0.06);
+    color: var(--text);
+    cursor: default;
+  }
+
+  .save-button {
+    width: auto;
+    min-width: 54px;
+    padding: 0 12px;
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .viewport {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background:
+      linear-gradient(rgb(176 219 255 / 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(176 219 255 / 0.018) 1px, transparent 1px),
+      var(--stage);
+    background-size: 32px 32px;
+    box-shadow: inset 0 0 140px rgb(0 3 9 / 0.7);
+  }
+
+  .viewport::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .scene-plane {
+    position: absolute;
+    top: 36%;
+    left: 50%;
+    width: min(72vw, 900px);
+    height: min(38vw, 430px);
+    transform: translateX(-50%) perspective(700px) rotateX(58deg);
+    transform-origin: 50% 100%;
+    background:
+      linear-gradient(rgb(99 184 255 / 0.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(99 184 255 / 0.055) 1px, transparent 1px),
+      #102844;
+    background-size: 34px 34px;
+    box-shadow: 0 30px 70px rgb(0 4 12 / 0.44);
+  }
+
+  .scene-object {
+    position: absolute;
+    top: 51%;
+    left: 50%;
+    width: 52px;
+    height: 52px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 35% 27%, #fff 0 4%, transparent 5%),
+      radial-gradient(circle at 35% 30%, #fff6a6 0 8%, #ffe264 25%, #f0bd28 62%, #725013 100%);
+    box-shadow:
+      12px 16px 11px rgb(0 3 10 / 0.62),
+      0 0 32px rgb(255 213 86 / 0.12);
+  }
+
+  .panel,
+  .modes,
+  .status {
+    position: absolute;
+    z-index: 4;
+    border: 1px solid var(--line);
+    border-radius: var(--panel-radius);
+    background: var(--surface);
+    box-shadow:
+      var(--panel-shadow),
+      inset 0 1px rgb(255 255 255 / 0.14),
+      inset 0 0 0 1px rgb(255 255 255 / 0.025);
+    backdrop-filter: var(--panel-blur);
+  }
+
+  .panel::after,
+  .modes::after,
+  .status::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border: 1px solid rgb(224 241 255 / 0.055);
+    border-radius: calc(var(--panel-radius) - 2px);
+    pointer-events: none;
+  }
+
+  .panel {
+    top: 14px;
+    width: clamp(180px, 22vw, 260px);
+    overflow: hidden;
+  }
+
+  .hierarchy {
+    left: 14px;
+  }
+
+  .inspector {
+    right: 14px;
+    width: clamp(230px, 26vw, 310px);
+  }
+
+  .panel h2 {
+    margin: 0;
+    padding: 12px;
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .tree {
+    margin: 0;
+    padding: 5px 0;
+    list-style: none;
+  }
+
+  .tree li {
+    height: 30px;
+    padding: 0 11px;
+    color: color-mix(in srgb, var(--text) 76%, transparent);
+    font-size: 12px;
+    line-height: 30px;
+  }
+
+  .tree li.selected {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    box-shadow: inset 2px 0 var(--accent);
+    color: var(--text);
+  }
+
+  .inspector-body {
+    padding: 12px;
+  }
+
+  .field {
+    display: grid;
+    grid-template-columns: 62px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .field input,
+  .vector-grid span {
+    width: 100%;
+    height: 29px;
+    border: 1px solid var(--line-soft);
+    border-radius: calc(var(--control-radius) - 1px);
+    background: color-mix(in srgb, var(--bg) 62%, transparent);
+    color: var(--text);
+  }
+
+  .field input {
+    padding: 0 8px;
+  }
+
+  .vector-labels,
+  .vector-grid {
+    display: grid;
+    grid-template-columns: 62px repeat(3, minmax(0, 1fr));
+    gap: 5px;
+    margin-bottom: 5px;
+    color: var(--muted);
+    font: 9px/1 var(--data-font);
+    text-align: center;
+  }
+
+  .vector-grid {
+    align-items: center;
+    color: var(--text);
+  }
+
+  .vector-grid b {
+    color: var(--muted);
+    font-family: var(--ui-font);
+    font-weight: 600;
+    text-align: left;
+  }
+
+  .vector-grid span {
+    display: grid;
+    place-items: center;
+    height: 27px;
+    font: 9px/1 var(--data-font);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .vector-grid span.focused {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  .modes {
+    top: 14px;
+    left: 50%;
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    transform: translateX(-50%);
+  }
+
+  .mode-button {
+    border-color: transparent;
+    background: transparent;
+    font-size: 14px;
+  }
+
+  .mode-button.active {
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    background: color-mix(in srgb, var(--accent) 17%, transparent);
+  }
+
+  .status {
+    bottom: 14px;
+    left: calc(clamp(180px, 22vw, 260px) + 28px);
+    padding: 8px 10px;
+    color: var(--muted);
+    font: 10px/1 var(--data-font);
+  }
+
+  .preview[data-theme="minimal"] {
+    --bg: #f4f3ef;
+    --stage: #171a1e;
+    --surface: #fbfaf7;
+    --surface-solid: #fbfaf7;
+    --surface-control: #f1f0ec;
+    --line: #deddd8;
+    --line-soft: #e9e7e2;
+    --text: #1d2024;
+    --muted: #777875;
+    --accent: #111317;
+    --accent-ink: #fff;
+    --panel-radius: 5px;
+    --control-radius: 4px;
+    --panel-shadow: 0 16px 48px rgb(20 18 12 / 0.045);
+    --panel-blur: none;
+    --ui-font: "SF Pro Display", "Avenir Next", ui-sans-serif, system-ui, sans-serif;
+    --data-font: "SFMono-Regular", Consolas, monospace;
+  }
+
+  .preview[data-theme="minimal"] .editor {
+    grid-template-columns: 210px minmax(0, 1fr) 280px;
+    grid-template-rows: 50px minmax(0, 1fr);
+    gap: 1px;
+    background: #d8d7d2;
+  }
+
+  .preview[data-theme="minimal"] .topbar {
+    grid-column: 1 / -1;
+    background: #fbfaf7;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="minimal"] .viewport {
+    grid-column: 2;
+    grid-row: 2;
+    background:
+      linear-gradient(rgb(255 255 255 / 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.02) 1px, transparent 1px),
+      #171a1e;
+    background-size: 40px 40px;
+    box-shadow: inset 0 0 100px rgb(0 0 0 / 0.2);
+  }
+
+  .preview[data-theme="minimal"] .viewport::after {
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.04);
+  }
+
+  .preview[data-theme="minimal"] .panel {
+    position: relative;
+    inset: auto;
+    width: auto;
+    border: 0;
+    border-radius: 0;
+    background: #fbfaf7;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="minimal"] .panel::after,
+  .preview[data-theme="minimal"] .modes::after,
+  .preview[data-theme="minimal"] .status::after {
+    display: none;
+  }
+
+  .preview[data-theme="minimal"] .hierarchy {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .preview[data-theme="minimal"] .inspector {
+    grid-column: 3;
+    grid-row: 2;
+  }
+
+  .preview[data-theme="minimal"] .panel h2 {
+    padding: 15px 14px;
+    font-size: 12px;
+  }
+
+  .preview[data-theme="minimal"] .tree li.selected {
+    background: #edf3f7;
+    box-shadow: inset 3px 0 #5e829b;
+  }
+
+  .preview[data-theme="minimal"] .modes {
+    top: 16px;
+    background: #fbfaf7;
+    box-shadow: 0 10px 28px rgb(0 0 0 / 0.08);
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="minimal"] .status {
+    left: calc(210px + 18px);
+    border: 0;
+    background: #fbfaf7;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.07);
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="minimal"] .scene-plane {
+    background:
+      linear-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.035) 1px, transparent 1px),
+      #343b42;
+    background-size: 38px 38px;
+  }
+
+  .preview[data-theme="tactical"] {
+    --bg: #0a0a0a;
+    --stage: #0d0d0d;
+    --surface: #101010;
+    --surface-solid: #101010;
+    --surface-control: #151515;
+    --line: #484848;
+    --line-soft: #2d2d2d;
+    --text: #ededeb;
+    --muted: #9c9c97;
+    --accent: #ff3131;
+    --accent-ink: #070707;
+    --panel-radius: 0;
+    --control-radius: 0;
+    --panel-shadow: none;
+    --panel-blur: none;
+    --ui-font: "SFMono-Regular", "IBM Plex Mono", Consolas, monospace;
+    --data-font: "SFMono-Regular", "IBM Plex Mono", Consolas, monospace;
+  }
+
+  .preview[data-theme="tactical"] .editor {
+    grid-template-columns: 220px minmax(0, 1fr) 300px;
+    grid-template-rows: 48px minmax(0, 1fr) 28px;
+    gap: 1px;
+    background: #3b3b3b;
+  }
+
+  .preview[data-theme="tactical"] .topbar {
+    grid-column: 1 / -1;
+    padding-inline: 12px;
+    background: #0a0a0a;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="tactical"] .project-title::before {
+    content: "[ UNIT / ";
+    color: var(--accent);
+  }
+
+  .preview[data-theme="tactical"] .project-title::after {
+    content: " ]";
+    color: var(--accent);
+  }
+
+  .preview[data-theme="tactical"] .project-title,
+  .preview[data-theme="tactical"] .toolbar,
+  .preview[data-theme="tactical"] .panel,
+  .preview[data-theme="tactical"] .modes,
+  .preview[data-theme="tactical"] .status {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .preview[data-theme="tactical"] .viewport {
+    grid-column: 2;
+    grid-row: 2;
+    background:
+      linear-gradient(rgb(255 255 255 / 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.025) 1px, transparent 1px),
+      #0d0d0d;
+    background-size: 28px 28px;
+    box-shadow: inset 0 0 120px #050505;
+  }
+
+  .preview[data-theme="tactical"] .viewport::after {
+    background: repeating-linear-gradient(
+      0deg,
+      transparent 0 2px,
+      rgb(0 0 0 / 0.16) 2px 4px
+    );
+  }
+
+  .preview[data-theme="tactical"] .panel {
+    position: relative;
+    inset: auto;
+    width: auto;
+    border: 0;
+    border-radius: 0;
+    background: #101010;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="tactical"] .panel::after,
+  .preview[data-theme="tactical"] .modes::after,
+  .preview[data-theme="tactical"] .status::after {
+    display: none;
+  }
+
+  .preview[data-theme="tactical"] .hierarchy {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .preview[data-theme="tactical"] .inspector {
+    grid-column: 3;
+    grid-row: 2;
+  }
+
+  .preview[data-theme="tactical"] .panel h2 {
+    padding: 12px;
+    border-bottom-color: #484848;
+    background: #171717;
+    color: var(--accent);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+  }
+
+  .preview[data-theme="tactical"] .panel h2::before {
+    content: "[ ";
+  }
+
+  .preview[data-theme="tactical"] .panel h2::after {
+    content: " ]";
+  }
+
+  .preview[data-theme="tactical"] .tree li {
+    border-bottom: 1px solid #252525;
+    font-size: 10px;
+  }
+
+  .preview[data-theme="tactical"] .tree li::before {
+    content: "> ";
+    color: #60605d;
+  }
+
+  .preview[data-theme="tactical"] .tree li.selected {
+    background: var(--accent);
+    box-shadow: none;
+    color: #080808;
+  }
+
+  .preview[data-theme="tactical"] .tree li.selected::before {
+    color: #080808;
+  }
+
+  .preview[data-theme="tactical"] .field,
+  .preview[data-theme="tactical"] .vector-labels,
+  .preview[data-theme="tactical"] .vector-grid {
+    font-size: 9px;
+    text-transform: uppercase;
+  }
+
+  .preview[data-theme="tactical"] .modes {
+    top: 12px;
+    padding: 0;
+    border-color: #484848;
+    background: #101010;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="tactical"] .mode-button {
+    border: 0;
+    border-right: 1px solid #383838;
+  }
+
+  .preview[data-theme="tactical"] .mode-button:last-child {
+    border-right: 0;
+  }
+
+  .preview[data-theme="tactical"] .mode-button.active {
+    background: var(--accent);
+    color: #080808;
+  }
+
+  .preview[data-theme="tactical"] .status {
+    position: relative;
+    grid-column: 1 / -1;
+    grid-row: 3;
+    inset: auto;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 0;
+    background: #151515;
+    box-shadow: none;
+    color: #b7b7b2;
+    backdrop-filter: none;
+  }
+
+  .preview[data-theme="tactical"] .status::before {
+    content: "SYS/READY  ::  ";
+    color: var(--accent);
+  }
+
+  .preview[data-theme="tactical"] .scene-plane {
+    background:
+      linear-gradient(rgb(255 49 49 / 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 49 49 / 0.08) 1px, transparent 1px),
+      #191919;
+    background-size: 30px 30px;
+    box-shadow: 0 0 0 1px #4c2525;
+  }
+
+  .preview[data-theme="tactical"] .scene-object {
+    border-radius: 0;
+    background:
+      linear-gradient(135deg, #ff6b6b 0 38%, #ff3131 39% 68%, #711414 69%);
+    box-shadow: 12px 14px 0 rgb(0 0 0 / 0.68);
+  }
+
+  .preview[data-theme="tactical"] .revision::before {
+    content: "REV/";
+    color: var(--accent);
+  }
+
+  @media (max-width: 760px) {
+    .selector {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .directions {
+      width: 100%;
+    }
+
+    .directions button {
+      flex: 1;
+      padding-inline: 6px;
+      font-size: 11px;
+    }
+
+    .direction-note {
+      display: none;
+    }
+
+    .preview {
+      height: calc(100dvh - 126px);
+    }
+
+    .revision,
+    .toolbar .tool-button:nth-of-type(-n + 3) {
+      display: none;
+    }
+
+    .panel,
+    .preview[data-theme="minimal"] .panel,
+    .preview[data-theme="tactical"] .panel {
+      position: absolute;
+      top: auto;
+      bottom: 8px;
+      z-index: 5;
+      width: calc(50% - 12px);
+      height: 176px;
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+    }
+
+    .hierarchy,
+    .preview[data-theme="minimal"] .hierarchy,
+    .preview[data-theme="tactical"] .hierarchy {
+      left: 8px;
+    }
+
+    .inspector,
+    .preview[data-theme="minimal"] .inspector,
+    .preview[data-theme="tactical"] .inspector {
+      right: 8px;
+    }
+
+    .preview[data-theme="minimal"] .editor,
+    .preview[data-theme="tactical"] .editor {
+      display: grid;
+      grid-template-columns: 1fr;
+      grid-template-rows: 50px minmax(0, 1fr);
+    }
+
+    .preview[data-theme="minimal"] .viewport,
+    .preview[data-theme="tactical"] .viewport {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    .modes {
+      top: 8px;
+    }
+
+    .status,
+    .preview[data-theme="minimal"] .status,
+    .preview[data-theme="tactical"] .status {
+      position: absolute;
+      left: 8px;
+      right: auto;
+      bottom: 192px;
+      max-width: calc(100% - 16px);
+      border: 1px solid var(--line);
+      border-radius: var(--control-radius);
+    }
+
+    .scene-plane {
+      top: 37%;
+      width: 138vw;
+      height: 62vw;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+    }
+  }
+</style>
+
+<section class="selector" aria-label="UI direction selector">
+  <strong>Three.js Editor UI directions</strong>
+  <nav class="directions" aria-label="Visual directions">
+    <button type="button" data-theme-button="glass" aria-pressed="true">A · Ethereal Glass</button>
+    <button type="button" data-theme-button="minimal" aria-pressed="false">B · Precision Minimal</button>
+    <button type="button" data-theme-button="tactical" aria-pressed="false">C · Tactical VFX</button>
+  </nav>
+  <output class="direction-note" data-direction-note>floating / luminous / cinematic</output>
+</section>
+
+<main class="preview" data-preview data-theme="glass">
+  <section class="editor">
+    <header class="topbar">
+      <strong class="project-title">M6 Linked Game</strong>
+      <output class="revision">1e44b836df8</output>
+      <nav class="toolbar" aria-label="Editor actions">
+        <button class="tool-button" type="button" aria-label="Undo">↶</button>
+        <button class="tool-button" type="button" aria-label="Add">+</button>
+        <button class="tool-button" type="button" aria-label="Export">↓</button>
+        <button class="tool-button" type="button" aria-label="Play">▶</button>
+        <button class="tool-button" type="button" aria-label="Stop">■</button>
+        <button class="tool-button" type="button" aria-label="Fullscreen">⛶</button>
+        <button class="save-button" type="button">Save</button>
+      </nav>
+    </header>
+
+    <section class="viewport" aria-label="Three.js scene preview">
+      <div class="scene-plane"></div>
+      <div class="scene-object"></div>
+      <nav class="modes" aria-label="Transform mode">
+        <button class="mode-button active" type="button" aria-label="Move">↔</button>
+        <button class="mode-button" type="button" aria-label="Rotate">↻</button>
+        <button class="mode-button" type="button" aria-label="Scale">⤢</button>
+      </nav>
+      <output class="status">External revision conflicts with local edits</output>
+    </section>
+
+    <aside class="panel hierarchy">
+      <h2>Scene graph</h2>
+      <ul class="tree">
+        <li>HemisphereLight</li>
+        <li class="selected">Key Light</li>
+        <li>Field</li>
+        <li>Ball</li>
+      </ul>
+    </aside>
+
+    <aside class="panel inspector">
+      <h2>Properties</h2>
+      <section class="inspector-body">
+        <label class="field"><span>Name</span><input value="Key Light" readonly></label>
+        <label class="field"><span>Visible</span><input value="On" readonly></label>
+        <div class="vector-labels"><b></b><span>X</span><span>Y</span><span>Z</span></div>
+        <div class="vector-grid"><b>Position</b><span>-2.25</span><span class="focused">8.00</span><span>5.00</span></div>
+        <div class="vector-grid"><b>Rotation</b><span>0.0</span><span>0.0</span><span>0.0</span></div>
+        <div class="vector-grid"><b>Scale</b><span>1.00</span><span>1.00</span><span>1.00</span></div>
+      </section>
+    </aside>
+  </section>
+</main>
+
+<script>
+  const preview = document.querySelector('[data-preview]')
+  const note = document.querySelector('[data-direction-note]')
+  const buttons = [...document.querySelectorAll('[data-theme-button]')]
+  const notes = {
+    glass: 'floating / luminous / cinematic',
+    minimal: 'precise / quiet / tool-focused',
+    tactical: 'technical / rigid / high-signal',
+  }
+
+  function selectTheme(theme) {
+    preview.dataset.theme = theme
+    note.textContent = notes[theme]
+    for (const button of buttons) {
+      button.ariaPressed = String(button.dataset.themeButton === theme)
+    }
+    const url = new URL(location.href)
+    url.searchParams.set('theme', theme)
+    history.replaceState(null, '', url)
+  }
+
+  for (const button of buttons) {
+    button.addEventListener('click', () => selectTheme(button.dataset.themeButton))
+  }
+
+  const requested = new URL(location.href).searchParams.get('theme')
+  if (requested in notes) selectTheme(requested)
+</script>

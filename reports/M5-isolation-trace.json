@@ -1,0 +1,84 @@
+{
+  "date": "2026-08-17",
+  "harnessUrl": "http://127.0.0.1:51789",
+  "profileRoot": "/tmp/threejs-editor-m5-final-home-20260817",
+  "projectRoot": "/tmp/threejs-editor-m5-final-projects-20260817",
+  "catalog": [
+    "mcp__threejs__create_project",
+    "mcp__threejs__open_editor"
+  ],
+  "revisionBeforeResources": "ce7fabd0ccf3fc0680ee6ce9ab54e1c30c9b315d8c74c5729e1706a943747d2e",
+  "revisionAfterResources": "ce7fabd0ccf3fc0680ee6ce9ab54e1c30c9b315d8c74c5729e1706a943747d2e",
+  "frames": {
+    "outer": {
+      "width": 748,
+      "height": 636
+    },
+    "inner": {
+      "width": 748,
+      "height": 636
+    },
+    "runtime": {
+      "width": 730,
+      "height": 360
+    }
+  },
+  "runtime": {
+    "origin": "null",
+    "sandbox": "allow-scripts",
+    "modules": [
+      "color.js",
+      "main.js"
+    ],
+    "webgl2": true,
+    "webgpu": {
+      "api": true,
+      "adapter": true
+    },
+    "pixels": {
+      "width": 720,
+      "height": 420,
+      "sampled": 75600,
+      "lit": 17783,
+      "colors": 5
+    }
+  },
+  "isolation": {
+    "parentDomBlocked": true,
+    "topNavigationBlocked": true,
+    "appBridgeGlobal": "undefined",
+    "forgedRpcSent": true,
+    "forgedRpcAuthorized": false
+  },
+  "commandProof": {
+    "upstream": "three.js r185",
+    "commandTypes": [
+      "AddObjectCommand",
+      "SetPositionCommand",
+      "SetMaterialValueCommand",
+      "MultiCmdsCommand",
+      "History"
+    ],
+    "addObjectRoundTrip": true,
+    "historyRoundTrip": true,
+    "humanAiEquivalent": true,
+    "batchUndoRedo": true,
+    "finalPosition": [
+      1.25,
+      2.5,
+      -0.75
+    ],
+    "finalRoughness": 0.35
+  },
+  "diagnostics": {
+    "unhandledRejection": "M5 expected unhandled rejection",
+    "buildError": "unresolved module missing.js",
+    "unexpectedAppProblems": []
+  },
+  "teardown": {
+    "lastSampledFrame": 120,
+    "frameAtStop": 126,
+    "messagesAfterStop": 0,
+    "runtimeFrameVisible": false
+  }
+}
