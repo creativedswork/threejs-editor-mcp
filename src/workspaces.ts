@@ -17,6 +17,7 @@ import {
   extname,
   isAbsolute,
   join,
+  posix,
   relative,
   resolve,
   sep,
@@ -42,12 +43,25 @@ const MAX_FILES = 512
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024
 const MAX_TEXT_READ_BYTES = 512 * 1024
+const MAX_DISCOVERY_DIRECTORIES = 2048
+const MAX_DISCOVERED_PROJECTS = 200
 const EXCLUDED_DIRECTORIES = new Set([
   '.git',
   '.threejs-editor',
   'dist',
   'node_modules',
 ])
+const MODULE_EXTENSIONS = [
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.json',
+  '.glsl',
+  '.wgsl',
+  '.tsl',
+]
 
 export const workspacePathSchema = z.string().min(1).max(512)
 export const workspaceFileSchema = z.object({
@@ -126,6 +140,16 @@ export interface WorkspaceSummary {
   title: string
   revision: string
   kind: WorkspaceKind
+}
+
+export interface WorkspaceProjectCandidate {
+  projectPath: string
+  title: string
+  format: 'example-gallery'
+  entry: string
+  backend: 'webgl' | 'webgpu' | 'raw-webgpu'
+  available: boolean
+  issue?: string
 }
 
 export interface WorkspaceSnapshot extends WorkspaceSummary {
@@ -223,6 +247,27 @@ function safePath(input: string): string {
   return parts.join('/')
 }
 
+function safeProjectPath(input: string): string {
+  return input === '.' ? '' : safePath(input)
+}
+
+function moduleSpecifiers(source: string): string[] {
+  const specifiers = new Set<string>()
+  // ponytail: static ESM imports cover the gallery; use a lexer if it adopts computed imports.
+  const patterns = [
+    /\b(?:import|export)\s+(?:[^"'();]*?\s+from\s*)?["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+  ]
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) specifiers.add(match[1])
+  }
+  return [...specifiers]
+}
+
+function isThreeSpecifier(specifier: string): boolean {
+  return specifier === 'three' || specifier.startsWith('three/')
+}
+
 function mediaType(path: string, bytes: Buffer): { mediaType: string; text: boolean } {
   const extension = extname(path).toLowerCase()
   const known = new Map([
@@ -310,6 +355,12 @@ export class WorkspaceStore {
         throw new Error(`managed workspace ${entry.name} has an invalid path`)
       }
       this.workspaces.set(entry.name, { path, kind: 'managed-workspace' })
+      try {
+        await readFile(join(path, 'THREEJS-EXAMPLE-SOURCE.json'))
+        this.sessionWorkspaceIds.add(entry.name)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
     }
     const roots = await Promise.all(allowlistedRoots.map(async root => realpath(resolve(root))))
     for (const registration of registrations) {
@@ -361,6 +412,132 @@ export class WorkspaceStore {
     this.workspaces.set(projectId, { path: resolved, kind: 'linked-workspace' })
     this.sessionWorkspaceIds.add(projectId)
     return this.load(projectId)
+  }
+
+  async discoverSessionProjects(path: string): Promise<WorkspaceProjectCandidate[]> {
+    await this.ready
+    const root = await this.sessionRoot(path)
+    const projects: WorkspaceProjectCandidate[] = []
+    let directories = 0
+    const visit = async (directory: string, prefix = ''): Promise<void> => {
+      directories += 1
+      if (directories > MAX_DISCOVERY_DIRECTORIES) {
+        throw new Error('workspace project discovery exceeds 2048 directories')
+      }
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) continue
+        const projectPath = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+        if (entry.isDirectory()) {
+          if (!EXCLUDED_DIRECTORIES.has(entry.name)) {
+            await visit(join(directory, entry.name), projectPath)
+          }
+          continue
+        }
+        if (!entry.isFile() || entry.name !== 'example.json') continue
+        const scenePath = join(directory, 'scene.js')
+        try {
+          const sceneInfo = await lstat(scenePath)
+          if (!sceneInfo.isFile() || sceneInfo.isSymbolicLink()) continue
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+          throw error
+        }
+        const candidate = await this.exampleCandidate(
+          root,
+          prefix || '.',
+        )
+        projects.push(candidate)
+        if (projects.length > MAX_DISCOVERED_PROJECTS) {
+          throw new Error('workspace project discovery exceeds 200 projects')
+        }
+      }
+    }
+    await visit(root)
+    return projects.sort((left, right) => left.projectPath.localeCompare(right.projectPath))
+  }
+
+  async importSessionProject(
+    path: string,
+    projectPath: string,
+  ): Promise<WorkspaceSnapshot> {
+    await this.ready
+    const root = await this.sessionRoot(path)
+    const selectedPath = safeProjectPath(projectPath)
+    const candidate = await this.exampleCandidate(root, projectPath)
+    if (!candidate.available) {
+      throw new Error(
+        `${candidate.issue} Select a DSH workspace that contains the complete project, then retry open_editor. Do not run npm, an external dev server, or an HTML fallback.`,
+      )
+    }
+    const files = await this.collectExampleFiles(root, candidate.entry)
+    const examplePath = selectedPath === '' ? 'example.json' : `${selectedPath}/example.json`
+    files.set(examplePath, await readFile(await this.realFile(root, examplePath)))
+    const sourceRevision = digest(canonicalBytes([...files]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([filePath, bytes]) => [filePath, digest(bytes)])))
+    const projectId = `example-${
+      digest(new TextEncoder().encode(
+        `${root}\0${selectedPath}\0${sourceRevision}`,
+      )).slice(0, 56)
+    }`
+    const current = this.workspaces.get(projectId)
+    if (current !== undefined) {
+      this.sessionWorkspaceIds.add(projectId)
+      return this.load(projectId)
+    }
+
+    const managedRoot = await this.managedRoot
+    const target = join(managedRoot, projectId)
+    const temporary = join(managedRoot, `.${projectId}-${randomUUID()}`)
+    try {
+      for (const [filePath, bytes] of files) {
+        const destination = join(temporary, ...filePath.split('/'))
+        await mkdir(dirname(destination), { recursive: true })
+        await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 })
+      }
+      await writeFile(join(temporary, 'package.json'), canonicalBytes({
+        name: projectId,
+        private: true,
+        type: 'module',
+        dependencies: { three: '0.185.1' },
+      }), { flag: 'wx', mode: 0o600 })
+      await mkdir(join(temporary, '.threejs-editor'), { recursive: true })
+      await writeFile(
+        join(temporary, '.threejs-editor', 'project.json'),
+        canonicalBytes({
+          schemaVersion: 2,
+          kind: 'managed-workspace',
+          title: candidate.title,
+          entry: candidate.entry,
+          backend: candidate.backend,
+          dependencies: { three: '0.185.1' },
+          runtime: {
+            debugModes: await this.exampleDebugModes(root, projectPath),
+            qualityTiers: ['default'],
+            parameters: [],
+          },
+        }),
+        { flag: 'wx', mode: 0o600 },
+      )
+      await writeFile(
+        join(temporary, 'THREEJS-EXAMPLE-SOURCE.json'),
+        canonicalBytes({
+          format: candidate.format,
+          projectPath: candidate.projectPath,
+        }),
+        { flag: 'wx', mode: 0o600 },
+      )
+      await rename(temporary, target)
+      this.workspaces.set(projectId, {
+        path: target,
+        kind: 'managed-workspace',
+      })
+      this.sessionWorkspaceIds.add(projectId)
+      return this.load(projectId)
+    } catch (error) {
+      await rm(temporary, { recursive: true, force: true })
+      throw error
+    }
   }
 
   async createManaged(
@@ -767,7 +944,7 @@ export class WorkspaceStore {
     const visit = async (directory: string, prefix = ''): Promise<void> => {
       const entries = await readdir(directory, { withFileTypes: true })
       for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-        if (prefix === '' && EXCLUDED_DIRECTORIES.has(entry.name)) continue
+        if (EXCLUDED_DIRECTORIES.has(entry.name)) continue
         const relativePath = prefix === '' ? entry.name : `${prefix}/${entry.name}`
         const fullPath = join(directory, entry.name)
         const info = await lstat(fullPath)
@@ -809,6 +986,195 @@ export class WorkspaceStore {
       await this.writeAtomic(configPath, canonicalBytes(config))
     }
     return workspaceManifestSchema.parse({ ...config, kind: registration.kind, files })
+  }
+
+  private async sessionRoot(path: string): Promise<string> {
+    if (!isAbsolute(path)) throw new Error('DSH workspace path must be absolute')
+    const root = await realpath(path)
+    const info = await lstat(root)
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error('DSH workspace must be a real directory')
+    }
+    return root
+  }
+
+  private async exampleCandidate(
+    root: string,
+    projectPath: string,
+  ): Promise<WorkspaceProjectCandidate> {
+    const selectedPath = safeProjectPath(projectPath)
+    if (selectedPath !== '') await this.realFile(root, selectedPath, true)
+    const manifestPath = await this.realFile(
+      root,
+      selectedPath === '' ? 'example.json' : `${selectedPath}/example.json`,
+    )
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    const title = typeof manifest.title === 'string' && manifest.title.trim() !== ''
+      ? manifest.title.slice(0, 120)
+      : projectPath.split('/').at(-1) ?? 'Three.js example'
+    const backendText = typeof manifest.backend === 'string' ? manifest.backend.toLowerCase() : ''
+    const backend = backendText.includes('raw webgpu')
+      ? 'raw-webgpu'
+      : backendText.includes('webgpu')
+        ? 'webgpu'
+        : 'webgl'
+    const entry = selectedPath === '' ? 'scene.js' : `${selectedPath}/scene.js`
+    const issue = await this.exampleAvailabilityIssue(root, entry, selectedPath)
+    return {
+      projectPath: projectPath === '' ? '.' : projectPath,
+      title,
+      format: 'example-gallery',
+      entry,
+      backend,
+      available: issue === undefined,
+      ...(issue === undefined ? {} : { issue }),
+    }
+  }
+
+  private async exampleDebugModes(root: string, projectPath: string): Promise<string[]> {
+    const selectedPath = safeProjectPath(projectPath)
+    const manifestPath = await this.realFile(
+      root,
+      selectedPath === '' ? 'example.json' : `${selectedPath}/example.json`,
+    )
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    if (!Array.isArray(manifest.debugModes)) return ['final']
+    const modes = manifest.debugModes.flatMap(value => {
+      if (typeof value === 'string') return [value]
+      if (value !== null
+        && typeof value === 'object'
+        && typeof (value as Record<string, unknown>).value === 'string') {
+        return [(value as Record<string, string>).value]
+      }
+      return []
+    })
+    return modes.length === 0 ? ['final'] : modes
+  }
+
+  private async exampleAvailabilityIssue(
+    root: string,
+    entry: string,
+    projectPath: string,
+  ): Promise<string | undefined> {
+    const queue = [entry]
+    const visited = new Set<string>()
+    while (queue.length > 0) {
+      const filePath = queue.shift()!
+      if (visited.has(filePath)) continue
+      visited.add(filePath)
+      let bytes: Buffer
+      try {
+        bytes = await readFile(await this.realFile(root, filePath))
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return `Project module is missing inside the selected DSH workspace: ${filePath}.`
+        }
+        throw error
+      }
+      if (!mediaType(filePath, bytes).text) continue
+      for (const specifier of moduleSpecifiers(bytes.toString('utf8'))) {
+        if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
+          if (!isThreeSpecifier(specifier)) {
+            return `Project dependency is outside the pinned runtime profile: ${specifier}.`
+          }
+          continue
+        }
+        const resolved = await this.resolveModule(root, specifier, filePath)
+        if (resolved === undefined) {
+          return specifier.startsWith('/')
+            ? `Project import ${specifier} is outside the selected DSH workspace.`
+            : `Project module cannot be resolved inside the selected DSH workspace: ${specifier}.`
+        }
+        if (projectPath === ''
+          || resolved === projectPath
+          || resolved.startsWith(`${projectPath}/`)) {
+          queue.push(resolved)
+        }
+      }
+    }
+    return undefined
+  }
+
+  private async collectExampleFiles(
+    root: string,
+    entry: string,
+  ): Promise<Map<string, Buffer>> {
+    const files = new Map<string, Buffer>()
+    const queue = [entry]
+    let total = 0
+    while (queue.length > 0) {
+      const filePath = queue.shift()!
+      if (files.has(filePath)) continue
+      const bytes = await readFile(await this.realFile(root, filePath))
+      if (bytes.length > MAX_FILE_BYTES) throw new Error(`file ${filePath} exceeds 1 MiB`)
+      total += bytes.length
+      if (total > MAX_TOTAL_BYTES) throw new Error('selected project exceeds 16 MiB')
+      files.set(filePath, bytes)
+      if (files.size > MAX_FILES) throw new Error('selected project exceeds 512 files')
+      if (!mediaType(filePath, bytes).text) continue
+      for (const specifier of moduleSpecifiers(bytes.toString('utf8'))) {
+        if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
+          if (!isThreeSpecifier(specifier)) {
+            throw new Error(`dependency ${JSON.stringify(specifier)} is not in the pinned M7 profile`)
+          }
+          continue
+        }
+        const resolved = await this.resolveModule(root, specifier, filePath)
+        if (resolved === undefined) {
+          throw new Error(`workspace module not found: ${specifier}`)
+        }
+        queue.push(resolved)
+      }
+    }
+    return files
+  }
+
+  private async resolveModule(
+    root: string,
+    request: string,
+    importer: string,
+  ): Promise<string | undefined> {
+    const clean = request.split('?')[0]
+    const candidate = clean.startsWith('/')
+      ? posix.normalize(clean.slice(1))
+      : posix.normalize(posix.join(posix.dirname(importer), clean))
+    if (candidate === '' || candidate === '..' || candidate.startsWith('../')) return undefined
+    const attempts = [
+      candidate,
+      ...extname(candidate) === ''
+        ? MODULE_EXTENSIONS.map(extension => `${candidate}${extension}`)
+        : [],
+      ...MODULE_EXTENSIONS.map(extension => `${candidate}/index${extension}`),
+    ]
+    for (const attempt of attempts) {
+      try {
+        await this.realFile(root, attempt)
+        return attempt
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+    return undefined
+  }
+
+  private async realFile(
+    root: string,
+    path: string,
+    directory = false,
+  ): Promise<string> {
+    const safe = safePath(path)
+    const candidate = resolve(root, ...safe.split('/'))
+    if (!isWithin(root, candidate)) throw new Error(`workspace path escapes root: ${path}`)
+    const info = await lstat(candidate)
+    if (info.isSymbolicLink()) throw new Error(`workspace path is a symlink: ${path}`)
+    if (directory ? !info.isDirectory() : !info.isFile()) {
+      throw new Error(`workspace path has the wrong type: ${path}`)
+    }
+    const resolved = await realpath(candidate)
+    if (resolved !== candidate || !isWithin(root, resolved)) {
+      throw new Error(`workspace path contains a symlink: ${path}`)
+    }
+    return resolved
   }
 
   private validateManifestLimits(manifest: WorkspaceManifest): void {

@@ -1,6 +1,6 @@
 # Three.js Collaborative Game Studio V2 可执行规划
 
-状态：**M6 与 M6.1 已获批准；M7 已完成验证、等待批准；M8-M11 继续执行阶段确认门禁**
+状态：**M6 与 M6.1 已获批准；M7 用户验收修正完成、等待重新批准；M8-M11 继续执行阶段确认门禁**
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
 [`98453747`](https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills/tree/98453747cc0678f6a5d910f38d7483596a5f9a40)
@@ -530,7 +530,7 @@ Server 启动前预注册游戏路径。
 
 ### M7：Module Builder、source map 与复杂程序几何
 
-状态：**实现和验证完成；等待用户批准**
+状态：**用户验收修正完成；等待用户重新批准**
 
 目标：建立通用多文件构建和 renderer ownership。
 
@@ -551,10 +551,16 @@ Server 启动前预注册游戏路径。
 - `metrics()` 返回 emitted parts 和 triangle evidence；
 - final/topology/no-livery debug mode 可切换；
 - Runtime dispose 后再次 Play 不增加重复 renderer 或循环。
+- 在 `Threejs-Awesome-Graphics-Agent-Skills` 仓库根中，自然语言列出 37 个演示
+  工程后，`formula-one-race-car` 必须通过
+  `list_projects -> open_editor({ projectPath })` 直接打开 MCP App；
+- 工具序列不得包含 shell、`npm install`、gallery server 或 HTML fallback；
+- 只选择 `dev/example-gallery/examples` 时，工具必须明确报告 import closure 超出
+  当前授权根，并要求用户重新选择仓库根，不得自动向父目录扩大权限。
 
 产物：`reports/M7-validation.md`、`reports/M7-runtime-trace.json`、
 `reports/M7-real-llm-validation.md`、`reports/M7-real-llm-trace.json`、
-P1 debug mode contact sheet。
+`reports/M7-gallery-real-llm-trace.json`、P1 debug mode contact sheet。
 
 ### M8：交互式多 Pass WebGL
 

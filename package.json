@@ -45,6 +45,7 @@
     "test:e2e:m5": "node tests/m5-browser.mjs",
     "test:e2e:m6": "node tests/m6-browser.mjs",
     "test:e2e:m7": "node tests/m7-browser.mjs",
+    "test:e2e:m7-gallery": "node tests/m7-gallery-browser.mjs",
     "check:upstream": "node scripts/sync-three-editor.mjs",
     "test:pack": "pnpm run build && node tests/packed-install.mjs",
     "check": "pnpm run check:upstream && pnpm run typecheck && pnpm run test",

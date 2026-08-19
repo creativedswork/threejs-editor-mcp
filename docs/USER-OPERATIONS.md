@@ -274,6 +274,47 @@ unset DEEPSEEK_API_KEY
 
 不需要先进入游戏目录启动 DSH，也不需要把游戏路径写进 MCP 配置。
 
+### 6. 从多项目仓库打开一个演示工程
+
+多项目仓库必须选择能够包含工程完整 import closure 的目录。以
+`Threejs-Awesome-Graphics-Agent-Skills` 为例，应选择仓库根目录，不要只选择：
+
+```text
+dev/example-gallery/examples
+```
+
+Formula One Race Car 还会导入仓库根下的：
+
+```text
+dev/example-gallery/support
+skills/threejs-procedural-geometry
+```
+
+选择仓库根目录后，可以直接发送：
+
+```text
+列出这些图形/特效演示工程
+为我打开程序化几何 formula-one-race-car 这个
+```
+
+预期工具序列只有：
+
+```text
+list_projects({})
+open_editor({
+  "projectPath":
+    "dev/example-gallery/examples/threejs-procedural-geometry/formula-one-race-car"
+})
+```
+
+`list_projects` 只返回相对 `projectPath`。`open_editor` 会在 Editor 的
+`--root/.managed-workspaces` 下创建绑定源文件 revision 的受管投影，并通过 MCP App
+打开；它不会修改示例仓库、执行 `npm install`、启动 gallery server 或打开 HTML
+页面。
+
+如果当前 DSH Workspace 只包含部分依赖，工具会要求重新选择包含完整工程的目录。
+Server 不会自动向父目录扩大授权范围，也不会退回外部 dev server。
+
 ## 真实 LLM 验收
 
 真实模型运行时不要加载：

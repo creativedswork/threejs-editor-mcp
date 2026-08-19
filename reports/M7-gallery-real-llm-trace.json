@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-19",
+  "status": "pass",
+  "harness": {
+    "url": "http://127.0.0.1:51842",
+    "freshProfile": true,
+    "replayLoaded": false,
+    "sessionId": "session-fdb753b5-0339-41ba-8980-2b6796fe7067",
+    "turns": 2,
+    "steps": 4
+  },
+  "model": {
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash",
+    "reasoningEffort": "high"
+  },
+  "workspace": {
+    "source": "https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills",
+    "commit": "98453747cc0678f6a5d910f38d7483596a5f9a40",
+    "selection": "repository root"
+  },
+  "prompts": [
+    "列出这些图形/特效演示工程",
+    "为我打开程序化几何 formula-one-race-car 这个"
+  ],
+  "toolCalls": [
+    {
+      "turn": 1,
+      "step": 1,
+      "name": "mcp__threejs__list_projects",
+      "arguments": {}
+    },
+    {
+      "turn": 2,
+      "step": 1,
+      "name": "mcp__threejs__open_editor",
+      "arguments": {
+        "projectPath": "dev/example-gallery/examples/threejs-procedural-geometry/formula-one-race-car"
+      }
+    }
+  ],
+  "forbiddenToolCalls": [],
+  "discovery": {
+    "projects": 37,
+    "ready": 36,
+    "restricted": 1
+  },
+  "opened": {
+    "projectId": "example-eaade9fd7df77cfa322db6a9e5e17edb48a6176c4e69abaa97fa2b72",
+    "revision": "ec973b281cbd45e87f8dd25d4dbaff25133eb766113d3f99d7b6174dc3f0a645",
+    "kind": "managed-workspace",
+    "appTool": "mcp__threejs__open_editor"
+  },
+  "buildAudit": {
+    "buildId": "36ea7bcb224e392f874db19a2f94e013e6401f4e09b8f0baf5c8af7d7e9d83fb",
+    "status": "ready",
+    "backend": "webgpu",
+    "diagnostics": [],
+    "inputs": 15,
+    "bundleBytes": 3168474,
+    "sourceMapBytes": 6561027
+  },
+  "visualEvidence": {
+    "path": "reports/assets/m7-gallery-direct-open.png",
+    "sha256": "bc2961b55a73b248df3ea5fc32fb22370f0d788b8fe698f1597534785dc37cdc",
+    "transport": "deterministic replay over the real Harness, Host, MCP Server, and MCP App"
+  },
+  "environmentNotes": [
+    "The integrated browser completed the deterministic and real-model user paths.",
+    "A standalone system-Chrome Playwright rerun was blocked by the TRAE sandbox when Chrome Crashpad and Updater attempted writes outside the workspace."
+  ]
+}

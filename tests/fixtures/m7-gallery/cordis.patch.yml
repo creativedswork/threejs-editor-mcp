@@ -1,0 +1,20 @@
+- id: mcp-apps
+  config:
+    maxBodyBytes: 4194304
+    servers:
+      - serverName: threejs
+        transport: stdio
+        command: !!js process.env.THREEJS_EDITOR_MCP_SERVER
+        forwardWorkspace: true
+        args:
+          - --root
+          - !!js process.env.THREEJS_EDITOR_MCP_PROJECTS
+        cwd: !!js process.env.THREEJS_EDITOR_MCP_ROOT
+- id: llm-deepseek
+  disabled: true
+
+- id: session-title-llm
+  disabled: true
+
+- id: directory-picker
+  disabled: true

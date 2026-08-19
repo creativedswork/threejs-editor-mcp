@@ -64,6 +64,18 @@ const CSP = {
   baseUriDomains: [] as string[],
 }
 const projectIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)
+const sessionProjectPathSchema = z.string()
+  .min(1)
+  .max(512)
+  .refine(value => (
+    value === '.'
+    || (!value.includes('\0')
+      && !value.includes('\\')
+      && !value.startsWith('/')
+      && value.split('/').every(part => part !== '' && part !== '.' && part !== '..'))
+  ), {
+    message: 'projectPath must be a relative POSIX path',
+  })
 const revisionSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const buildIdSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const buildDiagnosticSchema = z.object({
@@ -110,6 +122,15 @@ const summarySchema = z.object({
 })
 const workspaceSummarySchema = summarySchema.extend({
   kind: z.enum(['linked-workspace', 'managed-workspace']),
+})
+const workspaceProjectCandidateSchema = z.object({
+  projectPath: sessionProjectPathSchema,
+  title: z.string(),
+  format: z.literal('example-gallery'),
+  entry: workspacePathSchema,
+  backend: z.enum(['webgl', 'webgpu', 'raw-webgpu']),
+  available: z.boolean(),
+  issue: z.string().optional(),
 })
 const workspaceViewSchema = z.object({
   kind: z.enum(['linked-workspace', 'managed-workspace']),
@@ -238,14 +259,19 @@ function workspaceRegistration(value: string): WorkspaceRegistration {
   }
 }
 
-function dshWorkspacePath(meta: Record<string, unknown> | undefined): string {
+function optionalDshWorkspacePath(
+  meta: Record<string, unknown> | undefined,
+): string | undefined {
   const parsed = z.object({ cwd: z.string().min(1) }).safeParse(
     meta?.[DSH_WORKSPACE_META_KEY],
   )
-  if (!parsed.success) {
-    throw new Error('current DSH workspace is unavailable; select a workspace or pass projectId')
-  }
-  return parsed.data.cwd
+  return parsed.success ? parsed.data.cwd : undefined
+}
+
+function dshWorkspacePath(meta: Record<string, unknown> | undefined): string {
+  const path = optionalDshWorkspacePath(meta)
+  if (path !== undefined) return path
+  throw new Error('current DSH workspace is unavailable; select a workspace or pass projectId')
 }
 
 function decodeBase64(value: string): Buffer {
@@ -982,28 +1008,54 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'list_projects', {
     title: 'List Three.js projects',
-    description: 'Lists Scene projects and explicitly registered local or managed workspaces.',
+    description:
+      'Lists registered projects and discovers Three.js examples in the current DSH workspace. Use a returned projectPath with open_editor; do not use a dev server or HTML fallback.',
     inputSchema: {},
-    outputSchema: z.object({ projects: z.array(summarySchema) }),
+    outputSchema: z.object({
+      projects: z.array(summarySchema),
+      workspaceProjects: z.array(workspaceProjectCandidateSchema),
+    }),
     _meta: { ui: { visibility: ['model'] } },
-  }, async () => {
-    const [sceneProjects, workspaceProjects] = await Promise.all([
+  }, async (_arguments, extra) => {
+    const workspacePath = optionalDshWorkspacePath(extra._meta)
+    const [sceneProjects, registeredWorkspaces, workspaceProjects] = await Promise.all([
       store.list(),
       workspaces.list(),
+      workspacePath === undefined
+        ? Promise.resolve([])
+        : workspaces.discoverSessionProjects(workspacePath),
     ])
     const projects = [
       ...sceneProjects,
-      ...workspaceProjects,
+      ...registeredWorkspaces,
     ].sort((left, right) => left.projectId.localeCompare(right.projectId))
+    if (workspacePath === undefined) {
+      return textResult(
+        projects.length === 0
+          ? 'No Three.js projects exist.'
+          : `Three.js projects: ${projects.map(project => (
+            'kind' in project
+              ? `${project.projectId} (${project.title}, ${project.kind})`
+              : `${project.projectId} (${project.title})`
+          )).join(', ')}`,
+        { projects, workspaceProjects },
+      )
+    }
+    const registeredText = projects.length === 0
+      ? 'No registered Three.js projects.'
+      : `Registered Three.js projects: ${projects.map(project => (
+        'kind' in project
+          ? `${project.projectId} (${project.title}, ${project.kind})`
+          : `${project.projectId} (${project.title})`
+      )).join(', ')}.`
+    const workspaceText = workspaceProjects.length === 0
+      ? ' No Three.js examples were discovered in the current DSH workspace.'
+      : ` Current DSH workspace examples: ${workspaceProjects.map(project => (
+        `${project.projectPath} (${project.title}, ${project.available ? 'ready' : project.issue})`
+      )).join(', ')}. Open one with open_editor({ projectPath }).`
     return textResult(
-      projects.length === 0
-        ? 'No Three.js projects exist.'
-        : `Three.js projects: ${projects.map(project => (
-          'kind' in project
-            ? `${project.projectId} (${project.title}, ${project.kind})`
-            : `${project.projectId} (${project.title})`
-        )).join(', ')}`,
-      { projects },
+      `${registeredText}${workspaceText}`,
+      { projects, workspaceProjects },
     )
   })
 
@@ -1055,8 +1107,12 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'open_editor', {
     title: 'Open Three.js editor',
-    description: 'Opens an existing project, or the current DSH workspace when projectId is omitted.',
-    inputSchema: { projectId: projectIdSchema.optional() },
+    description:
+      'Opens an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath. Never compile or serve project HTML as a fallback.',
+    inputSchema: {
+      projectId: projectIdSchema.optional(),
+      projectPath: sessionProjectPathSchema.optional(),
+    },
     outputSchema: summarySchema,
     _meta: {
       ui: {
@@ -1064,11 +1120,36 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         visibility: ['model'],
       },
     },
-  }, async ({ projectId }, extra) => {
+  }, async ({ projectId, projectPath }, extra) => {
+    if (projectId !== undefined && projectPath !== undefined) {
+      throw new Error('pass either projectId or projectPath, not both')
+    }
+    if (projectPath !== undefined) {
+      return summaryResult(
+        'Opened current DSH workspace example',
+        await workspaces.importSessionProject(
+          dshWorkspacePath(extra._meta),
+          projectPath,
+        ),
+      )
+    }
     if (projectId === undefined) {
+      const path = dshWorkspacePath(extra._meta)
+      const candidates = await workspaces.discoverSessionProjects(path)
+      if (candidates.length === 1) {
+        return summaryResult(
+          'Opened current DSH workspace example',
+          await workspaces.importSessionProject(path, candidates[0].projectPath),
+        )
+      }
+      if (candidates.length > 1) {
+        throw new Error(
+          `Current DSH workspace contains ${candidates.length} Three.js examples. Call list_projects, choose one projectPath, then call open_editor with that projectPath. Do not run npm, an external dev server, or an HTML fallback.`,
+        )
+      }
       return summaryResult(
         'Opened current DSH workspace',
-        await workspaces.registerSessionWorkspace(dshWorkspacePath(extra._meta)),
+        await workspaces.registerSessionWorkspace(path),
       )
     }
     const workspace = await loadWorkspace(projectId)

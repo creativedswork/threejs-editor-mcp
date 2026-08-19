@@ -196,3 +196,149 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
     await game.close()
   }
 })
+
+test('M7 discovers gallery projects and opens one through the MCP App contract', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m7-gallery-projects-'))
+  const repository = await mkdtemp(join(tmpdir(), 'threejs-editor-m7-gallery-repository-'))
+  const examples = join(repository, 'dev', 'example-gallery', 'examples')
+  const projectPath = 'dev/example-gallery/examples/threejs-procedural-geometry/formula-one-race-car'
+  const project = join(repository, projectPath)
+  await mkdir(project, { recursive: true })
+  await mkdir(join(repository, 'dev', 'example-gallery', 'support'), { recursive: true })
+  await mkdir(join(repository, 'skills', 'threejs-procedural-geometry'), { recursive: true })
+  await mkdir(join(examples, 'unrelated-large-example'), { recursive: true })
+  await mkdir(join(examples, 'second-example'), { recursive: true })
+  await writeFile(join(project, 'example.json'), JSON.stringify({
+    title: 'Formula One Race Car',
+    backend: 'WebGPU / TSL node materials',
+    debugModes: [{ value: 'final' }, { value: 'topology' }],
+  }))
+  await writeFile(join(project, 'scene.js'), `
+import { createCar } from './race-car-scene.js'
+export default {
+  backend: 'webgpu',
+  setup({ scene }) {
+    scene.add(createCar())
+    return { metrics: () => ({ emittedParts: 62 }) }
+  },
+}
+`.trimStart())
+  await writeFile(join(project, 'race-car-scene.js'), `
+import { createStage } from '/dev/example-gallery/support/studio-stage.js'
+import { createModel } from '/skills/threejs-procedural-geometry/race-car-model.js'
+export function createCar() {
+  createStage()
+  return createModel()
+}
+`.trimStart())
+  await writeFile(
+    join(repository, 'dev', 'example-gallery', 'support', 'studio-stage.js'),
+    'export function createStage() { return true }\n',
+  )
+  await writeFile(
+    join(repository, 'skills', 'threejs-procedural-geometry', 'race-car-model.js'),
+    "import * as THREE from 'three/webgpu'\nexport function createModel() { return new THREE.Group() }\n",
+  )
+  await writeFile(
+    join(examples, 'unrelated-large-example', 'texture.bin'),
+    Buffer.alloc(1024 * 1024 + 1),
+  )
+  await writeFile(
+    join(examples, 'second-example', 'example.json'),
+    JSON.stringify({ title: 'Second Example', backend: 'WebGL' }),
+  )
+  await writeFile(
+    join(examples, 'second-example', 'scene.js'),
+    'export default { setup() { return {} } }\n',
+  )
+
+  const client = new Client({
+    name: 'threejs-editor-mcp-m7-gallery-test',
+    version: '0.0.0',
+  })
+  await client.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--root', root],
+  }))
+  try {
+    const narrowMeta = {
+      'ai.deepseek.dsh/workspace': { cwd: examples },
+    }
+    const narrowList = await client.callTool({
+      name: 'list_projects',
+      arguments: {},
+      _meta: narrowMeta,
+    })
+    const narrowCar = narrowList.structuredContent.workspaceProjects.find(
+      candidate => candidate.projectPath.endsWith('formula-one-race-car'),
+    )
+    assert.equal(narrowList.structuredContent.workspaceProjects.length, 2)
+    assert.equal(narrowCar.available, false)
+    assert.match(narrowCar.issue, /outside the selected DSH workspace/)
+    assert.equal(JSON.stringify(narrowList.structuredContent).includes(repository), false)
+
+    const ambiguous = await client.callTool({
+      name: 'open_editor',
+      arguments: {},
+      _meta: narrowMeta,
+    })
+    assert.equal(ambiguous.isError, true)
+    assert.match(ambiguous.content[0].text, /contains 2 Three\.js examples/)
+    assert.match(ambiguous.content[0].text, /Do not run npm/)
+
+    const unavailable = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectPath: narrowCar.projectPath },
+      _meta: narrowMeta,
+    })
+    assert.equal(unavailable.isError, true)
+    assert.match(unavailable.content[0].text, /Select a DSH workspace/)
+    assert.match(unavailable.content[0].text, /Do not run npm/)
+
+    const repositoryMeta = {
+      'ai.deepseek.dsh/workspace': { cwd: repository },
+    }
+    const listed = await client.callTool({
+      name: 'list_projects',
+      arguments: {},
+      _meta: repositoryMeta,
+    })
+    const car = listed.structuredContent.workspaceProjects.find(
+      candidate => candidate.projectPath === projectPath,
+    )
+    assert.equal(car.available, true)
+    assert.equal(car.backend, 'webgpu')
+    assert.equal(car.title, 'Formula One Race Car')
+
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectPath },
+      _meta: repositoryMeta,
+    })
+    assert.equal(opened.isError, undefined)
+    assert.match(opened.structuredContent.projectId, /^example-[a-f0-9]{56}$/)
+    assert.equal(opened.structuredContent.title, 'Formula One Race Car')
+    assert.equal(opened.structuredContent.kind, 'managed-workspace')
+    assert.equal(JSON.stringify(opened.structuredContent).includes(repository), false)
+
+    const built = await client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: opened.structuredContent.revision,
+      },
+    })
+    assert.equal(built.structuredContent.status, 'ready')
+    assert.deepEqual(built.structuredContent.diagnostics, [])
+    assert.ok(built.structuredContent.inputs.includes(`${projectPath}/scene.js`))
+    assert.ok(built.structuredContent.inputs.includes(
+      'skills/threejs-procedural-geometry/race-car-model.js',
+    ))
+    await assert.rejects(stat(join(repository, '.threejs-editor')))
+    await assert.rejects(stat(join(repository, 'node_modules')))
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(repository, { recursive: true, force: true })
+  }
+})
