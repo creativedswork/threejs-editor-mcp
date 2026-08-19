@@ -39,6 +39,66 @@ async function connect(root, allowlistedRoot, workspace) {
   return client
 }
 
+test('M6.1 opens the current DSH workspace without a model-visible path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m61-projects-'))
+  const workspace = await mkdtemp(join(tmpdir(), 'threejs-editor-m61-workspace-'))
+  await mkdir(join(workspace, 'src'))
+  await writeFile(join(workspace, 'package.json'), JSON.stringify({
+    name: 'current-game',
+    private: true,
+    dependencies: { three: '0.185.1' },
+  }, null, 2))
+  await writeFile(join(workspace, 'src', 'main.js'), 'export const current = true\n')
+
+  const client = new Client({
+    name: 'threejs-editor-mcp-m61-test',
+    version: '0.0.0',
+  })
+  await client.connect(new StdioClientTransport({
+    command: process.execPath,
+    args: [serverPath, '--root', root],
+  }))
+  try {
+    const withoutContext = await client.callTool({
+      name: 'open_editor',
+      arguments: {},
+    })
+    assert.equal(withoutContext.isError, true)
+
+    const request = {
+      name: 'open_editor',
+      arguments: {},
+      _meta: {
+        'ai.deepseek.dsh/workspace': { cwd: workspace },
+      },
+    }
+    const opened = await client.callTool(request)
+    assert.equal(opened.isError, undefined)
+    assert.equal(opened.structuredContent.kind, 'linked-workspace')
+    assert.match(opened.structuredContent.projectId, /^workspace-[a-f0-9]{54}$/)
+    assert.equal(opened.structuredContent.projectId.includes('current-game'), false)
+    assert.equal(Object.values(opened.structuredContent).includes(workspace), false)
+
+    const reopened = await client.callTool(request)
+    assert.equal(reopened.structuredContent.projectId, opened.structuredContent.projectId)
+    assert.equal(reopened.structuredContent.revision, opened.structuredContent.revision)
+    const listed = await client.callTool({
+      name: 'list_projects',
+      arguments: {},
+    })
+    assert.equal(
+      listed.structuredContent.projects.some(project => (
+        project.projectId === opened.structuredContent.projectId
+      )),
+      false,
+    )
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
 test('M6 workspaces preserve local files and commit revisioned atomic changes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m6-projects-'))
   const allowlistedRoot = await mkdtemp(join(tmpdir(), 'threejs-editor-m6-workspaces-'))

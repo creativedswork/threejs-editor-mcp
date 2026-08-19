@@ -227,6 +227,7 @@ export class WorkspaceStore {
   private readonly managedRoot: Promise<string>
   private readonly ready: Promise<void>
   private readonly workspaces = new Map<string, RegisteredWorkspace>()
+  private readonly sessionWorkspaceIds = new Set<string>()
   private readonly locks = new Map<string, Promise<void>>()
 
   constructor(
@@ -279,15 +280,31 @@ export class WorkspaceStore {
 
   async list(): Promise<WorkspaceSummary[]> {
     await this.ready
-    const summaries = await Promise.all([...this.workspaces].map(
-      async ([projectId]) => this.load(projectId),
-    ))
+    const summaries = await Promise.all([...this.workspaces]
+      .filter(([projectId]) => !this.sessionWorkspaceIds.has(projectId))
+      .map(async ([projectId]) => this.load(projectId)))
     return summaries.map(({ projectId, title, revision, kind }) => ({
       projectId,
       title,
       revision,
       kind,
     })).sort((left, right) => left.projectId.localeCompare(right.projectId))
+  }
+
+  async registerSessionWorkspace(path: string): Promise<WorkspaceSnapshot> {
+    await this.ready
+    if (!isAbsolute(path)) throw new Error('DSH workspace path must be absolute')
+    const resolved = await realpath(path)
+    const info = await lstat(resolved)
+    if (!info.isDirectory()) throw new Error('DSH workspace must be a real directory')
+    const projectId = `workspace-${digest(new TextEncoder().encode(resolved)).slice(0, 54)}`
+    const current = this.workspaces.get(projectId)
+    if (current !== undefined && current.path !== resolved) {
+      throw new Error('DSH workspace identity collision')
+    }
+    this.workspaces.set(projectId, { path: resolved, kind: 'linked-workspace' })
+    this.sessionWorkspaceIds.add(projectId)
+    return this.load(projectId)
   }
 
   async createManaged(

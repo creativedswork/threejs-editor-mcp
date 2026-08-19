@@ -5,11 +5,8 @@
       - serverName: threejs
         transport: stdio
         command: !!js process.env.THREEJS_EDITOR_MCP_SERVER
+        forwardWorkspace: true
         args:
           - --root
           - !!js process.env.THREEJS_EDITOR_MCP_PROJECTS
-          - --workspace-root
-          - !!js process.env.THREEJS_EDITOR_MCP_WORKSPACE_ROOT
-          - --workspace
-          - !!js "'linked-game=' + process.env.THREEJS_EDITOR_MCP_WORKSPACE"
         cwd: !!js process.env.THREEJS_EDITOR_MCP_ROOT

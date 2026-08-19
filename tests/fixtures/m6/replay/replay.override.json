@@ -14,7 +14,7 @@
           "type": "tool-call",
           "id": "call_threejs_editor_m6_open",
           "name": "mcp__threejs__open_editor",
-          "arguments": "{\"projectId\":\"linked-game\"}"
+          "arguments": "{}"
         }
       },
       {
@@ -69,7 +69,7 @@
           "type": "tool-call",
           "id": "call_threejs_editor_m6_inspect",
           "name": "mcp__threejs__inspect_project",
-          "arguments": "{\"projectId\":\"linked-game\"}"
+          "arguments": "{\"projectId\":\"{{fromRequest:workspace-[a-f0-9]{54}}}\"}"
         }
       },
       {
@@ -95,7 +95,7 @@
           "type": "tool-call",
           "id": "call_threejs_editor_m6_apply",
           "name": "mcp__threejs__apply_project_files",
-          "arguments": "{\"projectId\":\"linked-game\",\"baseRevision\":\"{{fromRequest:\\\"revision\\\":\\\"([a-f0-9]{64})\\\"}}\",\"changes\":[{\"type\":\"write\",\"path\":\"src/main.js\",\"text\":\"const collaboration = 'human + AI'\\n\\nreturn {\\n  start({ scene }) {\\n    scene.userData.collaboration = collaboration\\n  },\\n  update() {},\\n  dispose() {},\\n}\\n\"},{\"type\":\"write\",\"path\":\"src/game-state.js\",\"text\":\"export const gameState = {\\n  collaboration: 'human + AI',\\n  accent: '#56a8ff',\\n}\\n\"}]}"
+          "arguments": "{\"projectId\":\"{{fromRequest:workspace-[a-f0-9]{54}}}\",\"baseRevision\":\"{{fromRequest:\\\"revision\\\":\\\"([a-f0-9]{64})\\\"}}\",\"changes\":[{\"type\":\"write\",\"path\":\"src/main.js\",\"text\":\"const collaboration = 'human + AI'\\n\\nreturn {\\n  start({ scene }) {\\n    scene.userData.collaboration = collaboration\\n  },\\n  update() {},\\n  dispose() {},\\n}\\n\"},{\"type\":\"write\",\"path\":\"src/game-state.js\",\"text\":\"export const gameState = {\\n  collaboration: 'human + AI',\\n  accent: '#56a8ff',\\n}\\n\"}]}"
         }
       },
       {

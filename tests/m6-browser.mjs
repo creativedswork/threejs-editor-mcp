@@ -14,8 +14,7 @@ const serverCommand = process.env.THREEJS_EDITOR_MCP_SERVER
 if (serverCommand === undefined) throw new Error('THREEJS_EDITOR_MCP_SERVER is required')
 const projectRoot = resolve(process.env.THREEJS_EDITOR_MCP_ROOT ?? '.')
 const projectsRoot = resolve(process.env.THREEJS_EDITOR_MCP_PROJECTS ?? '.tmp/m6-projects')
-const workspaceRoot = resolve(process.env.THREEJS_EDITOR_MCP_WORKSPACE_ROOT ?? '.tmp/m6-workspaces')
-const workspacePath = resolve(process.env.THREEJS_EDITOR_MCP_WORKSPACE ?? `${workspaceRoot}/linked-game`)
+const workspacePath = resolve(process.env.THREEJS_EDITOR_MCP_WORKSPACE ?? '.tmp/m6-workspace')
 const artifacts = resolve(projectRoot, 'artifacts')
 const frames = resolve(process.env.M6_FRAMES_DIR ?? `${projectRoot}/.playwright-mcp/gif-frames-m6`)
 mkdirSync(artifacts, { recursive: true })
@@ -134,16 +133,20 @@ async function connectExternalClient() {
   })
   await client.connect(new StdioClientTransport({
     command: serverCommand,
-    args: [
-      '--root',
-      projectsRoot,
-      '--workspace-root',
-      workspaceRoot,
-      '--workspace',
-      `linked-game=${workspacePath}`,
-    ],
+    args: ['--root', projectsRoot],
   }))
-  return client
+  const opened = await client.callTool({
+    name: 'open_editor',
+    arguments: {},
+    _meta: {
+      'ai.deepseek.dsh/workspace': { cwd: workspacePath },
+    },
+  })
+  assert.equal(opened.isError, undefined)
+  return {
+    client,
+    projectId: opened.structuredContent.projectId,
+  }
 }
 
 async function enterFullscreen(appFrame) {
@@ -196,7 +199,7 @@ try {
   await page.getByRole('heading', { name: '选择工作区目录' }).waitFor()
   await page.getByRole('button', { name: '编辑路径' }).click()
   const pathInput = page.getByRole('textbox', { name: '编辑路径' })
-  await pathInput.fill(projectRoot)
+  await pathInput.fill(workspacePath)
   await pathInput.press('Enter')
   await page.getByRole('button', { name: '打开', exact: true }).click()
 
@@ -213,6 +216,7 @@ try {
     1,
   )
   const initial = await appFrame.evaluate(() => globalThis.__THREE_M6__.metrics())
+  assert.match(initial.projectId, /^workspace-[a-f0-9]{54}$/)
   assert.deepEqual(initial.workspaceFiles, [
     'package.json',
     'src/game-state.js',
@@ -316,15 +320,17 @@ try {
     globalThis.__THREE_M6__.metrics().sync === 'dirty'
     && globalThis.__THREE_M6__.object('Key Light').position[0] === -2.25
   ))
-  externalClient = await connectExternalClient()
+  const externalConnection = await connectExternalClient()
+  externalClient = externalConnection.client
+  assert.equal(externalConnection.projectId, initial.projectId)
   const inspected = await externalClient.callTool({
     name: 'inspect_project',
-    arguments: { projectId: 'linked-game' },
+    arguments: { projectId: initial.projectId },
   })
   const external = await externalClient.callTool({
     name: 'apply_project_files',
     arguments: {
-      projectId: 'linked-game',
+      projectId: initial.projectId,
       baseRevision: inspected.structuredContent.revision,
       changes: [{
         type: 'write',

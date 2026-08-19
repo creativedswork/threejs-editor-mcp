@@ -1,6 +1,6 @@
 # Three.js Collaborative Game Studio V2 可执行规划
 
-状态：**M6 已完成验证并获批准；M7-M11 继续执行阶段确认门禁**
+状态：**M6 与 M6.1 已完成验证并获批准；M7-M11 继续执行阶段确认门禁**
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
 [`98453747`](https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills/tree/98453747cc0678f6a5d910f38d7483596a5f9a40)
@@ -499,6 +499,34 @@ error”写成“画面质量合格”。
 - V1 M0-M4 回归测试保持通过。
 
 产物：`reports/M6-validation.md`、Pong 人机协作 GIF、revision manifest。
+
+### M6.1：Direct DSH Workspace Open
+
+状态：**实现和验证完成；用户于 2026-08-19 批准**
+
+目标：用户在 DSH Web 中选择本地 Three.js 工程后，直接打开当前工程，不要求
+Server 启动前预注册游戏路径。
+
+实现：
+
+- `dsh-mcp-apps` 对可信本地 stdio Server 提供显式 `forwardWorkspace`；
+- Host 从调用 Agent 的 `Session.header.cwd` 读取已授权 Workspace；
+- 路径只通过 MCP request `_meta` 传递，不进入模型 tool 参数或结果；
+- `open_editor` 省略 `projectId` 时动态注册当前 DSH Workspace；
+- Server 返回稳定 opaque `projectId`，后续工具继续只使用 ID；
+- Session 动态注册项不进入全局 `list_projects`；
+- 远程 HTTP、App tool 调用和未显式 opt-in 的 Server 不接收 Workspace 路径。
+
+验收：
+
+- fresh Harness Web 中选择游戏目录；
+- `open_editor({})` 原地打开该目录；
+- MCP Server 启动参数不包含 `--workspace`；
+- Human Scene save、下一轮 AI 原子修改、dirty conflict、fullscreen 和 390px
+  responsive 流程继续通过。
+
+产物：`docs/USER-OPERATIONS.md`、`reports/M6.1-validation.md`、
+`reports/M6.1-workspace-binding-trace.json`。
 
 ### M7：Module Builder、source map 与复杂程序几何
 

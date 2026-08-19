@@ -40,7 +40,10 @@ Or run the Server without a global install:
 npx --yes threejs-editor-mcp@0.1.0 --root /absolute/path/to/threejs-projects
 ```
 
-For a global install, configure the `mcp-apps` row in the Harness Web profile:
+For a global install, configure the `mcp-apps` row in
+`~/.dsh/profiles/web/cordis.patch.yml` (or
+`$DSH_HOME/profiles/web/cordis.patch.yml` when set) and replace the initial
+`[]`:
 
 ```yaml
 - id: mcp-apps
@@ -50,6 +53,7 @@ For a global install, configure the `mcp-apps` row in the Harness Web profile:
       - serverName: threejs
         transport: stdio
         command: threejs-editor-mcp
+        forwardWorkspace: true
         args:
           - --root
           - /absolute/path/to/threejs-projects
@@ -65,6 +69,7 @@ To let npm resolve the package directly, use `npx` in the same configuration:
       - serverName: threejs
         transport: stdio
         command: npx
+        forwardWorkspace: true
         args:
           - --yes
           - threejs-editor-mcp@0.1.0
@@ -72,7 +77,14 @@ To let npm resolve the package directly, use `npx` in the same configuration:
           - /absolute/path/to/threejs-projects
 ```
 
-The root can also be provided with `THREEJS_EDITOR_PROJECT_ROOT`.
+The root can also be provided with `THREEJS_EDITOR_PROJECT_ROOT`. It stores
+managed projects and is not the local game directory selected in DSH Web.
+
+Start DSH Web, add the existing Three.js project as the current Workspace, and
+ask the Agent to open the current project. The Editor opens that directory in
+place; no path is passed as a model tool argument. See
+[User Operations](docs/USER-OPERATIONS.md) for the development workflow and
+security boundaries.
 
 ## Capabilities
 

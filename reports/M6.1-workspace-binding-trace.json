@@ -1,0 +1,102 @@
+{
+  "date": "2026-08-18",
+  "status": "pass-approved",
+  "approvedAt": "2026-08-19",
+  "flow": [
+    "DSH Web Workspace picker",
+    "Session.header.cwd",
+    "dsh-mcp-apps request _meta",
+    "threejs-editor-mcp Linked Workspace registration",
+    "opaque projectId",
+    "Editor card"
+  ],
+  "harness": {
+    "url": "http://127.0.0.1:51832",
+    "profileRoot": "/tmp/threejs-editor-m61-home-20260818-0002",
+    "selectedWorkspace": "/private/tmp/threejs-editor-m61-game-20260818-0002",
+    "browser": "system Chrome through Playwright",
+    "transport": "deterministic replay",
+    "realExternalModelRound": false
+  },
+  "host": {
+    "forwardWorkspace": true,
+    "defaultForwarding": false,
+    "stdioOnly": true,
+    "requestMetaKey": "ai.deepseek.dsh/workspace",
+    "appCallsReceiveWorkspace": false,
+    "remoteHttpReceivesWorkspace": false
+  },
+  "server": {
+    "args": [
+      "--root",
+      "/tmp/threejs-editor-m61-projects-20260818-0002"
+    ],
+    "staticWorkspaceRegistration": false
+  },
+  "workspace": {
+    "projectId": "workspace-1b53e573dc4f50c8fe5bd819c889a5704c85d7aad74cc0e12992f4",
+    "kind": "linked-workspace",
+    "modelOpenArguments": {},
+    "modelReceivedAbsolutePath": false,
+    "stableOpaqueIdentity": true,
+    "globallyListed": false,
+    "files": [
+      "package.json",
+      "src/game-state.js",
+      "src/main.js",
+      "src/scene.json"
+    ]
+  },
+  "revisions": {
+    "initial": "7a3365b709c3abda94852e98529979677aa0a6e95ea832253c77df1f29066e75",
+    "humanScene": "0315070f98c98b710f2bef0ca4b41799ee6aaed4f09cb9659d75c22e32e7cfba",
+    "ai": "f392e974257c19bdc177b9f9b731c10667c1ca0fef2aa4b2aa153e526c3d9aaf",
+    "external": "6838181a7249b1d083e012fed7643290874732d43866c1799c090486bf352ecd",
+    "head": "6838181a7249b1d083e012fed7643290874732d43866c1799c090486bf352ecd"
+  },
+  "transactions": {
+    "humanScene": {
+      "baseRevision": "7a3365b709c3abda94852e98529979677aa0a6e95ea832253c77df1f29066e75",
+      "targetRevision": "0315070f98c98b710f2bef0ca4b41799ee6aaed4f09cb9659d75c22e32e7cfba",
+      "paths": [
+        "src/scene.json"
+      ],
+      "status": "committed"
+    },
+    "ai": {
+      "baseRevision": "0315070f98c98b710f2bef0ca4b41799ee6aaed4f09cb9659d75c22e32e7cfba",
+      "targetRevision": "f392e974257c19bdc177b9f9b731c10667c1ca0fef2aa4b2aa153e526c3d9aaf",
+      "paths": [
+        "src/main.js",
+        "src/game-state.js"
+      ],
+      "status": "committed"
+    },
+    "external": {
+      "baseRevision": "f392e974257c19bdc177b9f9b731c10667c1ca0fef2aa4b2aa153e526c3d9aaf",
+      "targetRevision": "6838181a7249b1d083e012fed7643290874732d43866c1799c090486bf352ecd",
+      "paths": [
+        "src/game-state.js"
+      ],
+      "status": "committed"
+    }
+  },
+  "ui": {
+    "sameEditorCard": true,
+    "fullscreen": {
+      "width": 1280,
+      "height": 1000
+    },
+    "compact": {
+      "width": 390,
+      "scrollWidth": 390,
+      "panelsOverlap": false
+    },
+    "unexpectedAppProblems": []
+  },
+  "checks": {
+    "dshMcpAppsCheck": "pass",
+    "threejsReleaseCheck": "pass",
+    "browserE2E": "pass"
+  }
+}

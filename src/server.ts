@@ -49,6 +49,7 @@ import {
 } from './workspaces.js'
 
 const RESOURCE_URI = 'ui://threejs-editor/app'
+const DSH_WORKSPACE_META_KEY = 'ai.deepseek.dsh/workspace'
 const CSP = {
   connectDomains: [] as string[],
   resourceDomains: [] as string[],
@@ -193,6 +194,16 @@ function workspaceRegistration(value: string): WorkspaceRegistration {
     projectId: value.slice(0, separator),
     path: value.slice(separator + 1),
   }
+}
+
+function dshWorkspacePath(meta: Record<string, unknown> | undefined): string {
+  const parsed = z.object({ cwd: z.string().min(1) }).safeParse(
+    meta?.[DSH_WORKSPACE_META_KEY],
+  )
+  if (!parsed.success) {
+    throw new Error('current DSH workspace is unavailable; select a workspace or pass projectId')
+  }
+  return parsed.data.cwd
 }
 
 function decodeBase64(value: string): Buffer {
@@ -970,8 +981,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'open_editor', {
     title: 'Open Three.js editor',
-    description: 'Opens the editor for an existing Three.js project.',
-    inputSchema: { projectId: projectIdSchema },
+    description: 'Opens an existing project, or the current DSH workspace when projectId is omitted.',
+    inputSchema: { projectId: projectIdSchema.optional() },
     outputSchema: summarySchema,
     _meta: {
       ui: {
@@ -979,7 +990,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         visibility: ['model'],
       },
     },
-  }, async ({ projectId }) => {
+  }, async ({ projectId }, extra) => {
+    if (projectId === undefined) {
+      return summaryResult(
+        'Opened current DSH workspace',
+        await workspaces.registerSessionWorkspace(dshWorkspacePath(extra._meta)),
+      )
+    }
     const workspace = await loadWorkspace(projectId)
     return summaryResult(
       workspace === undefined ? 'Opened Three.js project' : 'Opened Three.js workspace',

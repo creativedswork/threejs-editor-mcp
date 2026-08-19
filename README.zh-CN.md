@@ -36,7 +36,9 @@ threejs-editor-mcp --root /absolute/path/to/threejs-projects
 npx --yes threejs-editor-mcp@0.1.0 --root /absolute/path/to/threejs-projects
 ```
 
-全局安装后，在 Harness Web profile 中配置 `mcp-apps`：
+全局安装后，编辑
+`~/.dsh/profiles/web/cordis.patch.yml`；如果设置了 `DSH_HOME`，则编辑
+`$DSH_HOME/profiles/web/cordis.patch.yml`。将初始的 `[]` 替换为：
 
 ```yaml
 - id: mcp-apps
@@ -46,6 +48,7 @@ npx --yes threejs-editor-mcp@0.1.0 --root /absolute/path/to/threejs-projects
       - serverName: threejs
         transport: stdio
         command: threejs-editor-mcp
+        forwardWorkspace: true
         args:
           - --root
           - /absolute/path/to/threejs-projects
@@ -61,6 +64,7 @@ npx --yes threejs-editor-mcp@0.1.0 --root /absolute/path/to/threejs-projects
       - serverName: threejs
         transport: stdio
         command: npx
+        forwardWorkspace: true
         args:
           - --yes
           - threejs-editor-mcp@0.1.0
@@ -68,7 +72,12 @@ npx --yes threejs-editor-mcp@0.1.0 --root /absolute/path/to/threejs-projects
           - /absolute/path/to/threejs-projects
 ```
 
-也可以通过 `THREEJS_EDITOR_PROJECT_ROOT` 设置项目根目录。
+也可以通过 `THREEJS_EDITOR_PROJECT_ROOT` 设置 Managed Project 的存储根目录。
+它不是用户在 DSH Web 中选择的本地游戏目录。
+
+启动 DSH Web 后，将已有 Three.js 工程添加为当前 Workspace，再让 Agent
+“打开当前工程”。Editor 会原地打开该目录，模型工具参数中不包含绝对路径。
+开发流程和安全边界见[用户操作](docs/USER-OPERATIONS.md)。
 
 ## 能力
 
