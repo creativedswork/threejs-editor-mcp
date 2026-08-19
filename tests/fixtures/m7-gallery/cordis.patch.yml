@@ -10,9 +10,6 @@
           - --root
           - !!js process.env.THREEJS_EDITOR_MCP_PROJECTS
         cwd: !!js process.env.THREEJS_EDITOR_MCP_ROOT
-- id: llm-deepseek
-  disabled: true
-
 - id: session-title-llm
   disabled: true
 

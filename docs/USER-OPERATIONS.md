@@ -276,25 +276,26 @@ unset DEEPSEEK_API_KEY
 
 ### 6. 从多项目仓库打开一个演示工程
 
-多项目仓库必须选择能够包含工程完整 import closure 的目录。以
-`Threejs-Awesome-Graphics-Agent-Skills` 为例，应选择仓库根目录，不要只选择：
+以 `Threejs-Awesome-Graphics-Agent-Skills` 为例，可以直接把 Gallery 的示例
+目录选为 DSH Workspace：
 
 ```text
 dev/example-gallery/examples
 ```
 
-Formula One Race Car 还会导入仓库根下的：
+Three.js MCP Server 会识别该 Gallery 的固定 corpus 布局，并只读解析同一
+仓库中的：
 
 ```text
 dev/example-gallery/support
-skills/threejs-procedural-geometry
+skills
 ```
 
-选择仓库根目录后，可以直接发送：
+然后直接发送：
 
 ```text
-列出这些图形/特效演示工程
-为我打开程序化几何 formula-one-race-car 这个
+列出当前threejs工程有哪些
+打开这个 threejs-procedural-geometry/formula-one-race-car
 ```
 
 预期工具序列只有：
@@ -303,7 +304,7 @@ skills/threejs-procedural-geometry
 list_projects({})
 open_editor({
   "projectPath":
-    "dev/example-gallery/examples/threejs-procedural-geometry/formula-one-race-car"
+    "threejs-procedural-geometry/formula-one-race-car"
 })
 ```
 
@@ -312,8 +313,9 @@ open_editor({
 打开；它不会修改示例仓库、执行 `npm install`、启动 gallery server 或打开 HTML
 页面。
 
-如果当前 DSH Workspace 只包含部分依赖，工具会要求重新选择包含完整工程的目录。
-Server 不会自动向父目录扩大授权范围，也不会退回外部 dev server。
+该只读父级映射只适用于已识别的 `dev/example-gallery/examples` 固定布局，并且
+只允许 `dev/` 和 `skills/`。普通 Workspace 不会自动向父目录扩大范围，也不会
+退回外部 dev server。
 
 ## 真实 LLM 验收
 

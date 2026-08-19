@@ -3,10 +3,10 @@
   "date": "2026-08-19",
   "status": "pass",
   "harness": {
-    "url": "http://127.0.0.1:51842",
+    "url": "http://127.0.0.1:51844",
     "freshProfile": true,
     "replayLoaded": false,
-    "sessionId": "session-fdb753b5-0339-41ba-8980-2b6796fe7067",
+    "sessionId": "session-78e6ea2a-5d84-4313-ba84-00de74b11530",
     "turns": 2,
     "steps": 4
   },
@@ -18,11 +18,11 @@
   "workspace": {
     "source": "https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills",
     "commit": "98453747cc0678f6a5d910f38d7483596a5f9a40",
-    "selection": "repository root"
+    "selection": "dev/example-gallery/examples"
   },
   "prompts": [
-    "列出这些图形/特效演示工程",
-    "为我打开程序化几何 formula-one-race-car 这个"
+    "列出当前threejs工程有哪些",
+    "打开这个 threejs-procedural-geometry/formula-one-race-car"
   ],
   "toolCalls": [
     {
@@ -36,24 +36,24 @@
       "step": 1,
       "name": "mcp__threejs__open_editor",
       "arguments": {
-        "projectPath": "dev/example-gallery/examples/threejs-procedural-geometry/formula-one-race-car"
+        "projectPath": "threejs-procedural-geometry/formula-one-race-car"
       }
     }
   ],
   "forbiddenToolCalls": [],
   "discovery": {
     "projects": 37,
-    "ready": 36,
-    "restricted": 1
+    "ready": 33,
+    "restricted": 4
   },
   "opened": {
-    "projectId": "example-eaade9fd7df77cfa322db6a9e5e17edb48a6176c4e69abaa97fa2b72",
-    "revision": "ec973b281cbd45e87f8dd25d4dbaff25133eb766113d3f99d7b6174dc3f0a645",
+    "projectId": "example-e997526fb0453fd60582b6a171aee02e8cd61371b8dac9437eb97e64",
+    "revision": "c5c0426da08b32e3256f9ffc68a4fed5e46fd7eebcf5690c8df630595e808c7f",
     "kind": "managed-workspace",
     "appTool": "mcp__threejs__open_editor"
   },
   "buildAudit": {
-    "buildId": "36ea7bcb224e392f874db19a2f94e013e6401f4e09b8f0baf5c8af7d7e9d83fb",
+    "buildId": "d9c8a13b0b72ceee8315084a14aae77a8565750d8d15b5a593be3818d49ad622",
     "status": "ready",
     "backend": "webgpu",
     "diagnostics": [],
@@ -62,12 +62,12 @@
     "sourceMapBytes": 6561027
   },
   "visualEvidence": {
-    "path": "reports/assets/m7-gallery-direct-open.png",
-    "sha256": "bc2961b55a73b248df3ea5fc32fb22370f0d788b8fe698f1597534785dc37cdc",
-    "transport": "deterministic replay over the real Harness, Host, MCP Server, and MCP App"
+    "path": "reports/assets/m7-gallery-real-direct-open.png",
+    "sha256": "d9c1bef02975bf1f24c87831d0910ab1c8908b3f79c84ca3a9145c6b0871a0a7",
+    "transport": "fresh non-Replay DeepSeek over the real Harness, Host, MCP Server, and MCP App"
   },
   "environmentNotes": [
-    "The integrated browser completed the deterministic and real-model user paths.",
-    "A standalone system-Chrome Playwright rerun was blocked by the TRAE sandbox when Chrome Crashpad and Updater attempted writes outside the workspace."
+    "The durable Session is the source of truth for the exact tool sequence and machine project counts.",
+    "System Chrome completed the UI assertions and screenshot before its outer command exited nonzero when the TRAE sandbox denied Chrome Crashpad and Updater writes."
   ]
 }

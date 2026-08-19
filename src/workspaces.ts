@@ -152,6 +152,12 @@ export interface WorkspaceProjectCandidate {
   issue?: string
 }
 
+interface ExampleSource {
+  root: string
+  projectPath: string
+  galleryCorpus: boolean
+}
+
 export interface WorkspaceSnapshot extends WorkspaceSummary {
   path: string
   manifest: WorkspaceManifest
@@ -266,6 +272,10 @@ function moduleSpecifiers(source: string): string[] {
 
 function isThreeSpecifier(specifier: string): boolean {
   return specifier === 'three' || specifier.startsWith('three/')
+}
+
+function projectFilePath(projectPath: string, fileName: string): string {
+  return projectPath === '' ? fileName : `${projectPath}/${fileName}`
 }
 
 function mediaType(path: string, bytes: Buffer): { mediaType: string; text: boolean } {
@@ -462,22 +472,22 @@ export class WorkspaceStore {
   ): Promise<WorkspaceSnapshot> {
     await this.ready
     const root = await this.sessionRoot(path)
-    const selectedPath = safeProjectPath(projectPath)
+    const source = await this.exampleSource(root, projectPath)
     const candidate = await this.exampleCandidate(root, projectPath)
     if (!candidate.available) {
       throw new Error(
         `${candidate.issue} Select a DSH workspace that contains the complete project, then retry open_editor. Do not run npm, an external dev server, or an HTML fallback.`,
       )
     }
-    const files = await this.collectExampleFiles(root, candidate.entry)
-    const examplePath = selectedPath === '' ? 'example.json' : `${selectedPath}/example.json`
-    files.set(examplePath, await readFile(await this.realFile(root, examplePath)))
+    const files = await this.collectExampleFiles(source, candidate.entry)
+    const examplePath = projectFilePath(source.projectPath, 'example.json')
+    files.set(examplePath, await readFile(await this.realFile(source.root, examplePath)))
     const sourceRevision = digest(canonicalBytes([...files]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([filePath, bytes]) => [filePath, digest(bytes)])))
     const projectId = `example-${
       digest(new TextEncoder().encode(
-        `${root}\0${selectedPath}\0${sourceRevision}`,
+        `${source.root}\0${source.projectPath}\0${sourceRevision}`,
       )).slice(0, 56)
     }`
     const current = this.workspaces.get(projectId)
@@ -1002,11 +1012,10 @@ export class WorkspaceStore {
     root: string,
     projectPath: string,
   ): Promise<WorkspaceProjectCandidate> {
-    const selectedPath = safeProjectPath(projectPath)
-    if (selectedPath !== '') await this.realFile(root, selectedPath, true)
+    const source = await this.exampleSource(root, projectPath)
     const manifestPath = await this.realFile(
-      root,
-      selectedPath === '' ? 'example.json' : `${selectedPath}/example.json`,
+      source.root,
+      projectFilePath(source.projectPath, 'example.json'),
     )
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
     const title = typeof manifest.title === 'string' && manifest.title.trim() !== ''
@@ -1018,8 +1027,8 @@ export class WorkspaceStore {
       : backendText.includes('webgpu')
         ? 'webgpu'
         : 'webgl'
-    const entry = selectedPath === '' ? 'scene.js' : `${selectedPath}/scene.js`
-    const issue = await this.exampleAvailabilityIssue(root, entry, selectedPath)
+    const entry = projectFilePath(source.projectPath, 'scene.js')
+    const issue = await this.exampleAvailabilityIssue(source, entry)
     return {
       projectPath: projectPath === '' ? '.' : projectPath,
       title,
@@ -1032,10 +1041,10 @@ export class WorkspaceStore {
   }
 
   private async exampleDebugModes(root: string, projectPath: string): Promise<string[]> {
-    const selectedPath = safeProjectPath(projectPath)
+    const source = await this.exampleSource(root, projectPath)
     const manifestPath = await this.realFile(
-      root,
-      selectedPath === '' ? 'example.json' : `${selectedPath}/example.json`,
+      source.root,
+      projectFilePath(source.projectPath, 'example.json'),
     )
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
     if (!Array.isArray(manifest.debugModes)) return ['final']
@@ -1051,10 +1060,27 @@ export class WorkspaceStore {
     return modes.length === 0 ? ['final'] : modes
   }
 
+  private async exampleSource(root: string, projectPath: string): Promise<ExampleSource> {
+    const selectedPath = safeProjectPath(projectPath)
+    if (selectedPath !== '') await this.realFile(root, selectedPath, true)
+    const gallerySuffix = join('dev', 'example-gallery', 'examples')
+    if (root.endsWith(`${sep}${gallerySuffix}`)) {
+      return {
+        root: resolve(root, '..', '..', '..'),
+        projectPath: posix.join('dev/example-gallery/examples', selectedPath),
+        galleryCorpus: true,
+      }
+    }
+    return {
+      root,
+      projectPath: selectedPath,
+      galleryCorpus: false,
+    }
+  }
+
   private async exampleAvailabilityIssue(
-    root: string,
+    source: ExampleSource,
     entry: string,
-    projectPath: string,
   ): Promise<string | undefined> {
     const queue = [entry]
     const visited = new Set<string>()
@@ -1064,7 +1090,7 @@ export class WorkspaceStore {
       visited.add(filePath)
       let bytes: Buffer
       try {
-        bytes = await readFile(await this.realFile(root, filePath))
+        bytes = await readFile(await this.realFile(source.root, filePath))
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
           return `Project module is missing inside the selected DSH workspace: ${filePath}.`
@@ -1079,24 +1105,20 @@ export class WorkspaceStore {
           }
           continue
         }
-        const resolved = await this.resolveModule(root, specifier, filePath)
+        const resolved = await this.resolveModule(source, specifier, filePath)
         if (resolved === undefined) {
           return specifier.startsWith('/')
             ? `Project import ${specifier} is outside the selected DSH workspace.`
             : `Project module cannot be resolved inside the selected DSH workspace: ${specifier}.`
         }
-        if (projectPath === ''
-          || resolved === projectPath
-          || resolved.startsWith(`${projectPath}/`)) {
-          queue.push(resolved)
-        }
+        queue.push(resolved)
       }
     }
     return undefined
   }
 
   private async collectExampleFiles(
-    root: string,
+    source: ExampleSource,
     entry: string,
   ): Promise<Map<string, Buffer>> {
     const files = new Map<string, Buffer>()
@@ -1105,7 +1127,7 @@ export class WorkspaceStore {
     while (queue.length > 0) {
       const filePath = queue.shift()!
       if (files.has(filePath)) continue
-      const bytes = await readFile(await this.realFile(root, filePath))
+      const bytes = await readFile(await this.realFile(source.root, filePath))
       if (bytes.length > MAX_FILE_BYTES) throw new Error(`file ${filePath} exceeds 1 MiB`)
       total += bytes.length
       if (total > MAX_TOTAL_BYTES) throw new Error('selected project exceeds 16 MiB')
@@ -1119,7 +1141,7 @@ export class WorkspaceStore {
           }
           continue
         }
-        const resolved = await this.resolveModule(root, specifier, filePath)
+        const resolved = await this.resolveModule(source, specifier, filePath)
         if (resolved === undefined) {
           throw new Error(`workspace module not found: ${specifier}`)
         }
@@ -1130,7 +1152,7 @@ export class WorkspaceStore {
   }
 
   private async resolveModule(
-    root: string,
+    source: ExampleSource,
     request: string,
     importer: string,
   ): Promise<string | undefined> {
@@ -1139,6 +1161,11 @@ export class WorkspaceStore {
       ? posix.normalize(clean.slice(1))
       : posix.normalize(posix.join(posix.dirname(importer), clean))
     if (candidate === '' || candidate === '..' || candidate.startsWith('../')) return undefined
+    if (source.galleryCorpus
+      && !candidate.startsWith('dev/')
+      && !candidate.startsWith('skills/')) {
+      return undefined
+    }
     const attempts = [
       candidate,
       ...extname(candidate) === ''
@@ -1148,7 +1175,7 @@ export class WorkspaceStore {
     ]
     for (const attempt of attempts) {
       try {
-        await this.realFile(root, attempt)
+        await this.realFile(source.root, attempt)
         return attempt
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error

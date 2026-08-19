@@ -1108,7 +1108,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'open_editor', {
     title: 'Open Three.js editor',
     description:
-      'Opens an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath. Never compile or serve project HTML as a fallback.',
+      'Opens an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath. A successful call completes an open request; do not inspect or build unless the user explicitly asks. Never compile or serve project HTML as a fallback.',
     inputSchema: {
       projectId: projectIdSchema.optional(),
       projectPath: sessionProjectPathSchema.optional(),

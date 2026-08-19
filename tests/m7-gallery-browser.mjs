@@ -70,12 +70,12 @@ try {
       { cause: error },
     )
   }
-  await composer.fill('列出这些图形/特效演示工程')
+  await composer.fill('列出当前threejs工程有哪些')
   await composer.press('Enter')
   await page.getByText('当前 DSH Workspace 已通过 Three.js MCP 列出 37 个图形/特效演示工程。')
     .waitFor({ timeout: 30_000 })
 
-  await composer.fill('为我打开程序化几何 formula-one-race-car 这个')
+  await composer.fill('打开这个 threejs-procedural-geometry/formula-one-race-car')
   await composer.press('Enter')
   await page.getByText('已通过 Three.js MCP App 打开 Formula One Race Car。')
     .waitFor({ timeout: 30_000 })
@@ -131,8 +131,8 @@ try {
     webUrl,
     transport: 'deterministic replay',
     prompts: [
-      '列出这些图形/特效演示工程',
-      '为我打开程序化几何 formula-one-race-car 这个',
+      '列出当前threejs工程有哪些',
+      '打开这个 threejs-procedural-geometry/formula-one-race-car',
     ],
     projectId: opened.projectId,
     entry: opened.workspaceEntry,

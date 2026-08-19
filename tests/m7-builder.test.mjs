@@ -201,8 +201,9 @@ test('M7 discovers gallery projects and opens one through the MCP App contract',
   const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m7-gallery-projects-'))
   const repository = await mkdtemp(join(tmpdir(), 'threejs-editor-m7-gallery-repository-'))
   const examples = join(repository, 'dev', 'example-gallery', 'examples')
-  const projectPath = 'dev/example-gallery/examples/threejs-procedural-geometry/formula-one-race-car'
-  const project = join(repository, projectPath)
+  const projectPath = 'threejs-procedural-geometry/formula-one-race-car'
+  const sourceProjectPath = `dev/example-gallery/examples/${projectPath}`
+  const project = join(examples, projectPath)
   await mkdir(project, { recursive: true })
   await mkdir(join(repository, 'dev', 'example-gallery', 'support'), { recursive: true })
   await mkdir(join(repository, 'skills', 'threejs-procedural-geometry'), { recursive: true })
@@ -249,8 +250,16 @@ export function createCar() {
   )
   await writeFile(
     join(examples, 'second-example', 'scene.js'),
-    'export default { setup() { return {} } }\n',
+    "import '/private.js'\nexport default { setup() { return {} } }\n",
   )
+  await writeFile(join(repository, 'private.js'), 'export const privateValue = true\n')
+  const sourceFiles = [
+    join(project, 'scene.js'),
+    join(project, 'race-car-scene.js'),
+    join(repository, 'dev', 'example-gallery', 'support', 'studio-stage.js'),
+    join(repository, 'skills', 'threejs-procedural-geometry', 'race-car-model.js'),
+  ]
+  const originalSources = await Promise.all(sourceFiles.map(path => readFile(path)))
 
   const client = new Client({
     name: 'threejs-editor-mcp-m7-gallery-test',
@@ -273,8 +282,16 @@ export function createCar() {
       candidate => candidate.projectPath.endsWith('formula-one-race-car'),
     )
     assert.equal(narrowList.structuredContent.workspaceProjects.length, 2)
-    assert.equal(narrowCar.available, false)
-    assert.match(narrowCar.issue, /outside the selected DSH workspace/)
+    assert.equal(narrowCar.projectPath, projectPath)
+    assert.equal(narrowCar.available, true)
+    assert.equal(narrowCar.issue, undefined)
+    assert.equal(narrowCar.backend, 'webgpu')
+    assert.equal(narrowCar.title, 'Formula One Race Car')
+    const restricted = narrowList.structuredContent.workspaceProjects.find(
+      candidate => candidate.projectPath === 'second-example',
+    )
+    assert.equal(restricted.available, false)
+    assert.match(restricted.issue, /outside the selected DSH workspace/)
     assert.equal(JSON.stringify(narrowList.structuredContent).includes(repository), false)
 
     const ambiguous = await client.callTool({
@@ -286,34 +303,10 @@ export function createCar() {
     assert.match(ambiguous.content[0].text, /contains 2 Three\.js examples/)
     assert.match(ambiguous.content[0].text, /Do not run npm/)
 
-    const unavailable = await client.callTool({
+    const opened = await client.callTool({
       name: 'open_editor',
       arguments: { projectPath: narrowCar.projectPath },
       _meta: narrowMeta,
-    })
-    assert.equal(unavailable.isError, true)
-    assert.match(unavailable.content[0].text, /Select a DSH workspace/)
-    assert.match(unavailable.content[0].text, /Do not run npm/)
-
-    const repositoryMeta = {
-      'ai.deepseek.dsh/workspace': { cwd: repository },
-    }
-    const listed = await client.callTool({
-      name: 'list_projects',
-      arguments: {},
-      _meta: repositoryMeta,
-    })
-    const car = listed.structuredContent.workspaceProjects.find(
-      candidate => candidate.projectPath === projectPath,
-    )
-    assert.equal(car.available, true)
-    assert.equal(car.backend, 'webgpu')
-    assert.equal(car.title, 'Formula One Race Car')
-
-    const opened = await client.callTool({
-      name: 'open_editor',
-      arguments: { projectPath },
-      _meta: repositoryMeta,
     })
     assert.equal(opened.isError, undefined)
     assert.match(opened.structuredContent.projectId, /^example-[a-f0-9]{56}$/)
@@ -329,12 +322,32 @@ export function createCar() {
       },
     })
     assert.equal(built.structuredContent.status, 'ready')
+    assert.equal(built.structuredContent.backend, 'webgpu')
     assert.deepEqual(built.structuredContent.diagnostics, [])
-    assert.ok(built.structuredContent.inputs.includes(`${projectPath}/scene.js`))
+    assert.ok(built.structuredContent.inputs.includes(`${sourceProjectPath}/scene.js`))
     assert.ok(built.structuredContent.inputs.includes(
       'skills/threejs-procedural-geometry/race-car-model.js',
     ))
+
+    const repositoryMeta = {
+      'ai.deepseek.dsh/workspace': { cwd: repository },
+    }
+    const listed = await client.callTool({
+      name: 'list_projects',
+      arguments: {},
+      _meta: repositoryMeta,
+    })
+    const car = listed.structuredContent.workspaceProjects.find(
+      candidate => candidate.projectPath === sourceProjectPath,
+    )
+    assert.equal(car.available, true)
+    assert.equal(car.backend, 'webgpu')
+    assert.equal(car.title, 'Formula One Race Car')
+    for (const [index, path] of sourceFiles.entries()) {
+      assert.deepEqual(await readFile(path), originalSources[index])
+    }
     await assert.rejects(stat(join(repository, '.threejs-editor')))
+    await assert.rejects(stat(join(examples, '.threejs-editor')))
     await assert.rejects(stat(join(repository, 'node_modules')))
   } finally {
     await client.close()

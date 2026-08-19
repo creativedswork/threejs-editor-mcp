@@ -1,7 +1,7 @@
 # M7 Validation Report
 
 Date: 2026-08-19
-Status: **PASS after user-path correction, awaiting renewed approval**
+Status: **PASS after second user-path correction, awaiting renewed approval**
 
 ## 中文审阅摘要
 
@@ -21,12 +21,13 @@ M7 已完成 Module Builder、source map、复杂程序几何和 WebGPU Runtime
 - Stop/Restart 后 renderer 仍为 1、没有停止后的消息、build cache ID 不变；
 - fresh Harness 的真实 DeepSeek 模型只用 Three.js MCP tools 完成
   open/build/read/apply/build/check，并准确报告两个 build ID；
-- 用户验收暴露的多项目父目录缺口已修复：`list_projects` 发现 37 个 corpus
-  案例，`open_editor({ projectPath })` 直接打开 Formula One Race Car MCP App；
+- 用户日志中的 `dev/example-gallery/examples` 目录可直接作为 DSH Workspace：
+  `list_projects` 发现 37 个 corpus 案例，第一次 `open_editor({ projectPath })`
+  即打开 Formula One Race Car MCP App；
 - fresh 真实 DeepSeek Session 只调用 `list_projects` 和 `open_editor`，没有
   shell、npm、gallery server 或 HTML fallback；
-- 只授权 `dev/example-gallery/examples` 时返回结构化的授权根不足说明，不会
-  自动读取父目录；
+- 固定 Gallery adapter 只读解析同一 corpus 中的 `dev/` 与 `skills/` closure，
+  source corpus 保持 clean，编辑仍隔离在 Managed Workspace；
 - 上游同步、类型检查、Node tests、packed install、Host 回归和 npm 内容审计通过。
 
 M8 尚未开始。本报告获用户批准前不得进入 M8。
@@ -51,10 +52,10 @@ plugins, or evaluate project code on the Server.
 For multi-project example repositories, M7 now adds:
 
 ```text
-DSH repository root
+DSH dev/example-gallery/examples Workspace
 -> list_projects discovers relative example.json candidates
 -> open_editor({ projectPath })
--> bounded static import closure
+-> fixed Gallery adapter reads bounded /dev + /skills closure
 -> source-revision-bound Managed Workspace
 -> MCP App
 ```
@@ -81,9 +82,9 @@ project ID. The source repository is not modified.
 | Debug modes | final, topology, and no-livery screenshots correspond to rendered frames | PASS |
 | Runtime disposal | Stop froze frame count; Restart retained one renderer and the cached build ID | PASS |
 | Real LLM | fresh non-Replay DeepSeek run reported both revisions and both build IDs | PASS |
-| Workspace discovery | Corpus root returns 37 relative example candidates without scanning unrelated large assets | PASS |
+| Workspace discovery | `examples` Workspace returns 37 relative candidates: 33 ready, 4 restricted | PASS |
 | Direct MCP App open | Natural-language Formula One request calls `open_editor({ projectPath })` and mounts the App | PASS |
-| Narrow-root boundary | Nested `examples` root is rejected without parent traversal, npm, server, or HTML fallback | PASS |
+| Gallery corpus adapter | Fixed layout maps only `dev/` and `skills/`; unrelated parent files remain inaccessible | PASS |
 | Gallery build | Source-revision-bound Managed Workspace builds WebGPU with 15 inputs and 0 diagnostics | PASS |
 | Host regression | `dsh-mcp-apps` typecheck, build, and 7 tests | PASS |
 | Package boundary | 10-file tarball excludes corpus, tests, reports, `.tmp`, assets, and credentials | PASS |
@@ -148,12 +149,20 @@ threejs-procedural-geometry/formula-one-race-car
 source files into a gitignored Workspace. The external corpus is not part of
 the npm package.
 
-The user-path correction also validates P1 directly from the authorized corpus
-repository root. `list_projects` discovers all 37 `example.json` manifests
-without hashing unrelated assets. `open_editor` follows only P1's static local
-imports, copies that bounded closure into the configured Managed Workspace
-root, and opens the Editor App. This path does not execute the corpus gallery,
-npm, or HTML runtime.
+The second user-path correction validates P1 from the same nested Workspace
+used in the rejected user Session:
+
+```text
+dev/example-gallery/examples
+```
+
+`list_projects` discovers all 37 `example.json` manifests without hashing
+unrelated assets. Its machine result reports 33 ready and 4 restricted by
+dependencies outside the M7 profile. The fixed Gallery adapter maps imports
+under `/dev` and `/skills` to the same pinned corpus, copies only the static
+closure into the configured Managed Workspace root, and opens the Editor App.
+It rejects other parent paths and does not execute the corpus gallery, npm, or
+HTML runtime.
 
 The final independent Server build returned:
 
@@ -262,6 +271,8 @@ regression is in
 
 ![Formula One opened through the MCP App](assets/m7-gallery-direct-open.png)
 
+![Real DeepSeek opened the nested Gallery Workspace](assets/m7-gallery-real-direct-open.png)
+
 ## Verification
 
 The following functional gates passed:
@@ -321,8 +332,8 @@ Final build artifacts:
 
 ```text
 dist/server.js
-189,524 bytes
-SHA-256 a23fbba3e194fc2aeb39e751d0954bf3307b124ac599093ad0a30a6763718b77
+190,205 bytes
+SHA-256 eef421bcb35bb2d089f7bfd57de60408c64062604079b9e9f1fbf4b175c062cf
 
 dist/view.js
 1,235,088 bytes
@@ -342,6 +353,7 @@ pending source, tests, docs, and reports.
 | `m7-p1-debug-contact-sheet.png` | `5d100b7226b235a78977c4352cb593f9b72d84ef3683de6f0f3f7f5eaa196f26` |
 | `m7-real-llm-build-id.png` | `93c60b49f057be8626cb03c187a308a5344ae17938a6316d807581f5a123837b` |
 | `m7-gallery-direct-open.png` | `bc2961b55a73b248df3ea5fc32fb22370f0d788b8fe698f1597534785dc37cdc` |
+| `m7-gallery-real-direct-open.png` | `d9c1bef02975bf1f24c87831d0910ab1c8908b3f79c84ca3a9145c6b0871a0a7` |
 
 ## Known Limits
 
@@ -352,9 +364,9 @@ pending source, tests, docs, and reports.
 - Multi-project discovery currently targets the corpus `example.json` +
   `scene.js` convention. Generic npm/pnpm monorepo package discovery is not
   implied.
-- A selected DSH Workspace must contain the complete local import closure.
-  The Server reports a narrow authorization root instead of searching parent
-  directories.
+- The parent mapping is specific to the pinned Gallery
+  `dev/example-gallery/examples` layout and permits only `dev/` and `skills/`;
+  it is not generic parent traversal.
 - Gallery examples open as source-revision-bound Managed Workspaces. Edits
   apply to that projection; the source corpus remains unchanged.
 - Raw WebGPU without Three.js remains a later stretch case.
@@ -364,6 +376,6 @@ pending source, tests, docs, and reports.
 
 ## Approval Gate
 
-M7 implementation, validation, and the rejected user-path correction are
-complete. M8 Interactive Multi-Pass WebGL remains blocked until the user
-explicitly re-approves this report.
+M7 implementation and the second user-path correction are complete. M8
+Interactive Multi-Pass WebGL remains blocked until the user explicitly
+re-approves this report.

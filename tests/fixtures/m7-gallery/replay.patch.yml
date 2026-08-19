@@ -1,3 +1,6 @@
+- id: llm-deepseek
+  disabled: true
+
 - insert:
     - id: llm-replay
       name: '@deepseek-ai/dsh-llm-replay'

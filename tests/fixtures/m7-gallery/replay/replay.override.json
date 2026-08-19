@@ -69,7 +69,7 @@
           "type": "tool-call",
           "id": "call_threejs_gallery_open",
           "name": "mcp__threejs__open_editor",
-          "arguments": "{\"projectPath\":\"dev/example-gallery/examples/threejs-procedural-geometry/formula-one-race-car\"}"
+          "arguments": "{\"projectPath\":\"threejs-procedural-geometry/formula-one-race-car\"}"
         }
       },
       {
