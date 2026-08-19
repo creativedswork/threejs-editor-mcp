@@ -1,0 +1,68 @@
+{
+  "date": "2026-08-19",
+  "status": "pass-awaiting-approval",
+  "case": {
+    "id": "P1",
+    "name": "Formula One Race Car",
+    "source": "https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills",
+    "commit": "98453747cc0678f6a5d910f38d7483596a5f9a40",
+    "sourceFiles": 9,
+    "sourceBytes": 143644
+  },
+  "harness": {
+    "transport": "deterministic replay",
+    "browser": "system Chrome through Playwright",
+    "freshProfile": true
+  },
+  "workspace": {
+    "projectId": "workspace-efbb81f5192b6e00873287e2d7c1a73d8a5fb6a2450714069fc026",
+    "backend": "webgpu",
+    "entry": "src/main.js"
+  },
+  "revisions": {
+    "initial": "13f5535c663575b6de9184230407308e670aaf12db92267dfcd4357971592f25",
+    "humanLivery": "4fbe40ae30ef976d87a5d6d9be2dc1c5e5fa2ac6faa86e896909339475209d15",
+    "aiGeometry": "603adb22c713a3f8783bb87df8b02d42d95c125dfd5b19dd0bf564c727851710"
+  },
+  "build": {
+    "buildId": "060f78dedcab6de8e912a47d740c16ca57822c7d4d833a94597e8227cc8da7af",
+    "cacheBuildId": "060f78dedcab6de8e912a47d740c16ca57822c7d4d833a94597e8227cc8da7af"
+  },
+  "runtime": {
+    "sandbox": "allow-scripts",
+    "origin": "null",
+    "metrics": {
+      "frame": 2,
+      "rendererCount": 1,
+      "secureContext": true,
+      "webgpuApi": true,
+      "rendererBackend": "WebGPUBackend",
+      "draws": 23,
+      "triangles": 918211,
+      "emittedParts": 62,
+      "uniqueTriangles": 375964,
+      "hullRings": 168,
+      "hullSegments": 96,
+      "livery": true,
+      "bodyScale": 1.04
+    },
+    "pixels": {
+      "width": 730,
+      "height": 564,
+      "sampled": 9000,
+      "lit": 7795,
+      "contrast": 6856,
+      "colors": 1107
+    },
+    "debugModes": [
+      "final",
+      "topology",
+      "no-livery"
+    ],
+    "restart": {
+      "rendererCount": 1,
+      "messagesAfterStop": 0
+    }
+  },
+  "appProblems": []
+}

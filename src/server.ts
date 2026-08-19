@@ -7,7 +7,10 @@ import {
   registerAppResource,
   registerAppTool,
 } from '@modelcontextprotocol/ext-apps/server'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import {
+  McpServer,
+  ResourceTemplate,
+} from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type {
   CallToolResult,
@@ -15,6 +18,7 @@ import type {
 } from '@modelcontextprotocol/sdk/types.js'
 import * as THREE from 'three'
 import { z } from 'zod'
+import type { WorkspaceBuild } from './builder.js'
 import {
   assetMediaTypeSchema,
   assetSummarySchema,
@@ -42,6 +46,7 @@ import {
   WorkspaceStore,
   workspaceChangeSchema,
   workspaceFileSchema,
+  workspaceParameterSchema,
   workspacePathSchema,
   type WorkspaceRegistration,
   type WorkspaceSnapshot,
@@ -49,6 +54,8 @@ import {
 } from './workspaces.js'
 
 const RESOURCE_URI = 'ui://threejs-editor/app'
+const BUILD_RESOURCE_TEMPLATE =
+  'threejs-build://runtime/{projectId}/{buildId}/{artifact}'
 const DSH_WORKSPACE_META_KEY = 'ai.deepseek.dsh/workspace'
 const CSP = {
   connectDomains: [] as string[],
@@ -58,6 +65,39 @@ const CSP = {
 }
 const projectIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/)
 const revisionSchema = z.string().regex(/^[a-f0-9]{64}$/)
+const buildIdSchema = z.string().regex(/^[a-f0-9]{64}$/)
+const buildDiagnosticSchema = z.object({
+  severity: z.enum(['error', 'warning']),
+  message: z.string(),
+  file: z.string().optional(),
+  line: z.number().int().positive().optional(),
+  column: z.number().int().positive().optional(),
+  length: z.number().int().nonnegative().optional(),
+  lineText: z.string().optional(),
+})
+const buildOutputSchema = z.object({
+  schemaVersion: z.literal(1),
+  builderVersion: z.string(),
+  dependencyProfile: z.string(),
+  projectId: projectIdSchema,
+  revision: revisionSchema,
+  buildId: buildIdSchema,
+  entry: workspacePathSchema,
+  backend: z.enum(['webgl', 'webgpu', 'raw-webgpu']),
+  status: z.enum(['ready', 'failed']),
+  diagnostics: z.array(buildDiagnosticSchema),
+  bundleBytes: z.number().int().nonnegative().optional(),
+  sourceMapBytes: z.number().int().nonnegative().optional(),
+  inputs: z.array(z.string()).optional(),
+  assets: z.array(z.object({
+    path: workspacePathSchema,
+    sha256: revisionSchema,
+    size: z.number().int().nonnegative(),
+    mediaType: z.string(),
+  })).optional(),
+  bundleUri: z.string().optional(),
+  sourceMapUri: z.string().optional(),
+})
 const assetDataSchema = z.string()
   .min(4)
   .max(Math.ceil(MAX_ASSET_BYTES / 3) * 4)
@@ -75,6 +115,8 @@ const workspaceViewSchema = z.object({
   kind: z.enum(['linked-workspace', 'managed-workspace']),
   entry: workspacePathSchema,
   backend: z.enum(['webgl', 'webgpu', 'raw-webgpu']),
+  debugModes: z.array(z.string()),
+  parameters: z.array(workspaceParameterSchema),
   files: z.array(workspaceFileSchema),
 })
 const sceneObjectSchema = z.object({
@@ -239,10 +281,30 @@ function workspaceView(snapshot: WorkspaceSnapshot): z.infer<typeof workspaceVie
     kind: snapshot.kind,
     entry: snapshot.manifest.entry,
     backend: snapshot.manifest.backend,
+    debugModes: snapshot.manifest.runtime.debugModes,
+    parameters: snapshot.manifest.runtime.parameters,
     files: Object.entries(snapshot.manifest.files).map(([path, file]) => ({
       path,
       ...file,
     })),
+  }
+}
+
+function buildResourceUri(
+  projectId: string,
+  buildId: string,
+  artifact: 'bundle.js' | 'bundle.js.map',
+): string {
+  return `threejs-build://runtime/${projectId}/${buildId}/${artifact}`
+}
+
+function buildView(build: WorkspaceBuild): z.infer<typeof buildOutputSchema> {
+  if (build.status === 'failed') return build
+  const { bundle: _bundle, sourceMap: _sourceMap, ...summary } = build
+  return {
+    ...summary,
+    bundleUri: buildResourceUri(build.projectId, build.buildId, 'bundle.js'),
+    sourceMapUri: buildResourceUri(build.projectId, build.buildId, 'bundle.js.map'),
   }
 }
 
@@ -599,6 +661,7 @@ function viewHtml(script: string): string {
     button[aria-pressed=true]{border-color:rgb(99 184 255 / .48);background:var(--accent-soft);box-shadow:inset 0 0 18px rgb(99 184 255 / .08),0 0 22px rgb(99 184 255 / .09);color:#f4faff}
     button:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     .icon{width:32px;padding:0;font-size:15px}
+    .runtime-debug{height:32px;max-width:112px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface-control);color:var(--text);font:11px/1.2 "SFMono-Regular",Consolas,monospace}
     .save{min-width:52px;border-color:rgb(132 202 255 / .9);background:var(--accent);box-shadow:inset 0 1px rgb(255 255 255 / .42),0 7px 22px rgb(38 137 218 / .26);color:var(--accent-ink)}
     .save:hover:not(:disabled){border-color:#8fd0ff;background:#8fd0ff;box-shadow:inset 0 1px rgb(255 255 255 / .5),0 9px 28px rgb(38 137 218 / .36);color:var(--accent-ink)}
     .asset-input{display:none}
@@ -672,6 +735,11 @@ function viewHtml(script: string): string {
       line-height:1;
       letter-spacing:.01em;
     }
+    .runtime-parameters{border-top:1px solid var(--line);padding:12px}
+    .runtime-parameters h3{margin:0 0 10px;color:var(--muted);font-size:10px;font-weight:760;text-transform:uppercase}
+    .parameter-list{display:grid;gap:10px}
+    .parameter-field{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;color:#aebdcc;font-size:11px}
+    .parameter-field input[type=number]{width:82px}
     .tree{margin:0;padding:5px 0;list-style:none}
     .tree button{
       display:block;
@@ -772,6 +840,7 @@ function viewHtml(script: string): string {
       .topbar{gap:5px;padding-inline:8px}
       .toolbar{gap:3px}
       .toolbar .icon{width:29px}
+      .runtime-debug{max-width:84px}
       .hierarchy{left:8px;width:150px}
       .inspector{right:8px;width:210px}
       .status{left:168px;max-width:180px}
@@ -802,7 +871,7 @@ function viewHtml(script: string): string {
   </style>
 </head>
 <body>
-  <main data-three-editor data-phase="M6" data-ui-mode="scene-only" data-ui-direction="ethereal-glass" data-visual-style="taste-ethereal-glass" data-sync="loading" data-play-state="stopped" data-webgl="pending">
+  <main data-three-editor data-phase="M7" data-ui-mode="scene-only" data-ui-direction="ethereal-glass" data-visual-style="taste-ethereal-glass" data-sync="loading" data-play-state="stopped" data-webgl="pending">
     <header class="topbar">
       <input class="title" data-title aria-label="Project title" maxlength="120" disabled>
       <span class="spacer"></span>
@@ -815,6 +884,7 @@ function viewHtml(script: string): string {
         <input class="asset-input" type="file" data-asset-input accept=".glb,.png,.jpg,.jpeg,model/gltf-binary,image/png,image/jpeg">
         <button class="icon" type="button" data-export aria-label="Export project" title="Export project" disabled>↓</button>
         <span class="toolbar-divider" aria-hidden="true"></span>
+        <select class="runtime-debug" data-runtime-debug aria-label="Runtime debug mode" title="Runtime debug mode" hidden></select>
         <button class="icon" type="button" data-play aria-label="Play" title="Play" disabled>▶</button>
         <button class="icon" type="button" data-stop aria-label="Stop" title="Stop" disabled>■</button>
         <button class="icon" type="button" data-fullscreen aria-label="Enter fullscreen" title="Enter fullscreen" hidden>⛶</button>
@@ -866,6 +936,10 @@ function viewHtml(script: string): string {
             </table>
             <label class="field" data-material-row hidden><span>Color</span><input type="color" data-material-color aria-label="Material color"></label>
           </fieldset>
+        </section>
+        <section class="runtime-parameters" data-runtime-parameters hidden>
+          <h3>Parameters</h3>
+          <div class="parameter-list" data-parameter-list></div>
         </section>
       </aside>
       <section hidden aria-hidden="true">
@@ -1217,6 +1291,26 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     }
   })
 
+  registerAppTool(server, 'build_project', {
+    title: 'Build Three.js workspace',
+    description: 'Builds one exact Workspace revision with the pinned browser dependency profile.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+    },
+    outputSchema: buildOutputSchema,
+    _meta: { ui: { visibility: ['model', 'app'] } },
+  }, async ({ projectId, revision }) => {
+    const result = buildView(await workspaces.build(projectId, revision))
+    const errors = result.diagnostics.filter(item => item.severity === 'error').length
+    return textResult(
+      result.status === 'ready'
+        ? `Built ${projectId} at ${revision} with buildId ${result.buildId}: ${String(result.bundleBytes)} bundle bytes.`
+        : `Build failed for ${projectId} at ${revision} with buildId ${result.buildId}: ${String(errors)} errors.`,
+      result,
+    )
+  })
+
   registerAppTool(server, 'apply_scene_changes', {
     title: 'Apply Three.js scene changes',
     description: 'Applies one revision-checked batch of bounded scene, script, or project changes.',
@@ -1271,7 +1365,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'check_project', {
     title: 'Check Three.js project',
-    description: 'Checks scene and camera loading, script syntax, and diagnostics for the current revision.',
+    description: 'Checks scene projects or builds the exact current Workspace revision.',
     inputSchema: { projectId: projectIdSchema },
     outputSchema: z.object({
       projectId: projectIdSchema,
@@ -1300,19 +1394,33 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     } catch (error) {
       errors.push(`camera load error: ${error instanceof Error ? error.message : String(error)}`)
     }
-    const scriptError = syntaxError(snapshot.project.script.source)
-    if (scriptError !== undefined) errors.push(`script syntax error: ${scriptError}`)
-    const diagnostics = workspace === undefined
+    if (workspace === undefined) {
+      const scriptError = syntaxError(snapshot.project.script.source)
+      if (scriptError !== undefined) errors.push(`script syntax error: ${scriptError}`)
+    } else {
+      const build = await workspaces.build(projectId, snapshot.revision)
+      for (const diagnostic of build.diagnostics) {
+        const location = diagnostic.file === undefined
+          ? ''
+          : `${diagnostic.file}`
+            + `${diagnostic.line === undefined ? '' : `:${String(diagnostic.line)}`}`
+            + `${diagnostic.column === undefined ? '' : `:${String(diagnostic.column)}`}: `
+        const message = `${location}${diagnostic.message}`
+        if (diagnostic.severity === 'error') errors.push(message)
+        else warnings.push(message)
+      }
+    }
+    const playDiagnostics = workspace === undefined
       ? await store.readDiagnostics(projectId)
       : undefined
-    if (diagnostics === undefined) {
+    if (playDiagnostics === undefined) {
       if (workspace === undefined) warnings.push('Play diagnostics have not been reported')
     } else {
-      if (diagnostics.testedRevision !== snapshot.revision) {
-        warnings.push(`Play diagnostics apply to older revision ${diagnostics.testedRevision}`)
+      if (playDiagnostics.testedRevision !== snapshot.revision) {
+        warnings.push(`Play diagnostics apply to older revision ${playDiagnostics.testedRevision}`)
       } else {
-        errors.push(...diagnostics.errors)
-        warnings.push(...diagnostics.warnings)
+        errors.push(...playDiagnostics.errors)
+        warnings.push(...playDiagnostics.warnings)
       }
     }
     if (workspace === undefined) {
@@ -1331,9 +1439,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         revision: snapshot.revision,
         errors,
         warnings,
-        ...diagnostics === undefined ? {} : {
-          testedRevision: diagnostics.testedRevision,
-          testedAt: diagnostics.updatedAt,
+        ...playDiagnostics === undefined ? {} : {
+          testedRevision: playDiagnostics.testedRevision,
+          testedAt: playDiagnostics.updatedAt,
         },
       },
     )
@@ -1520,6 +1628,31 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       json,
     })
   })
+
+  server.registerResource(
+    'workspace-build-artifact',
+    new ResourceTemplate(BUILD_RESOURCE_TEMPLATE, { list: undefined }),
+    {
+      title: 'Three.js Workspace build artifact',
+      description: 'A revision-bound browser bundle or source map from the pinned builder.',
+    },
+    async (uri): Promise<ReadResourceResult> => {
+      const [projectIdValue, buildIdValue, artifactValue] =
+        uri.pathname.split('/').filter(Boolean)
+      const projectId = projectIdSchema.parse(projectIdValue)
+      const buildId = buildIdSchema.parse(buildIdValue)
+      const artifact = z.enum(['bundle.js', 'bundle.js.map']).parse(artifactValue)
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: artifact === 'bundle.js'
+            ? 'text/javascript'
+            : 'application/json',
+          text: await workspaces.readBuildArtifact(projectId, buildId, artifact),
+        }],
+      }
+    },
+  )
 
   server.registerResource('m5-runtime-module-graph', M5_RUNTIME_RESOURCE_URI, {
     title: 'M5 isolated runtime module graph',

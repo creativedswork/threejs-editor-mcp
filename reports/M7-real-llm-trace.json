@@ -1,0 +1,68 @@
+{
+  "date": "2026-08-19",
+  "status": "pass",
+  "harness": {
+    "url": "http://127.0.0.1:51839",
+    "profileRoot": "/tmp/threejs-editor-m7-real-home-20260819-0003",
+    "selectedWorkspace": ".tmp/m7-real-workspace",
+    "freshProfile": true,
+    "replayLoaded": false
+  },
+  "model": {
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash",
+    "reasoningEffort": "high"
+  },
+  "toolSequence": [
+    "mcp__threejs__open_editor",
+    "mcp__threejs__build_project",
+    "mcp__threejs__read_project_files",
+    "mcp__threejs__apply_project_files",
+    "mcp__threejs__build_project",
+    "mcp__threejs__check_project"
+  ],
+  "workspace": {
+    "projectId": "workspace-40624daeeaf9257ef340a0c5e6f5740c60ef6cc7a8a18f61b77e93",
+    "baseRevision": "13f5535c663575b6de9184230407308e670aaf12db92267dfcd4357971592f25",
+    "targetRevision": "a966f60e291b4a0cc4eebb1088b24f6770321d55787c1bdcf56801a4d718bee8",
+    "head": "a966f60e291b4a0cc4eebb1088b24f6770321d55787c1bdcf56801a4d718bee8",
+    "parameter": {
+      "path": "src/parameters.json",
+      "bodyScaleBefore": 1,
+      "bodyScaleAfter": 1.02,
+      "liveryBefore": false,
+      "liveryAfter": false
+    }
+  },
+  "builds": {
+    "base": {
+      "buildId": "b1817ed1d5e8ab3061b0b73fe6d35e57b363b18bd6956c928b57e11dc4aeab09",
+      "bundleBytes": 3168165,
+      "sourceMapBytes": 6560648,
+      "errors": 0,
+      "warnings": 0
+    },
+    "target": {
+      "buildId": "44c4541276d969618016be8922923f68b19177d578fd88d1a779042657c95eed",
+      "bundleBytes": 3168168,
+      "sourceMapBytes": 6560651,
+      "errors": 0,
+      "warnings": 0
+    }
+  },
+  "transaction": {
+    "status": "committed",
+    "paths": [
+      "src/parameters.json"
+    ]
+  },
+  "assertions": {
+    "modelReportedBothBuildIds": true,
+    "genericWriteToolCalls": 0,
+    "shellToolCalls": 0,
+    "apiKeyPersisted": false
+  },
+  "session": {
+    "id": "session-3b13985d-e5c1-48ae-b98c-1b2fb27a9fb6"
+  }
+}

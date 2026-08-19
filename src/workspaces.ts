@@ -23,6 +23,13 @@ import {
 } from 'node:path'
 import { z } from 'zod'
 import {
+  buildIdFor,
+  buildWorkspace,
+  type FailedBuild,
+  type ReadyBuild,
+  type WorkspaceBuild,
+} from './builder.js'
+import {
   createProject,
   projectSchema,
   RevisionConflictError,
@@ -50,6 +57,27 @@ export const workspaceFileSchema = z.object({
   mediaType: z.string().min(1).max(120),
   text: z.boolean(),
 })
+export const workspaceParameterSchema = z.discriminatedUnion('type', [
+  z.object({
+    id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+    label: z.string().min(1).max(80),
+    type: z.literal('boolean'),
+    path: workspacePathSchema,
+    key: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+  }),
+  z.object({
+    id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+    label: z.string().min(1).max(80),
+    type: z.literal('number'),
+    path: workspacePathSchema,
+    key: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+    min: z.number(),
+    max: z.number(),
+    step: z.number().positive(),
+  }).refine(value => value.min < value.max, {
+    message: 'parameter min must be less than max',
+  }),
+])
 export const workspaceManifestSchema = z.object({
   schemaVersion: z.literal(2),
   kind: z.enum(['linked-workspace', 'managed-workspace']),
@@ -61,6 +89,7 @@ export const workspaceManifestSchema = z.object({
   runtime: z.object({
     debugModes: z.array(z.string()),
     qualityTiers: z.array(z.string()),
+    parameters: z.array(workspaceParameterSchema).default([]),
   }),
 })
 export const workspaceChangeSchema = z.discriminatedUnion('type', [
@@ -125,6 +154,9 @@ interface Transaction {
   changes: TransactionChange[]
 }
 
+type StoredReadyBuild = Omit<ReadyBuild, 'bundle' | 'sourceMap'>
+type StoredBuild = StoredReadyBuild | FailedBuild
+
 function digest(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
 }
@@ -141,6 +173,29 @@ function canonicalValue(value: unknown): unknown {
 
 function canonicalBytes(value: unknown): Buffer {
   return Buffer.from(`${JSON.stringify(canonicalValue(value), null, 2)}\n`)
+}
+
+function storedBuild(value: unknown): StoredBuild {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('stored build metadata must be an object')
+  }
+  const build = value as Partial<StoredBuild>
+  if (build.schemaVersion !== 1
+    || (build.status !== 'ready' && build.status !== 'failed')
+    || typeof build.projectId !== 'string'
+    || typeof build.revision !== 'string'
+    || typeof build.buildId !== 'string'
+    || !Array.isArray(build.diagnostics)) {
+    throw new Error('stored build metadata is invalid')
+  }
+  if (build.status === 'ready'
+    && (typeof build.bundleBytes !== 'number'
+      || typeof build.sourceMapBytes !== 'number'
+      || !Array.isArray(build.inputs)
+      || !Array.isArray(build.assets))) {
+    throw new Error('stored ready build metadata is invalid')
+  }
+  return build as StoredBuild
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -219,6 +274,7 @@ function defaultWorkspaceConfig(
     runtime: {
       debugModes: ['final'],
       qualityTiers: ['default'],
+      parameters: [],
     },
   }
 }
@@ -440,6 +496,89 @@ export class WorkspaceStore {
       if (matches.length >= limit) return matches
     }
     return matches
+  }
+
+  async build(projectId: string, expectedRevision: string): Promise<WorkspaceBuild> {
+    validateProjectId(projectId)
+    if (!/^[a-f0-9]{64}$/.test(expectedRevision)) throw new Error('invalid build revision')
+    return this.withLock(projectId, async () => {
+      const snapshot = await this.loadUnlocked(projectId)
+      if (snapshot.revision !== expectedRevision) {
+        throw new RevisionConflictError(snapshot.revision)
+      }
+      const input: Parameters<typeof buildWorkspace>[0] = {
+        projectId,
+        revision: snapshot.revision,
+        entry: snapshot.manifest.entry,
+        backend: snapshot.manifest.backend,
+        files: [],
+      }
+      const buildId = buildIdFor(input)
+      const cached = await this.readStoredBuild(snapshot.path, buildId)
+      if (cached?.status === 'ready') {
+        const directory = this.metadataPath(snapshot.path, 'builds', buildId)
+        return {
+          ...cached,
+          bundle: await readFile(join(directory, 'bundle.js'), 'utf8'),
+          sourceMap: await readFile(join(directory, 'bundle.js.map'), 'utf8'),
+        }
+      }
+      if (cached?.status === 'failed') return cached
+
+      input.files = await Promise.all(Object.entries(snapshot.manifest.files).map(
+        async ([path, file]) => ({
+          path,
+          bytes: await this.readWorkspaceFile(snapshot.path, path),
+          sha256: file.sha256,
+          mediaType: file.mediaType,
+          text: file.text,
+        }),
+      ))
+      const result = await buildWorkspace(input)
+      const directory = this.metadataPath(snapshot.path, 'builds', result.buildId)
+      let metadata: StoredBuild
+      if (result.status === 'ready') {
+        const { bundle, sourceMap, ...stored } = result
+        metadata = stored
+        await this.writeAtomic(join(directory, 'bundle.js'), bundle)
+        await this.writeAtomic(join(directory, 'bundle.js.map'), sourceMap)
+      } else {
+        metadata = result
+      }
+      await this.writeAtomic(join(directory, 'build.json'), canonicalBytes(metadata))
+      await this.writeAtomic(
+        this.metadataPath(snapshot.path, 'diagnostics', `${result.buildId}.json`),
+        canonicalBytes({
+          projectId,
+          revision: result.revision,
+          buildId: result.buildId,
+          diagnostics: result.diagnostics,
+        }),
+      )
+      return result
+    })
+  }
+
+  async readBuildArtifact(
+    projectId: string,
+    buildId: string,
+    artifact: 'bundle.js' | 'bundle.js.map',
+  ): Promise<string> {
+    validateProjectId(projectId)
+    if (!/^[a-f0-9]{64}$/.test(buildId)) throw new Error('invalid buildId')
+    await this.ready
+    const registration = this.workspaces.get(projectId)
+    if (registration === undefined) throw new Error(`unknown workspace ${projectId}`)
+    const metadata = await this.readStoredBuild(registration.path, buildId)
+    if (metadata?.status !== 'ready'
+      || metadata.projectId !== projectId
+      || metadata.buildId !== buildId) {
+      throw new Error('ready build artifact is unavailable')
+    }
+    return readFile(
+      this.metadataPath(registration.path, 'builds', buildId, artifact),
+      'utf8',
+    )
   }
 
   async apply(
@@ -747,6 +886,18 @@ export class WorkspaceStore {
       await writeFile(target, canonicalBytes(manifest), { flag: 'wx', mode: 0o600 })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+  }
+
+  private async readStoredBuild(path: string, buildId: string): Promise<StoredBuild | undefined> {
+    try {
+      return storedBuild(JSON.parse(await readFile(
+        this.metadataPath(path, 'builds', buildId, 'build.json'),
+        'utf8',
+      )))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
     }
   }
 

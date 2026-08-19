@@ -21,6 +21,11 @@ import {
   M5_RUNTIME_RESOURCE_URI,
   type M5RuntimeManifest,
 } from './m5-runtime.js'
+import {
+  M7_RUNTIME_CHANNEL,
+  m7BootstrapHtml,
+  type M7RuntimeEvent,
+} from './m7-runtime.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
 type CameraView = 'broadcast' | 'overhead' | 'courtside'
@@ -37,10 +42,31 @@ interface WorkspaceFile {
   text: boolean
 }
 
+type WorkspaceParameter =
+  | {
+      id: string
+      label: string
+      type: 'boolean'
+      path: string
+      key: string
+    }
+  | {
+      id: string
+      label: string
+      type: 'number'
+      path: string
+      key: string
+      min: number
+      max: number
+      step: number
+    }
+
 interface WorkspaceView {
   kind: 'linked-workspace' | 'managed-workspace'
   entry: string
   backend: 'webgl' | 'webgpu' | 'raw-webgpu'
+  debugModes: string[]
+  parameters: WorkspaceParameter[]
   files: WorkspaceFile[]
 }
 
@@ -207,6 +233,7 @@ const assetInput = required<HTMLInputElement>('[data-asset-input]')
 const exportProjectButton = required<HTMLButtonElement>('[data-export]')
 const play = required<HTMLButtonElement>('[data-play]')
 const stop = required<HTMLButtonElement>('[data-stop]')
+const runtimeDebug = required<HTMLSelectElement>('[data-runtime-debug]')
 const fullscreen = required<HTMLButtonElement>('[data-fullscreen]')
 const save = required<HTMLButtonElement>('[data-save]')
 const hierarchy = required<HTMLUListElement>('[data-hierarchy]')
@@ -230,6 +257,8 @@ const inspectorPane = required<HTMLElement>('[data-inspector-pane]')
 const scriptPane = required<HTMLElement>('[data-script-pane]')
 const scriptSource = required<HTMLTextAreaElement>('[data-script-source]')
 const runtimeOutput = required<HTMLElement>('[data-runtime-output]')
+const runtimeParameters = required<HTMLElement>('[data-runtime-parameters]')
+const parameterList = required<HTMLElement>('[data-parameter-list]')
 const vectorInputs = [...document.querySelectorAll<HTMLInputElement>('[data-vector][data-axis]')]
 const modeButtons = [...document.querySelectorAll<HTMLButtonElement>('[data-mode]')]
 const detailTabs = [...document.querySelectorAll<HTMLButtonElement>('[data-detail-tab]')]
@@ -291,6 +320,17 @@ let m5Ready: Record<string, unknown> | undefined
 let m5ServerCommandProof: OfficialCommandProof | undefined
 let m5MessagesAfterStop = 0
 let m5FrameAtStop: number | undefined
+let m7ActiveRun: { runId: string; nonce: string } | undefined
+let m7StartToken = 0
+let m7Build: Record<string, unknown> | undefined
+let m7Events: M7RuntimeEvent[] = []
+let m7Errors: string[] = []
+let m7Ready: Record<string, unknown> | undefined
+let m7Metrics: Record<string, unknown> | undefined
+let m7MessagesAfterStop = 0
+let runtimeDebugMode = 'final'
+let parameterDocuments = new Map<string, Record<string, unknown>>()
+let parameterLoadToken = 0
 
 const loader = new THREE.ObjectLoader()
 const raycaster = new THREE.Raycaster()
@@ -386,20 +426,168 @@ function refreshHistoryButtons(): void {
 }
 
 function refreshPlayButtons(): void {
-  const playing = root.dataset.playState === 'playing'
-  play.disabled = playing || navigationTab !== 'scene' || root.dataset.sync !== 'clean'
-  stop.disabled = !playing
+  const playState = root.dataset.playState
+  const active = playState === 'starting' || playState === 'playing' || playState === 'stopping'
+  play.disabled = active || navigationTab !== 'scene' || root.dataset.sync !== 'clean'
+  stop.disabled = playState !== 'starting' && playState !== 'playing'
+  runtimeDebug.disabled = workspace === undefined
+    || playState === 'starting'
+    || playState === 'stopping'
   importAssetButton.disabled = editorDisabled
-    || playing
+    || active
     || navigationTab !== 'scene'
     || project === undefined
     || root.dataset.sync === 'loading'
     || root.dataset.sync === 'saving'
     || root.dataset.sync === 'conflict'
   exportProjectButton.disabled = editorDisabled
-    || playing
+    || active
     || project === undefined
     || root.dataset.sync !== 'clean'
+}
+
+function refreshRuntimeDebugModes(): void {
+  const modes = workspace?.debugModes ?? []
+  runtimeDebug.replaceChildren(...modes.map(mode => {
+    const option = document.createElement('option')
+    option.value = mode
+    option.textContent = mode
+    return option
+  }))
+  runtimeDebug.hidden = workspace === undefined || modes.length === 0
+  runtimeDebugMode = modes.includes(runtimeDebugMode) ? runtimeDebugMode : modes[0] ?? 'final'
+  runtimeDebug.value = runtimeDebugMode
+  runtimeDebug.disabled = workspace === undefined
+  root.dataset.runtimeDebug = runtimeDebugMode
+}
+
+async function saveWorkspaceParameter(
+  parameter: WorkspaceParameter,
+  value: boolean | number,
+): Promise<void> {
+  if (projectId === undefined || revision === undefined || workspace === undefined) return
+  const parameterDocument = parameterDocuments.get(parameter.path)
+  if (parameterDocument === undefined) {
+    throw new Error(`parameter document is unavailable: ${parameter.path}`)
+  }
+  const baseRevision = revision
+  const nextDocument = { ...parameterDocument, [parameter.key]: value }
+  root.dataset.sync = 'saving'
+  setEditorDisabled(true)
+  status.textContent = `Saving ${parameter.label}`
+  try {
+    const result = await app.callServerTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId,
+        baseRevision,
+        changes: [{
+          type: 'write',
+          path: parameter.path,
+          text: `${JSON.stringify(nextDocument, null, 2)}\n`,
+        }],
+      },
+    })
+    if (result.isError) throw new Error(resultError(result))
+    const pulled = await app.callServerTool({
+      name: 'pull_project',
+      arguments: { projectId },
+    })
+    const snapshot = snapshotFromResult(pulled)
+    if (snapshot === undefined) throw new Error('saved parameter snapshot was not returned')
+    parameterDocuments.set(parameter.path, nextDocument)
+    setEditorDisabled(false)
+    acceptSnapshot(
+      snapshot.project,
+      snapshot.revision,
+      `Saved ${parameter.label}`,
+      snapshot.workspace,
+    )
+  } catch (error) {
+    root.dataset.sync = 'error'
+    setEditorDisabled(false)
+    throw error
+  }
+}
+
+function renderWorkspaceParameters(): void {
+  parameterList.replaceChildren()
+  for (const parameter of workspace?.parameters ?? []) {
+    const parameterDocument = parameterDocuments.get(parameter.path)
+    const value = parameterDocument?.[parameter.key]
+    const label = document.createElement('label')
+    label.className = 'parameter-field'
+    const caption = document.createElement('span')
+    caption.textContent = parameter.label
+    label.append(caption)
+    if (parameter.type === 'boolean') {
+      const input = document.createElement('input')
+      input.type = 'checkbox'
+      input.checked = value === true
+      input.ariaLabel = parameter.label
+      input.addEventListener('change', () => {
+        input.disabled = true
+        void saveWorkspaceParameter(parameter, input.checked).catch(error => {
+          status.textContent = error instanceof Error ? error.message : String(error)
+          input.disabled = false
+        })
+      })
+      label.append(input)
+    } else {
+      const input = document.createElement('input')
+      input.type = 'number'
+      input.min = String(parameter.min)
+      input.max = String(parameter.max)
+      input.step = String(parameter.step)
+      input.value = typeof value === 'number' ? String(value) : String(parameter.min)
+      input.ariaLabel = parameter.label
+      input.addEventListener('change', () => {
+        const next = Number(input.value)
+        if (!Number.isFinite(next) || next < parameter.min || next > parameter.max) {
+          status.textContent = `${parameter.label} must be ${parameter.min} to ${parameter.max}`
+          return
+        }
+        input.disabled = true
+        void saveWorkspaceParameter(parameter, next).catch(error => {
+          status.textContent = error instanceof Error ? error.message : String(error)
+          input.disabled = false
+        })
+      })
+      label.append(input)
+    }
+    parameterList.append(label)
+  }
+  runtimeParameters.hidden = workspace === undefined || workspace.parameters.length === 0
+}
+
+async function loadWorkspaceParameters(): Promise<void> {
+  const token = ++parameterLoadToken
+  parameterDocuments = new Map()
+  const parameters = workspace?.parameters ?? []
+  const paths = [...new Set(parameters.map(parameter => parameter.path))]
+  if (projectId === undefined || paths.length === 0) {
+    renderWorkspaceParameters()
+    return
+  }
+  const result = await app.callServerTool({
+    name: 'read_project_files',
+    arguments: {
+      projectId,
+      files: paths.map(path => ({ path })),
+    },
+  })
+  if (token !== parameterLoadToken) return
+  if (result.isError) throw new Error(resultError(result))
+  const structured = record(result.structuredContent)
+  const files = Array.isArray(structured?.files) ? structured.files.map(record) : []
+  for (const file of files) {
+    if (typeof file?.path !== 'string' || typeof file.text !== 'string') continue
+    const parsed = JSON.parse(file.text) as unknown
+    const document = record(parsed)
+    if (document === undefined) throw new Error(`parameter file must be a JSON object: ${file.path}`)
+    parameterDocuments.set(file.path, document)
+  }
+  renderWorkspaceParameters()
 }
 
 function refreshRuntimeOutput(): void {
@@ -519,6 +707,9 @@ function setEditorDisabled(disabled: boolean): void {
   inspectorFields.disabled = disabled
   scriptSource.disabled = disabled
   fileSource.disabled = disabled || fileSummary(activeFile)?.text !== true
+  for (const input of parameterList.querySelectorAll<HTMLInputElement>('input')) {
+    input.disabled = disabled
+  }
   for (const button of modeButtons) button.disabled = disabled
   if (disabled) {
     undo.disabled = true
@@ -755,6 +946,7 @@ function acceptSnapshot(
 ): void {
   const previousFile = activeFile
   workspace = nextWorkspace
+  refreshRuntimeDebugModes()
   const filesTab = navigationTabs.find(button => button.dataset.navigationTab === 'files')
   if (filesTab !== undefined) filesTab.hidden = workspace === undefined
   if (workspace === undefined) {
@@ -779,6 +971,9 @@ function acceptSnapshot(
   setEditorDisabled(false)
   setClean(nextRevision)
   status.textContent = message
+  void loadWorkspaceParameters().catch(error => {
+    status.textContent = error instanceof Error ? error.message : String(error)
+  })
   if (workspace !== undefined && navigationTab === 'files') {
     if (activeFile === undefined) setNavigationTab('files', true)
     else void selectWorkspaceFile(activeFile)
@@ -804,6 +999,25 @@ function workspaceFromResult(value: unknown): WorkspaceView | undefined {
       && candidate.backend !== 'webgpu'
       && candidate.backend !== 'raw-webgpu')
     || !Array.isArray(candidate.files)) return undefined
+  const debugModes = Array.isArray(candidate.debugModes)
+    && candidate.debugModes.every(mode => typeof mode === 'string' && mode !== '')
+    ? [...new Set(candidate.debugModes as string[])]
+    : ['final']
+  const parameters = Array.isArray(candidate.parameters)
+    ? candidate.parameters.map(record)
+    : []
+  if (parameters.some(parameter => parameter === undefined
+    || typeof parameter.id !== 'string'
+    || typeof parameter.label !== 'string'
+    || (parameter.type !== 'boolean' && parameter.type !== 'number')
+    || typeof parameter.path !== 'string'
+    || typeof parameter.key !== 'string'
+    || (parameter.type === 'number'
+      && (typeof parameter.min !== 'number'
+        || typeof parameter.max !== 'number'
+        || typeof parameter.step !== 'number')))) {
+    throw new Error('pull_project returned invalid Workspace parameters')
+  }
   const files = candidate.files.map(record)
   if (files.some(file => file === undefined
     || typeof file.path !== 'string'
@@ -817,6 +1031,27 @@ function workspaceFromResult(value: unknown): WorkspaceView | undefined {
     kind: candidate.kind,
     entry: candidate.entry,
     backend: candidate.backend,
+    debugModes,
+    parameters: parameters.map(parameter => (
+      parameter?.type === 'number'
+        ? {
+            id: parameter.id as string,
+            label: parameter.label as string,
+            type: 'number',
+            path: parameter.path as string,
+            key: parameter.key as string,
+            min: parameter.min as number,
+            max: parameter.max as number,
+            step: parameter.step as number,
+          }
+        : {
+            id: parameter?.id as string,
+            label: parameter?.label as string,
+            type: 'boolean',
+            path: parameter?.path as string,
+            key: parameter?.key as string,
+          }
+    )),
     files: files.map(file => ({
       path: file?.path as string,
       sha256: file?.sha256 as string,
@@ -1117,6 +1352,164 @@ window.addEventListener('message', event => {
   }
 })
 
+function waitForM7Event(
+  types: string[],
+  runId: string,
+  timeout = 120_000,
+): Promise<M7RuntimeEvent> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      window.removeEventListener('message', listener)
+      reject(new Error(`timed out waiting for M7 ${types.join(' or ')}`))
+    }, timeout)
+    const listener = (event: MessageEvent<unknown>) => {
+      if (event.source !== runtimeFrame.contentWindow) return
+      const candidate = record(event.data)
+      if (candidate?.channel !== M7_RUNTIME_CHANNEL
+        || candidate.runId !== runId
+        || typeof candidate.type !== 'string'
+        || !types.includes(candidate.type)) return
+      window.clearTimeout(timer)
+      window.removeEventListener('message', listener)
+      resolve(event.data as M7RuntimeEvent)
+    }
+    window.addEventListener('message', listener)
+  })
+}
+
+function postM7(action: string, payload: Record<string, unknown> = {}): void {
+  if (m7ActiveRun === undefined || runtimeFrame.contentWindow === null) {
+    throw new Error('M7 runtime is not active')
+  }
+  runtimeFrame.contentWindow.postMessage({
+    channel: M7_RUNTIME_CHANNEL,
+    action,
+    ...m7ActiveRun,
+    ...payload,
+  }, '*')
+}
+
+function loadM7Frame(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('M7 runtime frame load timed out')), 5_000)
+    runtimeFrame.addEventListener('load', () => {
+      window.clearTimeout(timer)
+      resolve()
+    }, { once: true })
+    runtimeFrame.hidden = false
+    runtimeFrame.srcdoc = m7BootstrapHtml()
+  })
+}
+
+async function stopM7Runtime(): Promise<Record<string, unknown> | undefined> {
+  m7StartToken += 1
+  if (m7ActiveRun === undefined) {
+    runtimeFrame.hidden = true
+    return undefined
+  }
+  const run = m7ActiveRun
+  const disposed = waitForM7Event(['disposed'], run.runId, 10_000)
+  postM7('stop')
+  const event = await disposed
+  m7ActiveRun = undefined
+  runtimeFrame.hidden = true
+  runtimeFrame.srcdoc = '<!doctype html><title>Stopped</title>'
+  return event.data
+}
+
+async function startM7Runtime(token: number): Promise<void> {
+  if (projectId === undefined || revision === undefined || workspace === undefined) {
+    throw new Error('Workspace is not ready')
+  }
+  await stopIsolatedRuntime()
+  if (token !== m7StartToken) return
+  status.textContent = `Building ${workspace.entry}`
+  const buildResult = await app.callServerTool({
+    name: 'build_project',
+    arguments: { projectId, revision },
+  })
+  if (buildResult.isError) throw new Error(resultError(buildResult))
+  const build = record(buildResult.structuredContent)
+  m7Build = build
+  const diagnostics = Array.isArray(build?.diagnostics)
+    ? build.diagnostics.map(record).filter(item => item !== undefined)
+    : []
+  if (build?.status !== 'ready') {
+    const first = diagnostics.find(item => item?.severity === 'error')
+    const location = typeof first?.file === 'string'
+      ? `${first.file}`
+        + `${typeof first.line === 'number' ? `:${String(first.line)}` : ''}`
+        + `${typeof first.column === 'number' ? `:${String(first.column)}` : ''}: `
+      : ''
+    throw new Error(`${location}${String(first?.message ?? 'Workspace build failed')}`)
+  }
+  if (typeof build.bundleUri !== 'string'
+    || (build.backend !== 'webgl' && build.backend !== 'webgpu' && build.backend !== 'raw-webgpu')) {
+    throw new Error('build_project returned invalid Runtime metadata')
+  }
+  const bundleResource = await app.readServerResource({ uri: build.bundleUri })
+  const bundle = resourceText(bundleResource, build.bundleUri)
+  if (token !== m7StartToken) return
+
+  m7Events = []
+  m7Errors = []
+  m7Ready = undefined
+  m7Metrics = undefined
+  m7MessagesAfterStop = 0
+  m7ActiveRun = { runId: crypto.randomUUID(), nonce: crypto.randomUUID() }
+  const run = m7ActiveRun
+  await loadM7Frame()
+  const started = waitForM7Event(['ready', 'runtime-error'], run.runId)
+  postM7('run', {
+    bundle,
+    backend: build.backend,
+    debugMode: runtimeDebugMode,
+  })
+  const event = await started
+  if (event.type === 'runtime-error') {
+    throw new Error(typeof event.data?.message === 'string'
+      ? event.data.message
+      : 'Workspace Runtime failed')
+  }
+  m7Ready = event.data ?? {}
+  m7Metrics = event.data ?? {}
+  root.dataset.playState = 'playing'
+  refreshPlayButtons()
+  status.textContent = `${String(build.backend).toUpperCase()} Runtime`
+}
+
+window.addEventListener('message', event => {
+  if (event.source !== runtimeFrame.contentWindow) return
+  const candidate = record(event.data)
+  if (candidate?.channel !== M7_RUNTIME_CHANNEL
+    || typeof candidate.runId !== 'string'
+    || typeof candidate.nonce !== 'string'
+    || typeof candidate.type !== 'string') return
+  const runtimeEvent = event.data as M7RuntimeEvent
+  if (m7ActiveRun === undefined) {
+    m7MessagesAfterStop += 1
+    return
+  }
+  if (runtimeEvent.runId !== m7ActiveRun.runId
+    || runtimeEvent.nonce !== m7ActiveRun.nonce) return
+  m7Events.push(runtimeEvent)
+  if (runtimeEvent.type === 'ready') {
+    m7Ready = runtimeEvent.data ?? {}
+    m7Metrics = runtimeEvent.data ?? {}
+  } else if (runtimeEvent.type === 'metrics' || runtimeEvent.type === 'frame') {
+    m7Metrics = runtimeEvent.data ?? {}
+  } else if (runtimeEvent.type === 'runtime-error') {
+    const message = typeof runtimeEvent.data?.message === 'string'
+      ? runtimeEvent.data.message
+      : 'Workspace Runtime error'
+    m7Errors.push(message)
+    if (root.dataset.playState === 'playing') {
+      recordRuntimeError(message)
+      void stopGame('Play failed')
+    }
+  }
+})
+
 function recordRuntimeError(error: unknown): void {
   runtimeErrors = [...runtimeErrors, runtimeMessage(error)].slice(-20)
   refreshRuntimeOutput()
@@ -1141,6 +1534,25 @@ function startGame(): void {
   runtimeErrors = []
   runtimeWarnings = []
   refreshRuntimeOutput()
+  if (workspace !== undefined) {
+    playingProject = serializeProject()
+    playingRevision = revision
+    root.dataset.playState = 'starting'
+    setEditorDisabled(true)
+    save.disabled = true
+    disposeControls()
+    selected = undefined
+    renderHierarchy()
+    const token = ++m7StartToken
+    refreshPlayButtons()
+    status.textContent = 'Preparing Workspace Runtime'
+    void startM7Runtime(token).catch(async error => {
+      if (token !== m7StartToken) return
+      recordRuntimeError(error)
+      await stopGame('Play failed', false)
+    })
+    return
+  }
   playingProject = serializeProject()
   playingRevision = revision
   root.dataset.playState = 'playing'
@@ -1171,8 +1583,30 @@ function startGame(): void {
 }
 
 async function stopGame(reason = 'Stopped', report = true): Promise<void> {
-  if (root.dataset.playState !== 'playing') return
+  if (root.dataset.playState !== 'starting' && root.dataset.playState !== 'playing') return
   root.dataset.playState = 'stopping'
+  if (workspace !== undefined) {
+    try {
+      await stopM7Runtime()
+    } catch (error) {
+      recordRuntimeError(error)
+      m7ActiveRun = undefined
+      runtimeFrame.hidden = true
+    }
+    const baseline = playingProject
+    playingProject = undefined
+    playingRevision = undefined
+    if (baseline !== undefined) replaceRuntime(baseline)
+    root.dataset.playState = runtimeErrors.length === 0 ? 'stopped' : 'error'
+    setEditorDisabled(false)
+    refreshRuntimeOutput()
+    refreshPlayButtons()
+    status.textContent = runtimeErrors.length === 0
+      ? reason
+      : `Runtime error: ${runtimeErrors[0]?.split('\n')[0] ?? 'unknown error'}`
+    await pullLatest()
+    return
+  }
   try {
     lifecycle?.dispose?.(runtimeContext())
   } catch (error) {
@@ -1218,7 +1652,10 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
 }
 
 async function pullLatest(): Promise<void> {
-  if (pulling || root.dataset.playState === 'playing'
+  if (pulling
+    || root.dataset.playState === 'starting'
+    || root.dataset.playState === 'playing'
+    || root.dataset.playState === 'stopping'
     || projectId === undefined || revision === undefined) return
   pulling = true
   try {
@@ -1283,8 +1720,9 @@ app.onhostcontextchanged = context => {
 }
 app.onteardown = async () => {
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
-  await stopIsolatedRuntime()
   await stopGame('Stopped', false)
+  if (m7ActiveRun !== undefined) await stopM7Runtime()
+  await stopIsolatedRuntime()
   cancelAnimationFrame(animation)
   resizeObserver.disconnect()
   disposeControls()
@@ -1329,6 +1767,11 @@ fullscreen.addEventListener('click', () => {
 play.addEventListener('click', startGame)
 stop.addEventListener('click', () => {
   void stopGame()
+})
+runtimeDebug.addEventListener('change', () => {
+  runtimeDebugMode = runtimeDebug.value
+  root.dataset.runtimeDebug = runtimeDebugMode
+  if (m7ActiveRun !== undefined) postM7('set-debug', { debugMode: runtimeDebugMode })
 })
 importAssetButton.addEventListener('click', () => assetInput.click())
 assetInput.addEventListener('change', () => {
@@ -1875,6 +2318,9 @@ const diagnostics = {
     lastExport: root.dataset.lastExport,
     navigationTab,
     workspaceKind: workspace?.kind,
+    workspaceEntry: workspace?.entry,
+    workspaceBackend: workspace?.backend,
+    runtimeDebugMode,
     workspaceFiles: workspace?.files.map(file => file.path) ?? [],
     activeFile,
     fileHistoryIndex,
@@ -1896,6 +2342,17 @@ const diagnostics = {
       frameAtStop: m5FrameAtStop,
       messagesAfterStop: m5MessagesAfterStop,
       runtimeFrameVisible: !runtimeFrame.hidden,
+    },
+    m7: {
+      active: m7ActiveRun !== undefined,
+      build: m7Build,
+      eventTypes: m7Events.map(event => event.type),
+      errors: [...m7Errors],
+      ready: m7Ready,
+      metrics: m7Metrics,
+      messagesAfterStop: m7MessagesAfterStop,
+      runtimeFrameVisible: !runtimeFrame.hidden,
+      debugMode: runtimeDebugMode,
     },
   }),
   object: (name: string) => {
@@ -1945,6 +2402,21 @@ const diagnostics = {
     return (await event).data
   },
   stopM5Fixture: () => stopIsolatedRuntime(),
+  requestM7Metrics: async () => {
+    if (m7ActiveRun === undefined) throw new Error('M7 runtime is not active')
+    const result = waitForM7Event(['metrics'], m7ActiveRun.runId)
+    postM7('metrics')
+    return (await result).data
+  },
+  setM7DebugMode: async (mode: string) => {
+    if (m7ActiveRun === undefined) throw new Error('M7 runtime is not active')
+    if (!workspace?.debugModes.includes(mode)) throw new Error(`unknown debug mode ${mode}`)
+    const result = waitForM7Event(['debug-mode'], m7ActiveRun.runId)
+    runtimeDebug.value = mode
+    runtimeDebug.dispatchEvent(new Event('change'))
+    return (await result).data
+  },
+  stopM7Fixture: () => stopGame(),
 }
 Object.assign(window, {
   __THREE_M1__: diagnostics,
@@ -1953,6 +2425,7 @@ Object.assign(window, {
   __THREE_M4__: diagnostics,
   __THREE_M5__: diagnostics,
   __THREE_M6__: diagnostics,
+  __THREE_M7__: diagnostics,
 })
 
 void app.connect().then(() => {
