@@ -307,6 +307,12 @@ try {
   const fullscreenPixels = await pixelStats(runtimeAfterAi)
   assert.ok(fullscreenPixels.lit > fullscreenPixels.sampled * 0.7)
   assert.ok(fullscreenPixels.colors > 600)
+  await page.setViewportSize({ width: 1346, height: 650 })
+  await page.waitForTimeout(500)
+  await runtimeCanvas.click({ position: { x: 866, y: 160 } })
+  await appFrame.waitForFunction(() => (
+    globalThis.__THREE_M7__.metrics().selected === 'rearWing'
+  ))
 
   await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
   await appFrame.waitForFunction(() => {
@@ -358,6 +364,7 @@ try {
     fullscreenPixels,
     runtimePreservedAcrossAiEdit: true,
     topCanvasPointerReachable: true,
+    edgeToleranceSelection: 'rearWing',
     rendererBackend: metrics.rendererBackend,
     emittedParts: metrics.emittedParts,
     uniqueTriangles: metrics.uniqueTriangles,

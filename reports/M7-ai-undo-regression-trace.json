@@ -21,6 +21,13 @@
     "aiPositionX": 0,
     "runtimePreservedAcrossAiEdit": true,
     "topCanvasPointerReachable": true,
+    "edgeToleranceSelection": {
+      "viewport": [1346, 650],
+      "point": [866, 160],
+      "before": "Mesh",
+      "neighborAt6px": "rearWing",
+      "after": "rearWing"
+    },
     "pixelsBeforeSave": {
       "sampled": 9000,
       "lit": 7847,

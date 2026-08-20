@@ -22,6 +22,10 @@ WebGPU build 均有效，build 为 `ready` 且无 error。
 重新构建并重启完整 WebGPU Runtime。赛车场景重新创建约 37.6 万三角形时，
 旧画面已被移除，用户返回 Editor 会先看到黑屏。
 
+对象选择还有第二个独立原因：Runtime 原先只发射一条精确射线。细零件边缘
+即使可见，射线也可能穿过它并命中后方无名舞台 `Mesh`。真实赛车场景中，
+固定坐标 `(866, 160)` 修复前选中舞台，左侧 `6px` 才能命中 `rearWing`。
+
 ## 修复
 
 - `pull_project` 向 App-only 调用返回结构化 `editorOperations`。
@@ -29,11 +33,14 @@ WebGPU build 均有效，build 为 `ready` 且无 error。
 - 保留 iframe、renderer、相机、选择和 Runtime identity，只推进 revision。
 - 源码、依赖、参数或其他文件变化仍使用原有 revision-bound rebuild。
 - Transform toolbar 从画布顶部移到底部；窄屏时放在属性面板上方右侧。
+- 点击选择使用约 `6px` 多射线容差；有名称的场景零件优先于无名舞台，
+  同时保留重叠对象循环选择。
 
 ## Fresh Replay Browser
 
 ```text
 top canvas pointer: reachable
+edge tolerance selection: rearWing
 Runtime identity across AI undo: preserved
 pixels after AI undo: 7,853 / 9,000 lit; 1,150 colors
 pixels after fullscreen return: 8,036 / 9,000 lit; 975 colors

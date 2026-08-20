@@ -243,6 +243,49 @@ export function m7BootstrapHtml(): string {
         })
       }
     }
+    const pickObjects = (current, clientX, clientY, bounds) => {
+      const offsets = [
+        [0, 0],
+        [-6, 0], [6, 0], [0, -6], [0, 6],
+        [-4, -4], [4, -4], [-4, 4], [4, 4],
+      ]
+      const raycaster = new current.THREE.Raycaster()
+      const pointer = new current.THREE.Vector2()
+      const candidates = new Map()
+      for (const [offsetX, offsetY] of offsets) {
+        const x = clientX + offsetX
+        const y = clientY + offsetY
+        if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) {
+          continue
+        }
+        pointer.set(
+          ((x - bounds.left) / bounds.width) * 2 - 1,
+          -((y - bounds.top) / bounds.height) * 2 + 1,
+        )
+        raycaster.setFromCamera(pointer, current.camera)
+        for (const result of raycaster.intersectObjects(current.scene.children, true)) {
+          const object = current.objects.get(result.object.uuid)
+          if (!object) continue
+          const offset = Math.hypot(offsetX, offsetY)
+          const previous = candidates.get(object.uuid)
+          if (!previous
+            || result.distance < previous.distance
+            || (result.distance === previous.distance && offset < previous.offset)) {
+            candidates.set(object.uuid, {
+              uuid: object.uuid,
+              named: object.name !== '',
+              distance: result.distance,
+              offset,
+            })
+          }
+        }
+      }
+      return [...candidates.values()]
+        .sort((left, right) => Number(right.named) - Number(left.named)
+          || left.distance - right.distance
+          || left.offset - right.offset)
+        .map(candidate => candidate.uuid)
+    }
     const setMode = (current, mode) => {
       current.mode = mode === 'run' ? 'run' : 'edit'
       current.state.paused = current.mode === 'edit'
@@ -514,17 +557,7 @@ export function m7BootstrapHtml(): string {
       const current = active
       if (!current || current.mode !== 'edit' || current.transformDragging) return
       const bounds = canvas.getBoundingClientRect()
-      const pointer = new current.THREE.Vector2(
-        ((event.clientX - bounds.left) / bounds.width) * 2 - 1,
-        -((event.clientY - bounds.top) / bounds.height) * 2 + 1,
-      )
-      const raycaster = new current.THREE.Raycaster()
-      raycaster.setFromCamera(pointer, current.camera)
-      const uuids = [...new Set(
-        raycaster.intersectObjects(current.scene.children, true)
-          .map(result => result.object.uuid)
-          .filter(uuid => current.objects.has(uuid)),
-      )]
+      const uuids = pickObjects(current, event.clientX, event.clientY, bounds)
       const previous = current.pickCycle
       const samePoint = previous
         && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) <= 6
