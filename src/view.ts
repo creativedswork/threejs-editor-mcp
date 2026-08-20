@@ -314,6 +314,8 @@ const runtimeDebug = required<HTMLSelectElement>('[data-runtime-debug]')
 const fullscreen = required<HTMLButtonElement>('[data-fullscreen]')
 const save = required<HTMLButtonElement>('[data-save]')
 const hierarchy = required<HTMLUListElement>('[data-hierarchy]')
+const sceneSearch = required<HTMLInputElement>('[data-scene-search]')
+const revealSelection = required<HTMLButtonElement>('[data-reveal-selection]')
 const fileTree = required<HTMLUListElement>('[data-file-tree]')
 const fileWorkspace = required<HTMLElement>('[data-file-workspace]')
 const filePath = required<HTMLElement>('[data-file-path]')
@@ -410,6 +412,7 @@ let m7EditorSceneAccepted = false
 let runtimeDebugMode = 'final'
 let parameterDocuments = new Map<string, Record<string, unknown>>()
 let parameterLoadToken = 0
+const expandedObjects = new Set<string>()
 
 const loader = new THREE.ObjectLoader()
 const raycaster = new THREE.Raycaster()
@@ -900,22 +903,58 @@ function commitOfficialOperation(
 
 function renderHierarchy(): void {
   hierarchy.replaceChildren()
-  const add = (object: THREE.Object3D, depth: number): void => {
+  const query = sceneSearch.value.trim().toLowerCase()
+  const matches = (object: THREE.Object3D): boolean => {
+    if (query === '') return true
+    return `${object.name} ${object.type}`.toLowerCase().includes(query)
+      || object.children.some(child => !isHelper(child) && matches(child))
+  }
+  const add = (object: THREE.Object3D, parent: HTMLUListElement): void => {
     if (isHelper(object)) return
+    if (!matches(object)) return
     const item = document.createElement('li')
+    const row = document.createElement('div')
+    row.className = 'tree-row'
+    const children = object.children.filter(child => !isHelper(child))
+    if (children.length > 0) {
+      const toggle = document.createElement('button')
+      const expanded = query !== '' || expandedObjects.has(object.uuid)
+      toggle.type = 'button'
+      toggle.className = 'tree-toggle'
+      toggle.textContent = expanded ? '⌄' : '›'
+      toggle.ariaLabel = `${expanded ? 'Collapse' : 'Expand'} ${object.name || object.type}`
+      toggle.addEventListener('click', () => {
+        if (expandedObjects.has(object.uuid)) expandedObjects.delete(object.uuid)
+        else expandedObjects.add(object.uuid)
+        renderHierarchy()
+      })
+      row.append(toggle)
+    } else {
+      const spacer = document.createElement('span')
+      spacer.className = 'tree-spacer'
+      row.append(spacer)
+    }
     const button = document.createElement('button')
     button.type = 'button'
+    button.className = 'tree-object'
     button.textContent = object.name || object.type
     button.title = `${object.type}: ${button.textContent}`
-    button.style.paddingLeft = `${String(8 + depth * 12)}px`
     button.ariaSelected = String(object === selected)
     button.dataset.objectUuid = object.uuid
     button.addEventListener('click', () => selectObject(object))
-    item.append(button)
-    hierarchy.append(item)
-    for (const child of object.children) add(child, depth + 1)
+    row.append(button)
+    item.append(row)
+    if (children.length > 0 && (query !== '' || expandedObjects.has(object.uuid))) {
+      const childList = document.createElement('ul')
+      childList.className = 'tree-children'
+      for (const child of children) add(child, childList)
+      item.append(childList)
+    }
+    parent.append(item)
   }
-  for (const child of scene.children) add(child, 0)
+  for (const child of scene.children) add(child, hierarchy)
+  hierarchy.querySelector<HTMLButtonElement>('[aria-selected=true]')
+    ?.scrollIntoView({ block: 'nearest' })
 }
 
 function refreshInspector(): void {
@@ -941,6 +980,13 @@ function refreshInspector(): void {
 
 function selectObject(object: THREE.Object3D | undefined, notifyRuntime = true): void {
   selected = object
+  for (
+    let parent = object?.parent;
+    parent != null && parent !== scene;
+    parent = parent.parent
+  ) {
+    expandedObjects.add(parent.uuid)
+  }
   transform?.detach()
   if (object !== undefined && object !== scene && !isHelper(object)) transform?.attach(object)
   if (notifyRuntime && workspace !== undefined && m7ActiveRun !== undefined) {
@@ -1516,7 +1562,7 @@ async function stopIsolatedRuntime(): Promise<Record<string, unknown> | undefine
 async function startIsolatedRuntime(
   transform?: (manifest: M5RuntimeManifest) => M5RuntimeManifest,
 ): Promise<Record<string, unknown>> {
-  await stopIsolatedRuntime()
+  if (m5ActiveRun !== undefined) await stopIsolatedRuntime()
   m5Events = []
   m5Errors = []
   m5Ready = undefined
@@ -1641,8 +1687,6 @@ async function startM7Runtime(
   if (projectId === undefined || revision === undefined || workspace === undefined) {
     throw new Error('Workspace is not ready')
   }
-  await stopIsolatedRuntime()
-  await stopM7Runtime(false)
   if (token !== m7StartToken) return
   status.textContent = `Building ${workspace.entry}`
   const buildResult = await app.callServerTool({
@@ -1670,6 +1714,9 @@ async function startM7Runtime(
   }
   const bundleResource = await app.readServerResource({ uri: build.bundleUri })
   const bundle = resourceText(bundleResource, build.bundleUri)
+  if (token !== m7StartToken) return
+  await stopIsolatedRuntime()
+  await stopM7Runtime(false)
   if (token !== m7StartToken) return
 
   m7Events = []
@@ -2331,6 +2378,13 @@ redo.addEventListener('click', () => {
   markDirty('Redo')
 })
 
+sceneSearch.addEventListener('input', renderHierarchy)
+revealSelection.addEventListener('click', () => {
+  if (selected === undefined) return
+  sceneSearch.value = ''
+  selectObject(selected)
+})
+
 save.addEventListener('click', () => {
   if (projectId === undefined || project === undefined || revision === undefined) return
   if (navigationTab === 'files') {
@@ -2390,6 +2444,7 @@ save.addEventListener('click', () => {
       arguments: {
         projectId: savedProjectId,
         baseRevision: savedRevision,
+        source: 'human',
         operations,
       },
     }).then(async result => {
@@ -2399,18 +2454,24 @@ save.addEventListener('click', () => {
         await pullLatest()
         return
       }
-      const pulled = await app.callServerTool({
-        name: 'pull_project',
-        arguments: { projectId: savedProjectId },
-      })
-      const snapshot = snapshotFromResult(pulled)
-      if (snapshot === undefined) throw new Error('saved Workspace snapshot was not returned')
-      acceptSnapshot(
-        snapshot.project,
-        snapshot.revision,
-        'Saved Runtime scene edits',
-        snapshot.workspace,
-      )
+      const committed = record(result.structuredContent)
+      if (typeof committed?.revision !== 'string') {
+        throw new Error('saved Workspace revision was not returned')
+      }
+      pendingOperations = []
+      pendingEditorOperations = []
+      const baseline = serializeProject()
+      project = cloneProject(baseline)
+      history = [{
+        project: cloneProject(baseline),
+        pendingOperations: [],
+        editorOperations: [],
+      }]
+      historyIndex = 0
+      setClean(committed.revision)
+      setEditorDisabled(false)
+      refreshHistoryButtons()
+      status.textContent = 'Saved Runtime scene edits'
     }).catch(error => {
       root.dataset.sync = 'error'
       save.disabled = false
@@ -2649,6 +2710,7 @@ const diagnostics = {
     inputTitle: title.value,
     sync: root.dataset.sync,
     selected: selected?.name,
+    selectedUuid: selected?.uuid,
     transformMode,
     historyIndex,
     historyLength: history.length,

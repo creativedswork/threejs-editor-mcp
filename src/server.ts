@@ -250,9 +250,29 @@ const runtimeEditorSceneSchema = z.object({
   schemaVersion: z.literal(1),
   objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
 })
+const editorChangeSchema = z.object({
+  source: z.enum(['human', 'ai', 'unknown']),
+  type: z.enum([
+    'set_position',
+    'set_rotation',
+    'set_scale',
+    'set_name',
+    'set_visible',
+    'set_material_color',
+    'set_material_value',
+  ]),
+  objectUuid: z.string().uuid(),
+  objectName: z.string(),
+  objectPath: z.string().optional(),
+  value: z.unknown(),
+})
 const workspaceEditorStateSchema = z.object({
   schemaVersion: z.literal(1),
   operations: z.array(editorCommandSchema).max(4_096),
+  recentChanges: z.array(z.object({
+    source: z.enum(['human', 'ai', 'unknown']),
+    operation: editorCommandSchema,
+  })).max(200).optional(),
 })
 const workspaceReadSchema = z.object({
   path: workspacePathSchema,
@@ -415,6 +435,39 @@ function compactEditorOperations(
     compacted.set(key, operation)
   }
   return [...compacted.values()]
+}
+
+function editorOperationValue(operation: EditorCommandOperation): unknown {
+  return operation.type === 'set_material_value'
+    ? { property: operation.property, value: operation.value }
+    : operation.value
+}
+
+function editorChanges(
+  state: WorkspaceEditorState,
+  objects: EditorObjectSnapshot[],
+): Array<z.infer<typeof editorChangeSchema>> {
+  const byUuid = new Map(objects.map(object => [object.uuid, object]))
+  return (state.recentChanges ?? state.operations.map(operation => ({
+    source: 'unknown' as const,
+    operation,
+  }))).map(({ source, operation }) => {
+    const object = byUuid.get(operation.objectUuid)
+    return {
+      source,
+      type: operation.type,
+      objectUuid: operation.objectUuid,
+      objectName: object?.name ?? operation.objectUuid,
+      ...object?.path === undefined ? {} : { objectPath: object.path },
+      value: editorOperationValue(operation),
+    }
+  })
+}
+
+function editorChangeText(change: z.infer<typeof editorChangeSchema>): string {
+  return `${change.source} ${change.type} ${change.objectName}`
+    + `${change.objectPath === undefined ? '' : ` (${change.objectPath})`}`
+    + ` = ${JSON.stringify(change.value)}`
 }
 
 function inspectEditor(project: z.infer<typeof projectSchema>): ReturnType<typeof inspectOfficialEditor> {
@@ -807,22 +860,37 @@ function viewHtml(script: string): string {
     .parameter-list{display:grid;gap:10px}
     .parameter-field{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;color:#aebdcc;font-size:11px}
     .parameter-field input[type=number]{width:82px}
-    .tree{margin:0;padding:5px 0;list-style:none}
+    .tree-tools{
+      position:sticky;
+      top:35px;
+      z-index:1;
+      display:grid;
+      grid-template-columns:minmax(0,1fr) 29px;
+      gap:4px;
+      padding:6px;
+      border-bottom:1px solid var(--line);
+      background:rgb(5 11 19 / .72);
+    }
+    .scene-search{min-width:0;height:29px;padding:0 8px}
+    .tree-tools .icon{width:29px;height:29px}
+    .tree,.tree ul{margin:0;padding:0;list-style:none}
+    .tree{padding:5px 0}
+    .tree-children{padding-left:13px!important}
+    .tree-row{display:grid;grid-template-columns:24px minmax(0,1fr);align-items:center}
+    .tree-spacer{width:24px}
     .tree button{
-      display:block;
-      width:100%;
       height:29px;
-      padding:0 10px;
       overflow:hidden;
       border:0;
       border-radius:0;
       background:transparent;
       color:#bac9d9;
-      text-align:left;
       text-overflow:ellipsis;
       white-space:nowrap;
       font-weight:540;
     }
+    .tree-toggle{width:24px;padding:0;text-align:center;color:#8092a5!important}
+    .tree-object{width:100%;padding:0 8px;text-align:left}
     .tree button:hover{border-color:transparent;background:rgb(232 244 255 / .07);box-shadow:none}
     .tree button[aria-selected=true]{background:var(--accent-soft);box-shadow:inset 2px 0 var(--accent),inset 0 1px rgb(255 255 255 / .035);color:#f4faff}
     canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
@@ -966,6 +1034,10 @@ function viewHtml(script: string): string {
     <section class="workspace">
       <aside class="panel hierarchy">
         <h2>Scene graph</h2>
+        <div class="tree-tools">
+          <input class="scene-search" type="search" data-scene-search aria-label="Search scene objects" placeholder="Find object">
+          <button class="icon" type="button" data-reveal-selection aria-label="Reveal selected object" title="Reveal selected object">⌖</button>
+        </div>
         <ul class="tree" data-hierarchy data-scene-tree></ul>
       </aside>
       <section class="editor-surface">
@@ -1213,6 +1285,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       layout: editorLayoutSchema,
       cameraView: cameraViewSchema,
       operations: z.array(z.string()),
+      editorChanges: z.array(editorChangeSchema),
       objects: z.array(sceneObjectSchema),
       assets: z.array(assetSummarySchema),
       script: z.object({
@@ -1234,7 +1307,33 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       cameraView: 'broadcast' as const,
       operations: [],
     }
-    const objects = sceneSummary(parsedScene)
+    let objects = sceneSummary(parsedScene)
+    let changes: Array<z.infer<typeof editorChangeSchema>> = []
+    if (workspace !== undefined) {
+      const reportedDocument = await workspaces.readEditorScene(projectId, snapshot.revision)
+      const reported = reportedDocument === undefined
+        ? undefined
+        : runtimeEditorSceneSchema.parse(reportedDocument)
+      if (reported !== undefined) {
+        objects = reported.objects.map(object => ({
+          name: object.name,
+          type: object.type,
+          visible: object.visible,
+          position: object.position,
+          ...object.color === undefined ? {} : { color: object.color },
+        }))
+      }
+      if (workspace.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
+        const [file] = await workspaces.readFiles(projectId, [{
+          path: WORKSPACE_EDITOR_STATE_PATH,
+        }])
+        const state = workspaceEditorStateSchema.parse(JSON.parse(file!.text!))
+        changes = editorChanges(
+          state,
+          reported?.objects as EditorObjectSnapshot[] ?? [],
+        )
+      }
+    }
     const scriptError = syntaxError(snapshot.project.script.source)
     const [diagnostics, assets] = await Promise.all([
       workspace === undefined ? store.readDiagnostics(projectId) : undefined,
@@ -1247,6 +1346,10 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       kind: workspace?.kind ?? 'scene-project' as const,
       ...workspace === undefined ? {} : { workspace: workspaceView(workspace) },
       ...editor,
+      operations: changes.length === 0
+        ? editor.operations
+        : changes.map(editorChangeText),
+      editorChanges: changes,
       objects,
       assets,
       script: {
@@ -1297,6 +1400,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       title: z.string(),
       revision: revisionSchema,
       objects: z.array(editorObjectSchema),
+      editorChanges: z.array(editorChangeSchema),
     }),
     _meta: { ui: { visibility: ['model', 'app'] } },
   }, async ({ projectId }) => {
@@ -1308,11 +1412,24 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     const objects = reported === undefined
       ? inspectEditor(snapshot.project)
       : runtimeEditorSceneSchema.parse(reported).objects
+    let changes: Array<z.infer<typeof editorChangeSchema>> = []
+    if (workspace !== undefined
+      && reported !== undefined
+      && workspace.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
+      const [file] = await workspaces.readFiles(projectId, [{
+        path: WORKSPACE_EDITOR_STATE_PATH,
+      }])
+      changes = editorChanges(
+        workspaceEditorStateSchema.parse(JSON.parse(file!.text!)),
+        runtimeEditorSceneSchema.parse(reported).objects as EditorObjectSnapshot[],
+      )
+    }
     const detail = {
       projectId,
       title: snapshot.title,
       revision: snapshot.revision,
       objects,
+      editorChanges: changes,
     }
     return textResult(`Three.js editor objects:\n${JSON.stringify(detail)}`, detail)
   })
@@ -1323,6 +1440,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       baseRevision: revisionSchema,
+      source: z.enum(['human', 'ai']).default('ai'),
       operations: z.array(editorCommandSchema).min(1).max(50),
     },
     outputSchema: z.object({
@@ -1336,7 +1454,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       currentRevision: revisionSchema.optional(),
     }),
     _meta: { ui: { visibility: ['model', 'app'] } },
-  }, async ({ projectId, baseRevision, operations }) => {
+  }, async ({ projectId, baseRevision, source, operations }) => {
     try {
       const workspace = await loadWorkspace(projectId)
       const snapshot = workspace ?? await store.load(projectId)
@@ -1394,6 +1512,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             ...editorState.operations,
             ...operations,
           ]),
+          recentChanges: [
+            ...(editorState.recentChanges ?? editorState.operations.map(operation => ({
+              source: 'unknown' as const,
+              operation,
+            }))),
+            ...operations.map(operation => ({ source, operation })),
+          ].slice(-200),
         })
         summary = await workspaces.apply(projectId, baseRevision, [{
           type: 'write',

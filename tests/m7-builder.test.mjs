@@ -369,6 +369,7 @@ export function createCar() {
       arguments: {
         projectId: opened.structuredContent.projectId,
         baseRevision: opened.structuredContent.revision,
+        source: 'human',
         operations: [{
           type: 'set_position',
           objectUuid: carUuid,
@@ -392,6 +393,14 @@ export function createCar() {
           objectUuid: carUuid,
           value: [0.25, 0, 0],
         }],
+        recentChanges: [{
+          source: 'human',
+          operation: {
+            type: 'set_position',
+            objectUuid: carUuid,
+            value: [0.25, 0, 0],
+          },
+        }],
       },
     )
     const inspectedAfterEdit = await client.callTool({
@@ -400,6 +409,19 @@ export function createCar() {
     })
     assert.equal(inspectedAfterEdit.structuredContent.revision, edited.structuredContent.revision)
     assert.deepEqual(inspectedAfterEdit.structuredContent.objects[0].position, [0.25, 0, 0])
+    const projectAfterEdit = await client.callTool({
+      name: 'inspect_project',
+      arguments: { projectId: opened.structuredContent.projectId },
+    })
+    assert.equal(projectAfterEdit.structuredContent.objects[0].name, 'VF-26')
+    assert.deepEqual(projectAfterEdit.structuredContent.editorChanges, [{
+      source: 'human',
+      type: 'set_position',
+      objectUuid: carUuid,
+      objectName: 'VF-26',
+      objectPath: 'scene/VF-26#0',
+      value: [0.25, 0, 0],
+    }])
     const rebuilt = await client.callTool({
       name: 'build_project',
       arguments: {

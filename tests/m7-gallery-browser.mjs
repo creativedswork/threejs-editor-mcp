@@ -174,12 +174,41 @@ try {
   assert.ok(editPixels.lit > editPixels.sampled * 0.7)
   assert.ok(editPixels.colors > 600)
   assert.ok(editPixels.contrast > 100)
+  const runtimeCanvas = runtimeFrame.locator('canvas')
+  const canvasBox = await runtimeCanvas.boundingBox()
+  assert.notEqual(canvasBox, null)
+  let cycledSelection = false
+  for (const [xRatio, yRatio] of [[0.5, 0.55], [0.62, 0.5], [0.4, 0.6]]) {
+    const position = {
+      x: canvasBox.width * xRatio,
+      y: canvasBox.height * yRatio,
+    }
+    await runtimeCanvas.click({ position })
+    await page.waitForTimeout(50)
+    const first = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().selectedUuid)
+    await runtimeCanvas.click({ position })
+    await page.waitForTimeout(50)
+    const second = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().selectedUuid)
+    if (typeof first === 'string' && typeof second === 'string' && first !== second) {
+      cycledSelection = true
+      break
+    }
+  }
+  assert.equal(cycledSelection, true)
+  const sceneSearch = appFrame.getByRole('searchbox', { name: 'Search scene objects' })
+  await sceneSearch.fill('helmet')
+  const helmet = appFrame.getByRole('button', { name: 'helmet', exact: true })
+  await helmet.waitFor({ state: 'visible' })
+  await helmet.click()
+  await appFrame.getByRole('button', { name: 'Reveal selected object' }).click()
+  assert.equal(await sceneSearch.inputValue(), '')
   const car = appFrame.getByRole('button', { name: 'VF-26', exact: true })
   await car.waitFor({ state: 'visible' })
   await car.click()
   const positionX = appFrame.getByRole('spinbutton', { name: 'Position X' })
   assert.equal(Number(await positionX.inputValue()), 0)
   const beforeRevision = opened.revision
+  const runtimeHandleBeforeSave = await runtime.elementHandle()
   await positionX.fill('0.25')
   await positionX.press('Enter')
   await appFrame.getByRole('button', { name: 'Save' }).click()
@@ -190,6 +219,11 @@ try {
       && metrics.revision !== previous
   }, beforeRevision, { timeout: 120_000 })
   const edited = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
+  assert.equal(await runtimeHandleBeforeSave.evaluate(node => node.isConnected), true)
+  assert.equal(await runtimeFrame.evaluate(() => document.visibilityState), 'visible')
+  const savedPixels = await pixelStats(runtimeFrame)
+  assert.ok(savedPixels.lit > savedPixels.sampled * 0.7)
+  assert.ok(savedPixels.colors > 600)
   await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
   assert.equal(Number(await positionX.inputValue()), 0.25)
   const carUuid = await appFrame.getByRole('button', {
@@ -203,6 +237,19 @@ try {
   assert.equal(
     inspected.structuredContent.objects.find(object => object.name === 'VF-26').uuid,
     carUuid,
+  )
+  assert.deepEqual(
+    inspected.structuredContent.editorChanges.find(
+      change => change.objectName === 'VF-26',
+    ),
+    {
+      source: 'human',
+      type: 'set_position',
+      objectUuid: carUuid,
+      objectName: 'VF-26',
+      objectPath: 'scene/VF-26#0',
+      value: [0.25, 0, 0],
+    },
   )
 
   const ai = await callHarnessTool('apply_editor_commands', {
@@ -263,6 +310,8 @@ try {
     entry: opened.workspaceEntry,
     backend: opened.workspaceBackend,
     editPixels,
+    savedPixels,
+    cycledSelection,
     editorObject: 'VF-26',
     humanPositionX: 0.25,
     humanRevision: edited.revision,

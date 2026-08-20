@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "status": "pass-awaiting-approval",
+  "sourceSession": "user-supplied session.jsonl",
+  "deterministicBrowser": {
+    "saveKeptRuntimeIframe": true,
+    "beforeSave": {
+      "sampled": 9000,
+      "lit": 7784,
+      "colors": 1163
+    },
+    "afterSave": {
+      "sampled": 9000,
+      "lit": 7707,
+      "colors": 1199
+    },
+    "searchAndReveal": true,
+    "overlappingSelectionCycle": true,
+    "appProblems": []
+  },
+  "realLlm": {
+    "sessionId": "session-a629ddc6-d8df-46a1-ad2e-f76bdc557901",
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash",
+    "toolSequence": [
+      "mcp__threejs__list_projects",
+      "mcp__threejs__open_editor",
+      "mcp__threejs__inspect_project"
+    ],
+    "savedRevision": "173b0277ad417c5ddd041888690b7afa92ce868ffd00ce37b6653edc23f22ddd",
+    "recognizedEdit": {
+      "source": "human",
+      "type": "set_position",
+      "objectName": "VF-26",
+      "objectPath": "scene/VF-26#0",
+      "value": [0.25, 0, 0]
+    },
+    "forbiddenToolCalls": []
+  },
+  "visualEvidence": {
+    "path": "reports/assets/m7-session-human-edit-recall.png",
+    "sha256": "d315fdf1babde09136b4b0c07f45e1fd66ac4c8cab45502d83c1ff53e1f805ed"
+  }
+}

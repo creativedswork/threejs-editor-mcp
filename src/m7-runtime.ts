@@ -6,6 +6,10 @@ export const WORKSPACE_EDITOR_STATE_PATH = 'threejs.editor.json'
 export interface WorkspaceEditorState {
   schemaVersion: 1
   operations: EditorCommandOperation[]
+  recentChanges?: Array<{
+    source: 'human' | 'ai' | 'unknown'
+    operation: EditorCommandOperation
+  }>
 }
 
 export interface M7RuntimeEvent {
@@ -365,6 +369,7 @@ export function m7BootstrapHtml(): string {
           transformHelper: undefined,
           transformMode: 'translate',
           transformDragging: false,
+          pickCycle: undefined,
           selected: undefined,
           objects: new Map(),
           parents: new Map(),
@@ -515,9 +520,25 @@ export function m7BootstrapHtml(): string {
       )
       const raycaster = new current.THREE.Raycaster()
       raycaster.setFromCamera(pointer, current.camera)
-      const hit = raycaster.intersectObjects(current.scene.children, true)
-        .find(result => current.objects.has(result.object.uuid))
-      selectObject(current, hit?.object.uuid)
+      const uuids = [...new Set(
+        raycaster.intersectObjects(current.scene.children, true)
+          .map(result => result.object.uuid)
+          .filter(uuid => current.objects.has(uuid)),
+      )]
+      const previous = current.pickCycle
+      const samePoint = previous
+        && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) <= 6
+      const sameObjects = samePoint
+        && previous.uuids.length === uuids.length
+        && previous.uuids.every((uuid, index) => uuid === uuids[index])
+      const index = sameObjects ? (previous.index + 1) % Math.max(uuids.length, 1) : 0
+      current.pickCycle = {
+        x: event.clientX,
+        y: event.clientY,
+        uuids,
+        index,
+      }
+      selectObject(current, uuids[index])
     })
     window.addEventListener('error', event => {
       if (!active) return

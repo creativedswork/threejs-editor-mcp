@@ -82,6 +82,30 @@ try {
   })
   assert.ok(pixels.lit > pixels.sampled * 0.7)
   assert.ok(pixels.colors > 600)
+  const car = appFrame.getByRole('button', { name: 'VF-26', exact: true })
+  await car.click()
+  const positionX = appFrame.getByRole('spinbutton', { name: 'Position X' })
+  const beforeRevision = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().revision)
+  await positionX.fill('0.25')
+  await positionX.press('Enter')
+  await appFrame.getByRole('button', { name: 'Save' }).click()
+  await appFrame.waitForFunction(previous => {
+    const metrics = globalThis.__THREE_M7__.metrics()
+    return metrics.sync === 'clean'
+      && metrics.playState === 'editing'
+      && metrics.revision !== previous
+  }, beforeRevision, { timeout: 120_000 })
+  const savedRevision = await appFrame.evaluate(() => (
+    globalThis.__THREE_M7__.metrics().revision
+  ))
+  assert.equal(Number(await positionX.inputValue()), 0.25)
+
+  await composer.fill('我刚才在编辑器里做过什么操作？请使用 Three.js MCP 检查当前工程。')
+  await composer.press('Enter')
+  await page.waitForFunction(() => {
+    const text = document.body.innerText
+    return text.includes('VF-26') && text.includes('0.25')
+  }, undefined, { timeout: 120_000 })
   const body = await page.locator('body').innerText()
   assert.doesNotMatch(body, /npm install|gallery server|打开 HTML/i)
 
@@ -97,9 +121,13 @@ try {
     toolSequence: [
       'mcp__threejs__list_projects',
       'mcp__threejs__open_editor',
+      'mcp__threejs__inspect_project',
     ],
     editMode: true,
     editorObject: 'VF-26',
+    humanPositionX: 0.25,
+    savedRevision,
+    aiRecognizedHumanEdit: true,
     pixels,
   }, null, 2)}\n`)
 } finally {
