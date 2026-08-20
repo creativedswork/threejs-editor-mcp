@@ -16,8 +16,9 @@ import {
   type Message,
   type Plugin,
 } from 'esbuild'
+import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
 
-export const BUILDER_VERSION = 'm7-esbuild-v1'
+export const BUILDER_VERSION = 'm7-edit-runtime-v2'
 export const DEPENDENCY_PROFILE = `three@0.185.1+esbuild@${esbuildVersion}`
 
 const require = createRequire(import.meta.url)
@@ -170,13 +171,17 @@ function loaderFor(file: BuildFile): Loader {
   return 'text'
 }
 
-function runtimeSource(input: BuildWorkspaceInput): string {
+function runtimeSource(input: BuildWorkspaceInput, files: Map<string, BuildFile>): string {
   const threeSpecifier = input.backend === 'webgpu' ? 'three/webgpu' : 'three'
   return [
     `import adapter from ${JSON.stringify(`/${input.entry}`)}`,
     `import * as THREE from ${JSON.stringify(threeSpecifier)}`,
     'import { OrbitControls } from "three/addons/controls/OrbitControls.js"',
-    'export { adapter, THREE, OrbitControls }',
+    'import { TransformControls } from "three/addons/controls/TransformControls.js"',
+    files.has(WORKSPACE_EDITOR_STATE_PATH)
+      ? `import editorState from ${JSON.stringify(`/${WORKSPACE_EDITOR_STATE_PATH}`)}`
+      : 'const editorState = { schemaVersion: 1, operations: [] }',
+    'export { adapter, THREE, OrbitControls, TransformControls, editorState }',
   ].join('\n')
 }
 
@@ -223,7 +228,7 @@ function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): P
         }
       })
       builder.onLoad({ filter: /.*/, namespace: runtimeNamespace }, () => ({
-        contents: runtimeSource(input),
+        contents: runtimeSource(input, files),
         loader: 'js',
         resolveDir: '/',
       }))

@@ -1,20 +1,26 @@
 # M7 Validation Report
 
 Date: 2026-08-19
-Status: **PASS after second user-path correction, awaiting renewed approval**
+Status: **PASS after edit-mode Runtime correction, awaiting renewed approval**
 
 ## 中文审阅摘要
 
-M7 已完成 Module Builder、source map、复杂程序几何和 WebGPU Runtime
-验收：
+M7 已完成 Module Builder、source map、复杂程序几何，以及可编辑 WebGPU
+Runtime 验收。此前“只有 Play 后可见”的 Player 证据已作废：
 
 - 使用 esbuild VFS 构建 JS、TS、JSX、TSX、JSON、GLSL、WGSL 和 TSL；
 - 固定支持 `three`、`three/webgpu`、`three/tsl` 和 `three/addons/*`；
 - build 绑定 exact revision，并持久化 cache、external source map、结构化
   diagnostics 和 asset manifest；
 - source map、metafile 和 diagnostics 不泄露本机绝对路径；
-- Runtime 在第三层 opaque iframe 中自行创建并释放 WebGL/WebGPU renderer；
-- P1 Formula One Race Car 通过真实 `WebGPUBackend` 呈现非空像素；
+- Runtime 在第三层 opaque iframe 中自行创建 WebGL/WebGPU renderer；
+- Workspace 打开后无需 Play 即进入 `edit` mode，并呈现真实 Formula One
+  Race Car；
+- Scene graph、画布选择、Properties 和 TransformControls 操作 Runtime
+  中的真实 `VF-26` 对象，不再只显示投影灯光；
+- Human 将 `VF-26.position.x` 从 `0` 改为 `0.25` 并保存，AI 再通过同一
+  UUID 和官方 Editor Command 改为 `0.5`；两个 revision 均可重建；
+- Play 切换到 `run` mode，Stop 返回同一 `edit` mode，保留对象覆盖；
 - Human 修改 livery，AI 在 exact revision 上修改 `bodyScale`，两个 revision
   均可重建；
 - `final`、`topology`、`no-livery` 三种 debug mode 有独立视觉证据；
@@ -73,19 +79,22 @@ project ID. The source repository is not modified.
 | Source privacy | source map and bundle contain no `/Users/` path | PASS |
 | Build resources | `bundle.js` and `bundle.js.map` read through dynamic MCP Resource URIs | PASS |
 | P1 provenance | 9 files, 143,644 bytes, pinned corpus commit | PASS |
-| P1 Server build | WebGPU, 15 inputs, 0 errors, 0 warnings | PASS |
+| P1 Server build | WebGPU, 16 inputs, 0 errors, 0 warnings | PASS |
 | Real renderer | `rendererBackend=WebGPUBackend`, secure context and WebGPU API true | PASS |
 | Non-empty pixels | 7,795/9,000 lit samples, 6,856 contrast samples, 1,107 colors | PASS |
+| Edit without Play | Gallery edit mode: 7,847/9,000 lit samples, 6,944 contrast samples, 1,133 colors | PASS |
+| Real Scene graph | `VF-26`, `hull`, and generated child objects are selectable before Play | PASS |
 | Human revision | App-only livery edit produced a new clean revision without an Agent turn | PASS |
 | AI revision | exact-revision `bodyScale=1.04` transaction followed the Human revision | PASS |
+| Runtime object revision | Human `VF-26.x=0.25`; AI continued with the same UUID at `x=0.5` | PASS |
 | Geometry evidence | 62 parts, 375,964 unique triangles, 168 hull rings, 96 segments | PASS |
 | Debug modes | final, topology, and no-livery screenshots correspond to rendered frames | PASS |
-| Runtime disposal | Stop froze frame count; Restart retained one renderer and the cached build ID | PASS |
+| Edit/run lifecycle | Play enters run; Stop returns to edit with one renderer and the cached build ID | PASS |
 | Real LLM | fresh non-Replay DeepSeek run reported both revisions and both build IDs | PASS |
 | Workspace discovery | `examples` Workspace returns 37 relative candidates: 33 ready, 4 restricted | PASS |
-| Direct MCP App open | Natural-language Formula One request calls `open_editor({ projectPath })` and mounts the App | PASS |
+| Direct MCP App open | Natural-language request mounts a non-black editable App without Play | PASS |
 | Gallery corpus adapter | Fixed layout maps only `dev/` and `skills/`; unrelated parent files remain inaccessible | PASS |
-| Gallery build | Source-revision-bound Managed Workspace builds WebGPU with 15 inputs and 0 diagnostics | PASS |
+| Gallery build | Managed Workspace builds WebGPU with 17 inputs and 0 diagnostics | PASS |
 | Host regression | `dsh-mcp-apps` typecheck, build, and 7 tests | PASS |
 | Package boundary | 10-file tarball excludes corpus, tests, reports, `.tmp`, assets, and credentials | PASS |
 
@@ -167,12 +176,12 @@ HTML runtime.
 The final independent Server build returned:
 
 ```text
-revision:       13f5535c663575b6de9184230407308e670aaf12db92267dfcd4357971592f25
-buildId:        81a6166e79a0f78d4bd898b5e81edaaebb5522afdd5bc0737fff0728d2efde0a
+revision:       da7ddd097581425e27b2a52892fba9c5c0a3666321302e5d43c4842a806c07f2
+buildId:        b634f0c23459f2fe92347072247f52091eaa591a80ae863771443309edb505a1
 backend:        webgpu
-bundle bytes:   3,168,165
-source map:     6,560,648
-inputs:         15
+bundle bytes:   3,213,537
+source map:     6,651,680
+inputs:         17
 errors:         0
 warnings:       0
 ```
@@ -187,7 +196,55 @@ The runtime iframe remains:
 
 Its origin is `null`; it has no AppBridge and receives the bundle through
 `postMessage`. The runtime owns renderer, controls, animation frame, and Blob
-URL disposal.
+URL disposal. It now has two explicit modes:
+
+```text
+open exact revision
+-> edit: real scene rendered, simulation update paused
+-> run: simulation update enabled
+-> stop
+-> edit: same renderer, scene overrides, and object identity
+```
+
+The Runtime reports a bounded editable object catalog with deterministic UUIDs
+derived from scene paths. The App mirrors that catalog into the pinned r185
+Editor command model. Selection, Properties, and TransformControls operate on
+the Runtime object; only official command operations are persisted.
+
+Workspace edits are compacted into revision-managed `threejs.editor.json`.
+The source corpus remains read-only. The Runtime object catalog for an exact
+revision is stored under `.threejs-editor/editor-scenes/` for model-side
+`inspect_editor`.
+
+The Gallery collaboration sequence was:
+
+```text
+open_editor({ projectPath })
+-> edit mode renders VF-26 without Play
+-> Human selects VF-26 and sets position.x = 0.25
+-> App-only apply_editor_commands + new revision
+-> AI inspect_editor sees the same UUID
+-> AI apply_editor_commands sets position.x = 0.5
+-> App pulls the revision and remains in edit mode
+-> Play enters run mode
+-> Stop returns to edit mode with position.x = 0.5
+```
+
+Gallery edit-mode pixel evidence:
+
+```json
+{
+  "rendererBackend": "WebGPUBackend",
+  "sampled": 9000,
+  "lit": 7847,
+  "contrast": 6944,
+  "colors": 1133,
+  "editorObject": "VF-26"
+}
+```
+
+The complete Human/AI object edit and Play/Stop data is in
+[`M7-gallery-edit-trace.json`](M7-gallery-edit-trace.json).
 
 The deterministic Harness sequence was:
 
@@ -198,11 +255,12 @@ open current DSH Workspace
 -> no Agent turn
 -> same Harness MCP Host applies exact-revision bodyScale=1.04
 -> App pulls the external revision
--> Play WebGPU runtime
+-> edit-mode WebGPU scene is already visible
+-> Play switches the same scene to run mode
 -> final/topology/no-livery
--> Stop
+-> Stop returns to edit mode
 -> Restart from cached build
--> Stop
+-> Stop returns to edit mode
 ```
 
 The resulting Runtime metrics were:
@@ -332,12 +390,12 @@ Final build artifacts:
 
 ```text
 dist/server.js
-190,205 bytes
-SHA-256 eef421bcb35bb2d089f7bfd57de60408c64062604079b9e9f1fbf4b175c062cf
+197,522 bytes
+SHA-256 4777641174f8157634b9c65d73371043f1dabac41f3510242c104f76fbcd9d1a
 
 dist/view.js
-1,235,088 bytes
-SHA-256 6ca4f8d722fca99d4c0fb8ba35de2d8a3feacc1856aad4e07094969deda3cb47
+1,250,857 bytes
+SHA-256 d01de1f72e766715254e945c8d0c9e3880f42d68b5042ac4192327c0b63455f8
 ```
 
 Credential-shaped value scanning found no API key or npm token in tracked or
@@ -347,13 +405,13 @@ pending source, tests, docs, and reports.
 
 | Artifact | SHA-256 |
 |---|---|
-| `m7-p1-final.png` | `75f41f547af916a1daa0282bbde412419c833bdeb0c872cd0292562157f0ebc4` |
+| `m7-p1-final.png` | `fb4d22cb751575a93508f4227d7e793432546f3ab72f25dec7da8814ff8f1d2c` |
 | `m7-p1-topology.png` | `51c14c9676318407c208e5ea0653df003d06e35b755ce1dd0f6ec1e993f48907` |
 | `m7-p1-no-livery.png` | `1b0cd450e27eec2282d5fdc149dac3d1cffc1647b654cffd49c1f7f7fd410d7f` |
 | `m7-p1-debug-contact-sheet.png` | `5d100b7226b235a78977c4352cb593f9b72d84ef3683de6f0f3f7f5eaa196f26` |
 | `m7-real-llm-build-id.png` | `93c60b49f057be8626cb03c187a308a5344ae17938a6316d807581f5a123837b` |
-| `m7-gallery-direct-open.png` | `bc2961b55a73b248df3ea5fc32fb22370f0d788b8fe698f1597534785dc37cdc` |
-| `m7-gallery-real-direct-open.png` | `d9c1bef02975bf1f24c87831d0910ab1c8908b3f79c84ca3a9145c6b0871a0a7` |
+| `m7-gallery-direct-open.png` | `9ea57fc5e8d773d89329c78aafe2b8cceeabf17bb594ab04571d234e23aacd2d` |
+| `m7-gallery-real-direct-open.png` | `ea6d769f40b2493a8a49909fc50dddf4c30ed371fc35d9d607714d4ce93d56ba` |
 
 ## Known Limits
 
@@ -369,6 +427,10 @@ pending source, tests, docs, and reports.
   it is not generic parent traversal.
 - Gallery examples open as source-revision-bound Managed Workspaces. Edits
   apply to that projection; the source corpus remains unchanged.
+- Visual editing covers stable Runtime objects and supported transform,
+  visibility, name, and material-color properties. Shader internals, GPU
+  buffers, and procedural generator source remain file/parameter editing
+  surfaces.
 - Raw WebGPU without Three.js remains a later stretch case.
 - Runtime input ownership, temporal render targets, and interactive multi-pass
   cases belong to M8.

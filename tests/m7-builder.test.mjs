@@ -328,6 +328,87 @@ export function createCar() {
     assert.ok(built.structuredContent.inputs.includes(
       'skills/threejs-procedural-geometry/race-car-model.js',
     ))
+    assert.ok(built.structuredContent.inputs.includes('threejs.editor.json'))
+
+    const carUuid = '11111111-1111-4111-8111-111111111111'
+    const reported = await client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: opened.structuredContent.revision,
+        objects: [{
+          uuid: carUuid,
+          path: 'scene/VF-26#0',
+          name: 'VF-26',
+          type: 'Group',
+          visible: true,
+          position: [0, 0, 0],
+          rotationDegrees: [0, 0, 0],
+          scale: [1, 1, 1],
+          commands: [
+            'set_position',
+            'set_rotation',
+            'set_scale',
+            'set_name',
+            'set_visible',
+          ],
+        }],
+      },
+    })
+    assert.equal(reported.structuredContent.objects, 1)
+
+    const inspected = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: opened.structuredContent.projectId },
+    })
+    assert.equal(inspected.structuredContent.objects[0].name, 'VF-26')
+    assert.equal(inspected.structuredContent.objects[0].uuid, carUuid)
+
+    const edited = await client.callTool({
+      name: 'apply_editor_commands',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        baseRevision: opened.structuredContent.revision,
+        operations: [{
+          type: 'set_position',
+          objectUuid: carUuid,
+          value: [0.25, 0, 0],
+        }],
+      },
+    })
+    assert.deepEqual(edited.structuredContent.commandTypes, ['SetPositionCommand'])
+    assert.notEqual(edited.structuredContent.revision, opened.structuredContent.revision)
+    assert.deepEqual(
+      JSON.parse(await readFile(join(
+        root,
+        '.managed-workspaces',
+        opened.structuredContent.projectId,
+        'threejs.editor.json',
+      ), 'utf8')),
+      {
+        schemaVersion: 1,
+        operations: [{
+          type: 'set_position',
+          objectUuid: carUuid,
+          value: [0.25, 0, 0],
+        }],
+      },
+    )
+    const inspectedAfterEdit = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: opened.structuredContent.projectId },
+    })
+    assert.equal(inspectedAfterEdit.structuredContent.revision, edited.structuredContent.revision)
+    assert.deepEqual(inspectedAfterEdit.structuredContent.objects[0].position, [0.25, 0, 0])
+    const rebuilt = await client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: edited.structuredContent.revision,
+      },
+    })
+    assert.equal(rebuilt.structuredContent.status, 'ready')
+    assert.ok(rebuilt.structuredContent.inputs.includes('threejs.editor.json'))
 
     const repositoryMeta = {
       'ai.deepseek.dsh/workspace': { cwd: repository },

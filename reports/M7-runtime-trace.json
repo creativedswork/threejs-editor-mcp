@@ -15,7 +15,7 @@
     "freshProfile": true
   },
   "workspace": {
-    "projectId": "workspace-efbb81f5192b6e00873287e2d7c1a73d8a5fb6a2450714069fc026",
+    "projectId": "workspace-6439ef6057963c3c60698b48f63c200f3660d33646283178a53894",
     "backend": "webgpu",
     "entry": "src/main.js"
   },
@@ -25,19 +25,24 @@
     "aiGeometry": "603adb22c713a3f8783bb87df8b02d42d95c125dfd5b19dd0bf564c727851710"
   },
   "build": {
-    "buildId": "060f78dedcab6de8e912a47d740c16ca57822c7d4d833a94597e8227cc8da7af",
-    "cacheBuildId": "060f78dedcab6de8e912a47d740c16ca57822c7d4d833a94597e8227cc8da7af"
+    "builderVersion": "m7-edit-runtime-v2",
+    "buildId": "69a83328ba17119488d14216ecd5309f747e630f3be4557522946cbbe99e266e",
+    "cacheBuildId": "69a83328ba17119488d14216ecd5309f747e630f3be4557522946cbbe99e266e"
   },
   "runtime": {
     "sandbox": "allow-scripts",
     "origin": "null",
+    "openedInEditMode": true,
+    "playRequiredForVisibleScene": false,
     "metrics": {
-      "frame": 2,
+      "frame": 14,
+      "mode": "run",
+      "editorObjectCount": 87,
       "rendererCount": 1,
       "secureContext": true,
       "webgpuApi": true,
       "rendererBackend": "WebGPUBackend",
-      "draws": 23,
+      "draws": 59,
       "triangles": 918211,
       "emittedParts": 62,
       "uniqueTriangles": 375964,

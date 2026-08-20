@@ -1,7 +1,7 @@
 # M7 Real LLM Validation
 
 Date: 2026-08-19
-Status: **PASS after second acceptance correction, awaiting renewed M7 approval**
+Status: **PASS after edit-mode Runtime correction, awaiting renewed M7 approval**
 
 ## 中文审阅摘要
 
@@ -34,7 +34,8 @@ list_projects({})
 ```
 
 该 Session 没有调用 shell、普通文件工具、inspect/build、npm、gallery server
-或 Web/HTML 工具，页面直接挂载 `mcp__threejs__open_editor` App。
+或 Web/HTML 工具。页面挂载 App 后自动构建 exact revision，在未点击 Play 的
+`edit` mode 直接显示车辆，并暴露真实 `VF-26` Scene graph。
 
 ## Environment
 
@@ -104,13 +105,13 @@ Workspace. Formula One Race Car imports `/skills/...` and
 The fresh non-Replay regression environment was:
 
 ```text
-Harness URL:   http://127.0.0.1:51844
+Harness URL:   http://127.0.0.1:51860
 Provider:      deepseek-official
 Model:         deepseek-v4-flash
 Reasoning:     high
 Replay loaded: no
 Workspace:     pinned corpus dev/example-gallery/examples
-Session:       session-78e6ea2a-5d84-4313-ba84-00de74b11530
+Session:       session-5de5d974-bd64-4959-8f3e-64a27b4fc10a
 ```
 
 The durable Session contains exactly two tool calls:
@@ -132,15 +133,29 @@ The opened opaque project was independently built from the same Managed
 Workspace:
 
 ```text
-projectId:      example-e997526fb0453fd60582b6a171aee02e8cd61371b8dac9437eb97e64
-revision:       c5c0426da08b32e3256f9ffc68a4fed5e46fd7eebcf5690c8df630595e808c7f
-buildId:        d9c8a13b0b72ceee8315084a14aae77a8565750d8d15b5a593be3818d49ad622
+projectId:      example-34e1a56340a7fb109943b55a7280f17f39a0019250f7296e160923bb
+revision:       da7ddd097581425e27b2a52892fba9c5c0a3666321302e5d43c4842a806c07f2
+buildId:        b634f0c23459f2fe92347072247f52091eaa591a80ae863771443309edb505a1
 backend:        webgpu
-inputs:         15
-bundle bytes:   3,168,474
-source map:     6,561,027
+inputs:         17
+bundle bytes:   3,213,537
+source map:     6,651,680
 diagnostics:    0
 ```
+
+The browser then passed the edit-mode acceptance gate without clicking Play:
+
+```text
+runtime mode:    edit
+renderer:        WebGPUBackend
+Scene graph:     VF-26 and generated children
+sampled pixels:  9,000
+lit pixels:      7,847
+colors:          1,133
+```
+
+This replaces the rejected black-screen evidence, which only proved that the
+MCP App iframe mounted.
 
 The corrected run wrote only to the configured Managed Workspace root. A fresh
 checkout of the pinned corpus remained clean after discovery, open, and build.
@@ -164,11 +179,11 @@ for both ready and failed builds.
 - [Gallery user-path trace](M7-gallery-real-llm-trace.json)
 - [Real model build ID report](assets/m7-real-llm-build-id.png)
 - [Direct MCP App open](assets/m7-gallery-direct-open.png)
-- [Real model nested Gallery open](assets/m7-gallery-real-direct-open.png)
+- [Real model editable Gallery scene](assets/m7-gallery-real-direct-open.png)
 - Nested Gallery screenshot SHA-256:
-  `d9c1bef02975bf1f24c87831d0910ab1c8908b3f79c84ca3a9145c6b0871a0a7`
+  `ea6d769f40b2493a8a49909fc50dddf4c30ed371fc35d9d607714d4ce93d56ba`
 - Durable Session:
-  `session-78e6ea2a-5d84-4313-ba84-00de74b11530`
+  `session-5de5d974-bd64-4959-8f3e-64a27b4fc10a`
 
 The Session source records:
 

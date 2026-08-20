@@ -22,6 +22,62 @@ page.on('console', message => {
 })
 page.on('pageerror', error => appProblems.push(`pageerror: ${error.message}`))
 
+async function pixelStats(runtimeFrame) {
+  return runtimeFrame.evaluate(async () => {
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const canvas = document.querySelector('canvas')
+    const sample = document.createElement('canvas')
+    sample.width = 240
+    sample.height = 150
+    const context = sample.getContext('2d', { willReadFrequently: true })
+    context.drawImage(canvas, 0, 0, sample.width, sample.height)
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data
+    const colors = new Set()
+    let lit = 0
+    let contrast = 0
+    for (let index = 0; index < pixels.length; index += 16) {
+      const red = pixels[index] ?? 0
+      const green = pixels[index + 1] ?? 0
+      const blue = pixels[index + 2] ?? 0
+      const maximum = Math.max(red, green, blue)
+      const minimum = Math.min(red, green, blue)
+      if (red + green + blue > 60) lit += 1
+      if (maximum - minimum > 12) contrast += 1
+      colors.add((red << 16) | (green << 8) | blue)
+    }
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      sampled: pixels.length / 16,
+      lit,
+      contrast,
+      colors: colors.size,
+    }
+  })
+}
+
+async function callHarnessTool(name, arguments_) {
+  const catalogResponse = await fetch(`${webUrl}/api/mcp-apps/catalog`)
+  assert.equal(catalogResponse.status, 200)
+  const catalog = await catalogResponse.json()
+  const editor = catalog.items.find(
+    item => item.publicToolName === 'mcp__threejs__open_editor',
+  )
+  assert.notEqual(editor, undefined)
+  const response = await fetch(`${webUrl}/api/mcp-apps/tool`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      viewId: editor.viewId,
+      name,
+      arguments: arguments_,
+    }),
+  })
+  const result = await response.json()
+  assert.equal(response.status, 200, JSON.stringify(result))
+  return result
+}
+
 try {
   await page.goto(webUrl, {
     waitUntil: 'domcontentloaded',
@@ -103,10 +159,10 @@ try {
   )
   assert.equal(opened.workspaceBackend, 'webgpu')
 
-  await appFrame.getByRole('button', { name: 'Play' }).click()
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
-    return metrics.playState === 'playing'
+    return metrics.playState === 'editing'
+      && metrics.m7.ready?.mode === 'edit'
       && metrics.m7.ready?.emittedParts === 62
       && metrics.m7.ready?.uniqueTriangles === 375964
   }, undefined, { timeout: 120_000 })
@@ -114,10 +170,79 @@ try {
   await runtime.waitFor({ state: 'visible', timeout: 120_000 })
   const runtimeFrame = await (await runtime.elementHandle()).contentFrame()
   assert.notEqual(runtimeFrame, null)
-  const metrics = await appFrame.evaluate(() => globalThis.__THREE_M7__.requestM7Metrics())
+  const editPixels = await pixelStats(runtimeFrame)
+  assert.ok(editPixels.lit > editPixels.sampled * 0.7)
+  assert.ok(editPixels.colors > 600)
+  assert.ok(editPixels.contrast > 100)
+  const car = appFrame.getByRole('button', { name: 'VF-26', exact: true })
+  await car.waitFor({ state: 'visible' })
+  await car.click()
+  const positionX = appFrame.getByRole('spinbutton', { name: 'Position X' })
+  assert.equal(Number(await positionX.inputValue()), 0)
+  const beforeRevision = opened.revision
+  await positionX.fill('0.25')
+  await positionX.press('Enter')
+  await appFrame.getByRole('button', { name: 'Save' }).click()
+  await appFrame.waitForFunction(previous => {
+    const metrics = globalThis.__THREE_M7__.metrics()
+    return metrics.sync === 'clean'
+      && metrics.playState === 'editing'
+      && metrics.revision !== previous
+  }, beforeRevision, { timeout: 120_000 })
+  const edited = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
+  await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
+  assert.equal(Number(await positionX.inputValue()), 0.25)
+  const carUuid = await appFrame.getByRole('button', {
+    name: 'VF-26',
+    exact: true,
+  }).getAttribute('data-object-uuid')
+  assert.match(carUuid, /^[a-f0-9-]{36}$/)
+  const inspected = await callHarnessTool('inspect_editor', {
+    projectId: opened.projectId,
+  })
+  assert.equal(
+    inspected.structuredContent.objects.find(object => object.name === 'VF-26').uuid,
+    carUuid,
+  )
+
+  const ai = await callHarnessTool('apply_editor_commands', {
+    projectId: opened.projectId,
+    baseRevision: edited.revision,
+    operations: [{
+      type: 'set_position',
+      objectUuid: carUuid,
+      value: [0.5, 0, 0],
+    }],
+  })
+  assert.equal(ai.isError, undefined)
+  await appFrame.waitForFunction(nextRevision => {
+    const metrics = globalThis.__THREE_M7__.metrics()
+    return metrics.sync === 'clean'
+      && metrics.playState === 'editing'
+      && metrics.revision === nextRevision
+  }, ai.structuredContent.revision, { timeout: 120_000 })
+  await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
+  assert.equal(Number(await positionX.inputValue()), 0.5)
+
+  await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
+  await appFrame.waitForFunction(() => {
+    const metrics = globalThis.__THREE_M7__.metrics()
+    return metrics.playState === 'playing'
+      && metrics.m7.metrics?.mode === 'run'
+  }, undefined, { timeout: 120_000 })
+  let metrics = await appFrame.evaluate(() => globalThis.__THREE_M7__.requestM7Metrics())
   assert.equal(metrics.rendererBackend, 'WebGPUBackend')
+  assert.equal(metrics.mode, 'run')
   assert.equal(metrics.emittedParts, 62)
   assert.equal(metrics.uniqueTriangles, 375964)
+  await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
+  await appFrame.waitForFunction(() => (
+    globalThis.__THREE_M7__.metrics().playState === 'editing'
+  ))
+  metrics = await appFrame.evaluate(() => globalThis.__THREE_M7__.requestM7Metrics())
+  assert.equal(metrics.mode, 'edit')
+  await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
+  assert.equal(Number(await positionX.inputValue()), 0.5)
   assert.equal(await runtimeFrame.evaluate(() => location.origin), 'null')
 
   const conversation = await page.locator('body').innerText()
@@ -137,6 +262,12 @@ try {
     projectId: opened.projectId,
     entry: opened.workspaceEntry,
     backend: opened.workspaceBackend,
+    editPixels,
+    editorObject: 'VF-26',
+    humanPositionX: 0.25,
+    humanRevision: edited.revision,
+    aiPositionX: 0.5,
+    aiRevision: ai.structuredContent.revision,
     rendererBackend: metrics.rendererBackend,
     emittedParts: metrics.emittedParts,
     uniqueTriangles: metrics.uniqueTriangles,

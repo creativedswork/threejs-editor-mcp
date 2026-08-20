@@ -1,6 +1,6 @@
 # Three.js Collaborative Game Studio V2 可执行规划
 
-状态：**M6 与 M6.1 已获批准；M7 二次用户路径修正完成、等待重新批准；M8-M11 继续执行阶段确认门禁**
+状态：**M6 与 M6.1 已获批准；M7 编辑态 Runtime 已完成验证、等待批准；M8-M11 继续执行阶段确认门禁**
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
 [`98453747`](https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills/tree/98453747cc0678f6a5d910f38d7483596a5f9a40)
@@ -530,9 +530,11 @@ Server 启动前预注册游戏路径。
 
 ### M7：Module Builder、source map 与复杂程序几何
 
-状态：**二次用户路径修正完成；等待用户重新批准**
+状态：**编辑态 Runtime 实现和验证完成；等待用户批准**
 
-目标：建立通用多文件构建和 renderer ownership。
+目标：建立通用多文件构建、renderer ownership，以及复杂 Workspace 的真实
+场景编辑态。M7 及后续案例不得以“Editor 外壳 + 仅运行时可见的 Player”作为
+完成状态。
 
 实施：
 
@@ -540,12 +542,26 @@ Server 启动前预注册游戏路径。
 - Three.js core/addons/WebGPU/TSL alias；
 - build cache、source map 和结构化 diagnostic；
 - runtime adapter 的 WebGL/WebGPU renderer 选择；
+- Workspace 打开后自动构建 exact revision，并在隔离 Runtime 中以暂停更新的
+  `edit` mode 呈现真实场景；
+- Runtime 输出稳定场景路径、对象属性和可编辑能力，Editor Scene graph、
+  Properties、画布选择和 TransformControls 操作同一批真实对象；
+- Human 和 AI 的对象修改统一转换为官方 Three.js Editor Command 语义，并写入
+  revision 管理的 Workspace editor state；不得修改只读 source corpus；
+- Play 从当前编辑状态进入 `run` mode，Stop 回到同一编辑场景和选择上下文；
 - Parameters/debug modes/metrics 最小 schema；
 - 接入 P1 Formula One Race Car。
 
 验收：
 
-- P1 在 Runtime 自建 WebGPU renderer 后呈现非空像素；
+- P1 打开后无需 Play 即在编辑态呈现非空像素；
+- Scene graph 至少包含真实 `VF-26` 车辆根节点及其可编辑子对象，不能只显示
+  projection 占位灯光；
+- Human 可在画布或 Scene graph 选择车辆对象，通过 Properties 或
+  TransformControls 修改并保存；刷新后 exact revision 可重现；
+- 下一条 Composer 消息中，AI 可读取 Human 保存后的 revision，并通过同一官方
+  Editor Command 语义继续修改同一对象；
+- P1 在 Runtime 自建 WebGPU renderer 后仍可进入 Play，Stop 后返回编辑态；
 - 文件错误映射到原始文件和行列；
 - 人修改 livery 参数，AI 修改几何参数，两个 revision 均可重现；
 - `metrics()` 返回 emitted parts 和 triangle evidence；
@@ -558,6 +574,27 @@ Server 启动前预注册游戏路径。
 - 固定 Gallery adapter 只读解析同一 corpus 的 `/dev` 与 `/skills` import
   closure，编辑落入 Managed Workspace，source corpus 保持不变；
 - 普通 Workspace 不得借该 adapter 读取父目录或 corpus 其他顶层路径。
+
+### M7+ 统一案例门禁
+
+M8-M11 的每个新增案例都必须复用 M7 的双态 Runtime 契约：
+
+```text
+open exact revision
+-> edit mode: render + select + inspect + transform + save
+-> run mode: simulation/input/temporal state
+-> stop
+-> edit mode: preserve revision, overrides, camera, and selection
+```
+
+- “能构建但编辑态黑屏”不通过；
+- “只有 Play 后可见”不通过；
+- “能运行但 Scene graph 与真实对象脱节”不通过；
+- Runtime 不可稳定暴露的 GPU buffer、shader 中间量可保持 inspect-only，但必须
+  暴露可持久化的场景根或参数绑定；完全没有可编辑 surface 的案例不得进入阶段
+  验收集；
+- 每个案例都要分别保留编辑态和运行态视觉证据，编辑态必须包含一次 Human 保存和
+  一次 AI 接续修改的 revision 证据。
 
 产物：`reports/M7-validation.md`、`reports/M7-runtime-trace.json`、
 `reports/M7-real-llm-validation.md`、`reports/M7-real-llm-trace.json`、

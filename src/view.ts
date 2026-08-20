@@ -12,8 +12,10 @@ import {
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import {
   applyOfficialEditorCommands,
+  editorProjectFromSnapshots,
   officialCommandProof,
   type EditorCommandOperation,
+  type EditorObjectSnapshot,
   type OfficialCommandProof,
 } from './official-editor.js'
 import {
@@ -100,6 +102,7 @@ interface RemoteSnapshot {
 interface HistoryEntry {
   project: Project
   pendingOperations: string[]
+  editorOperations: EditorCommandOperation[]
 }
 
 interface RuntimeInput {
@@ -143,6 +146,80 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined
+}
+
+function vector3(value: unknown): [number, number, number] | undefined {
+  return Array.isArray(value)
+    && value.length === 3
+    && value.every(item => typeof item === 'number' && Number.isFinite(item))
+    ? value as [number, number, number]
+    : undefined
+}
+
+function editorObjectSnapshot(value: unknown): EditorObjectSnapshot | undefined {
+  const object = record(value)
+  const position = vector3(object?.position)
+  const rotationDegrees = vector3(object?.rotationDegrees)
+  const scale = vector3(object?.scale)
+  if (object === undefined
+    || typeof object.uuid !== 'string'
+    || typeof object.path !== 'string'
+    || typeof object.name !== 'string'
+    || typeof object.type !== 'string'
+    || typeof object.visible !== 'boolean'
+    || position === undefined
+    || rotationDegrees === undefined
+    || scale === undefined
+    || !Array.isArray(object.commands)
+    || !object.commands.every(command => typeof command === 'string')) {
+    return undefined
+  }
+  return {
+    uuid: object.uuid,
+    ...typeof object.parentUuid === 'string' ? { parentUuid: object.parentUuid } : {},
+    path: object.path,
+    name: object.name,
+    type: object.type,
+    visible: object.visible,
+    position,
+    rotationDegrees,
+    scale,
+    ...typeof object.color === 'string' ? { color: object.color } : {},
+    commands: object.commands as EditorCommandOperation['type'][],
+  }
+}
+
+function editorCommandOperation(value: unknown): EditorCommandOperation | undefined {
+  const operation = record(value)
+  if (operation === undefined || typeof operation.objectUuid !== 'string') return undefined
+  if (operation.type === 'set_position'
+    || operation.type === 'set_rotation'
+    || operation.type === 'set_scale') {
+    const value = vector3(operation.value)
+    return value === undefined
+      ? undefined
+      : { type: operation.type, objectUuid: operation.objectUuid, value }
+  }
+  if (operation.type === 'set_name' && typeof operation.value === 'string') {
+    return { type: operation.type, objectUuid: operation.objectUuid, value: operation.value }
+  }
+  if (operation.type === 'set_visible' && typeof operation.value === 'boolean') {
+    return { type: operation.type, objectUuid: operation.objectUuid, value: operation.value }
+  }
+  if (operation.type === 'set_material_color' && typeof operation.value === 'string') {
+    return { type: operation.type, objectUuid: operation.objectUuid, value: operation.value }
+  }
+  if (operation.type === 'set_material_value'
+    && operation.property === 'roughness'
+    && typeof operation.value === 'number') {
+    return {
+      type: operation.type,
+      objectUuid: operation.objectUuid,
+      property: operation.property,
+      value: operation.value,
+    }
+  }
+  return undefined
 }
 
 function cloneProject(project: Project): Project {
@@ -296,6 +373,7 @@ let cameraView: CameraView = 'broadcast'
 let transformMode: TransformControlsMode = 'translate'
 let baseOperations: string[] = []
 let pendingOperations: string[] = []
+let pendingEditorOperations: EditorCommandOperation[] = []
 let history: HistoryEntry[] = []
 let historyIndex = -1
 let frame = 0
@@ -328,6 +406,7 @@ let m7Errors: string[] = []
 let m7Ready: Record<string, unknown> | undefined
 let m7Metrics: Record<string, unknown> | undefined
 let m7MessagesAfterStop = 0
+let m7EditorSceneAccepted = false
 let runtimeDebugMode = 'final'
 let parameterDocuments = new Map<string, Record<string, unknown>>()
 let parameterLoadToken = 0
@@ -783,6 +862,7 @@ function commitHistory(operation: string): void {
   history.push({
     project: cloneProject(nextProject),
     pendingOperations: [...pendingOperations],
+    editorOperations: [...pendingEditorOperations],
   })
   if (history.length > 50) history.shift()
   historyIndex = history.length - 1
@@ -797,6 +877,7 @@ function commitOfficialOperation(
   const baseline = history[historyIndex]
   if (baseline === undefined) return
   pendingOperations.push(label)
+  if (workspace !== undefined) pendingEditorOperations.push(operation)
   const applied = applyOfficialEditorCommands(
     cloneProject(baseline.project),
     [operation],
@@ -809,6 +890,7 @@ function commitOfficialOperation(
   history.push({
     project: cloneProject(nextProject),
     pendingOperations: [...pendingOperations],
+    editorOperations: [...pendingEditorOperations],
   })
   if (history.length > 50) history.shift()
   historyIndex = history.length - 1
@@ -857,16 +939,20 @@ function refreshInspector(): void {
   if (material !== undefined) materialColor.value = `#${material.color.getHexString()}`
 }
 
-function selectObject(object: THREE.Object3D | undefined): void {
+function selectObject(object: THREE.Object3D | undefined, notifyRuntime = true): void {
   selected = object
   transform?.detach()
   if (object !== undefined && object !== scene && !isHelper(object)) transform?.attach(object)
+  if (notifyRuntime && workspace !== undefined && m7ActiveRun !== undefined) {
+    postM7('select-object', { objectUuid: object?.uuid })
+  }
   renderHierarchy()
   refreshInspector()
   root.dataset.selected = object?.name ?? ''
 }
 
 function setupControls(): void {
+  if (workspace !== undefined) return
   orbit = new OrbitControls(camera, canvas)
   orbit.enableDamping = true
   orbit.dampingFactor = 0.08
@@ -938,6 +1024,115 @@ function replaceRuntime(nextProject: Project): void {
   resizeRenderer()
 }
 
+function updateRuntimeMirror(
+  snapshot: EditorObjectSnapshot,
+  refresh = true,
+): void {
+  const object = scene.getObjectByProperty('uuid', snapshot.uuid)
+  if (object === undefined) return
+  object.name = snapshot.name
+  object.visible = snapshot.visible
+  object.position.fromArray(snapshot.position)
+  object.rotation.set(...snapshot.rotationDegrees.map(THREE.MathUtils.degToRad) as [
+    number,
+    number,
+    number,
+  ])
+  object.scale.fromArray(snapshot.scale)
+  const material = editableMaterial(object)
+  if (material !== undefined && snapshot.color !== undefined) {
+    material.color.set(snapshot.color)
+  }
+  object.updateMatrix()
+  scene.updateMatrixWorld(true)
+  if (selected?.uuid === object.uuid) {
+    selected = object
+    refreshInspector()
+  }
+  if (refresh) renderHierarchy()
+}
+
+function acceptRuntimeEditorScene(objects: EditorObjectSnapshot[]): void {
+  if (project === undefined || projectId === undefined || revision === undefined) return
+  const projected = editorProjectFromSnapshots(project as never, objects) as Project
+  replaceRuntime(projected)
+  pendingOperations = []
+  pendingEditorOperations = []
+  const baseline = serializeProject()
+  history = [{
+    project: cloneProject(baseline),
+    pendingOperations: [],
+    editorOperations: [],
+  }]
+  historyIndex = 0
+  refreshHistoryButtons()
+  void app.callServerTool({
+    name: 'report_editor_scene',
+    arguments: {
+      projectId,
+      revision,
+      objects,
+    },
+  }).then(result => {
+    if (result.isError) throw new Error(resultError(result))
+  }).catch(error => {
+    status.textContent = `Editor scene report failed: ${runtimeMessage(error)}`
+  })
+}
+
+function previewRuntimeOperation(operation: EditorCommandOperation): void {
+  if (workspace === undefined || m7ActiveRun === undefined) return
+  postM7('apply-operation', { operation })
+}
+
+function syncRuntimeMirror(): void {
+  if (workspace === undefined || m7ActiveRun === undefined) return
+  const operations: EditorCommandOperation[] = []
+  scene.traverse(object => {
+    if (object === scene || isHelper(object)) return
+    operations.push(
+      {
+        type: 'set_name',
+        objectUuid: object.uuid,
+        value: object.name || object.type,
+      },
+      {
+        type: 'set_visible',
+        objectUuid: object.uuid,
+        value: object.visible,
+      },
+      {
+        type: 'set_position',
+        objectUuid: object.uuid,
+        value: object.position.toArray(),
+      },
+      {
+        type: 'set_rotation',
+        objectUuid: object.uuid,
+        value: [
+          THREE.MathUtils.radToDeg(object.rotation.x),
+          THREE.MathUtils.radToDeg(object.rotation.y),
+          THREE.MathUtils.radToDeg(object.rotation.z),
+        ],
+      },
+      {
+        type: 'set_scale',
+        objectUuid: object.uuid,
+        value: object.scale.toArray(),
+      },
+    )
+    const material = editableMaterial(object)
+    if (material !== undefined) {
+      operations.push({
+        type: 'set_material_color',
+        objectUuid: object.uuid,
+        value: `#${material.color.getHexString()}`,
+      })
+    }
+  })
+  postM7('apply-operations', { operations })
+}
+
 function acceptSnapshot(
   nextProject: Project,
   nextRevision: string,
@@ -963,9 +1158,14 @@ function acceptSnapshot(
   const editor = nextProject.editor ?? defaultEditor()
   baseOperations = [...editor.operations]
   pendingOperations = []
+  pendingEditorOperations = []
   replaceRuntime(nextProject)
   const baseline = serializeProject()
-  history = [{ project: cloneProject(baseline), pendingOperations: [] }]
+  history = [{
+    project: cloneProject(baseline),
+    pendingOperations: [],
+    editorOperations: [],
+  }]
   historyIndex = 0
   refreshHistoryButtons()
   setEditorDisabled(false)
@@ -977,6 +1177,21 @@ function acceptSnapshot(
   if (workspace !== undefined && navigationTab === 'files') {
     if (activeFile === undefined) setNavigationTab('files', true)
     else void selectWorkspaceFile(activeFile)
+  }
+  if (workspace !== undefined) {
+    root.dataset.playState = 'starting'
+    setEditorDisabled(true)
+    const token = ++m7StartToken
+    refreshPlayButtons()
+    status.textContent = 'Preparing editable Workspace'
+    void startM7Runtime(token, 'edit').catch(error => {
+      if (token !== m7StartToken) return
+      recordRuntimeError(error)
+      root.dataset.playState = 'error'
+      setEditorDisabled(false)
+      refreshPlayButtons()
+      status.textContent = `Editor Runtime error: ${runtimeMessage(error).split('\n')[0]}`
+    })
   }
 }
 
@@ -1401,8 +1616,10 @@ function loadM7Frame(): Promise<void> {
   })
 }
 
-async function stopM7Runtime(): Promise<Record<string, unknown> | undefined> {
-  m7StartToken += 1
+async function stopM7Runtime(
+  invalidate = true,
+): Promise<Record<string, unknown> | undefined> {
+  if (invalidate) m7StartToken += 1
   if (m7ActiveRun === undefined) {
     runtimeFrame.hidden = true
     return undefined
@@ -1417,11 +1634,15 @@ async function stopM7Runtime(): Promise<Record<string, unknown> | undefined> {
   return event.data
 }
 
-async function startM7Runtime(token: number): Promise<void> {
+async function startM7Runtime(
+  token: number,
+  mode: 'edit' | 'run' = 'edit',
+): Promise<void> {
   if (projectId === undefined || revision === undefined || workspace === undefined) {
     throw new Error('Workspace is not ready')
   }
   await stopIsolatedRuntime()
+  await stopM7Runtime(false)
   if (token !== m7StartToken) return
   status.textContent = `Building ${workspace.entry}`
   const buildResult = await app.callServerTool({
@@ -1456,6 +1677,7 @@ async function startM7Runtime(token: number): Promise<void> {
   m7Ready = undefined
   m7Metrics = undefined
   m7MessagesAfterStop = 0
+  m7EditorSceneAccepted = false
   m7ActiveRun = { runId: crypto.randomUUID(), nonce: crypto.randomUUID() }
   const run = m7ActiveRun
   await loadM7Frame()
@@ -1464,6 +1686,7 @@ async function startM7Runtime(token: number): Promise<void> {
     bundle,
     backend: build.backend,
     debugMode: runtimeDebugMode,
+    mode,
   })
   const event = await started
   if (event.type === 'runtime-error') {
@@ -1473,9 +1696,12 @@ async function startM7Runtime(token: number): Promise<void> {
   }
   m7Ready = event.data ?? {}
   m7Metrics = event.data ?? {}
-  root.dataset.playState = 'playing'
+  root.dataset.playState = mode === 'run' ? 'playing' : 'editing'
+  setEditorDisabled(mode === 'run')
   refreshPlayButtons()
-  status.textContent = `${String(build.backend).toUpperCase()} Runtime`
+  status.textContent = mode === 'run'
+    ? `${String(build.backend).toUpperCase()} Runtime`
+    : `${String(build.backend).toUpperCase()} Edit`
 }
 
 window.addEventListener('message', event => {
@@ -1498,6 +1724,47 @@ window.addEventListener('message', event => {
     m7Metrics = runtimeEvent.data ?? {}
   } else if (runtimeEvent.type === 'metrics' || runtimeEvent.type === 'frame') {
     m7Metrics = runtimeEvent.data ?? {}
+  } else if (runtimeEvent.type === 'editor-scene') {
+    const objects = Array.isArray(runtimeEvent.data?.objects)
+      ? runtimeEvent.data.objects.map(editorObjectSnapshot)
+      : []
+    if (objects.length > 0 && objects.every(object => object !== undefined)) {
+      if (!m7EditorSceneAccepted) {
+        m7EditorSceneAccepted = true
+        acceptRuntimeEditorScene(objects as EditorObjectSnapshot[])
+      } else {
+        for (const object of objects as EditorObjectSnapshot[]) {
+          updateRuntimeMirror(object, false)
+        }
+        renderHierarchy()
+        refreshInspector()
+      }
+    }
+  } else if (runtimeEvent.type === 'editor-object') {
+    const object = editorObjectSnapshot(runtimeEvent.data?.object)
+    if (object !== undefined) updateRuntimeMirror(object)
+  } else if (runtimeEvent.type === 'editor-selection') {
+    const uuid = runtimeEvent.data?.selectedUuid
+    selectObject(
+      typeof uuid === 'string'
+        ? scene.getObjectByProperty('uuid', uuid)
+        : undefined,
+      false,
+    )
+  } else if (runtimeEvent.type === 'editor-commit') {
+    const operation = editorCommandOperation(runtimeEvent.data?.operation)
+    if (operation !== undefined) {
+      const object = scene.getObjectByProperty('uuid', operation.objectUuid)
+      commitOfficialOperation(
+        operation,
+        `Transformed ${object?.name || object?.type || 'Runtime object'}`,
+      )
+    }
+  } else if (runtimeEvent.type === 'mode') {
+    const mode = runtimeEvent.data?.mode
+    if (mode === 'edit' || mode === 'run') {
+      root.dataset.runtimeMode = mode
+    }
   } else if (runtimeEvent.type === 'runtime-error') {
     const message = typeof runtimeEvent.data?.message === 'string'
       ? runtimeEvent.data.message
@@ -1537,20 +1804,21 @@ function startGame(): void {
   if (workspace !== undefined) {
     playingProject = serializeProject()
     playingRevision = revision
-    root.dataset.playState = 'starting'
+    root.dataset.playState = 'playing'
     setEditorDisabled(true)
     save.disabled = true
-    disposeControls()
-    selected = undefined
-    renderHierarchy()
-    const token = ++m7StartToken
     refreshPlayButtons()
-    status.textContent = 'Preparing Workspace Runtime'
-    void startM7Runtime(token).catch(async error => {
-      if (token !== m7StartToken) return
-      recordRuntimeError(error)
-      await stopGame('Play failed', false)
-    })
+    status.textContent = `${workspace.backend.toUpperCase()} Runtime`
+    if (m7ActiveRun !== undefined) {
+      postM7('set-mode', { mode: 'run' })
+    } else {
+      const token = ++m7StartToken
+      void startM7Runtime(token, 'run').catch(async error => {
+        if (token !== m7StartToken) return
+        recordRuntimeError(error)
+        await stopGame('Play failed', false)
+      })
+    }
     return
   }
   playingProject = serializeProject()
@@ -1587,24 +1855,23 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
   root.dataset.playState = 'stopping'
   if (workspace !== undefined) {
     try {
-      await stopM7Runtime()
+      if (m7ActiveRun !== undefined) {
+        const changed = waitForM7Event(['mode'], m7ActiveRun.runId)
+        postM7('set-mode', { mode: 'edit' })
+        await changed
+      }
     } catch (error) {
       recordRuntimeError(error)
-      m7ActiveRun = undefined
-      runtimeFrame.hidden = true
     }
-    const baseline = playingProject
     playingProject = undefined
     playingRevision = undefined
-    if (baseline !== undefined) replaceRuntime(baseline)
-    root.dataset.playState = runtimeErrors.length === 0 ? 'stopped' : 'error'
+    root.dataset.playState = runtimeErrors.length === 0 ? 'editing' : 'error'
     setEditorDisabled(false)
     refreshRuntimeOutput()
     refreshPlayButtons()
     status.textContent = runtimeErrors.length === 0
-      ? reason
+      ? `${workspace.backend.toUpperCase()} Edit`
       : `Runtime error: ${runtimeErrors[0]?.split('\n')[0] ?? 'unknown error'}`
-    await pullLatest()
     return
   }
   try {
@@ -1886,6 +2153,9 @@ for (const button of modeButtons) {
   button.addEventListener('click', () => {
     transformMode = button.dataset.mode as TransformControlsMode
     transform?.setMode(transformMode)
+    if (workspace !== undefined && m7ActiveRun !== undefined) {
+      postM7('set-transform-mode', { mode: transformMode })
+    }
     refreshModeButtons()
   })
 }
@@ -1893,6 +2163,11 @@ for (const button of modeButtons) {
 objectName.addEventListener('input', () => {
   if (selected === undefined) return
   selected.name = objectName.value
+  previewRuntimeOperation({
+    type: 'set_name',
+    objectUuid: selected.uuid,
+    value: selected.name,
+  })
   renderHierarchy()
   markDirty()
 })
@@ -1907,6 +2182,11 @@ objectName.addEventListener('change', () => {
 objectVisible.addEventListener('change', () => {
   if (selected === undefined) return
   selected.visible = objectVisible.checked
+  previewRuntimeOperation({
+    type: 'set_visible',
+    objectUuid: selected.uuid,
+    value: selected.visible,
+  })
   commitOfficialOperation({
     type: 'set_visible',
     objectUuid: selected.uuid,
@@ -1924,6 +2204,22 @@ for (const input of vectorInputs) {
     else selected[property][axis] = value
     selected.updateMatrix()
     scene.updateMatrixWorld(true)
+    const operationType = property === 'rotation'
+      ? 'set_rotation'
+      : property === 'scale'
+        ? 'set_scale'
+        : 'set_position'
+    previewRuntimeOperation({
+      type: operationType,
+      objectUuid: selected.uuid,
+      value: property === 'rotation'
+        ? [
+            THREE.MathUtils.radToDeg(selected.rotation.x),
+            THREE.MathUtils.radToDeg(selected.rotation.y),
+            THREE.MathUtils.radToDeg(selected.rotation.z),
+          ]
+        : selected[property].toArray() as [number, number, number],
+    })
     markDirty()
   })
   input.addEventListener('change', () => {
@@ -1951,6 +2247,13 @@ materialColor.addEventListener('input', () => {
   const material = editableMaterial(selected)
   if (material === undefined) return
   material.color.set(materialColor.value)
+  if (selected !== undefined) {
+    previewRuntimeOperation({
+      type: 'set_material_color',
+      objectUuid: selected.uuid,
+      value: materialColor.value,
+    })
+  }
   markDirty()
 })
 materialColor.addEventListener('change', () => {
@@ -1994,7 +2297,9 @@ undo.addEventListener('click', () => {
   const entry = history[historyIndex]
   if (entry === undefined) return
   pendingOperations = [...entry.pendingOperations]
+  pendingEditorOperations = [...entry.editorOperations]
   replaceRuntime(entry.project)
+  syncRuntimeMirror()
   refreshHistoryButtons()
   if (historyIndex === 0 && remoteSnapshot === undefined) {
     root.dataset.sync = 'clean'
@@ -2019,7 +2324,9 @@ redo.addEventListener('click', () => {
   const entry = history[historyIndex]
   if (entry === undefined) return
   pendingOperations = [...entry.pendingOperations]
+  pendingEditorOperations = [...entry.editorOperations]
   replaceRuntime(entry.project)
+  syncRuntimeMirror()
   refreshHistoryButtons()
   markDirty('Redo')
 })
@@ -2069,6 +2376,49 @@ save.addEventListener('click', () => {
     })
     return
   }
+  if (workspace !== undefined) {
+    if (pendingEditorOperations.length === 0) return
+    const savedProjectId = projectId
+    const savedRevision = revision
+    const operations = [...pendingEditorOperations]
+    save.disabled = true
+    root.dataset.sync = 'saving'
+    setEditorDisabled(true)
+    status.textContent = 'Saving Runtime scene edits'
+    void app.callServerTool({
+      name: 'apply_editor_commands',
+      arguments: {
+        projectId: savedProjectId,
+        baseRevision: savedRevision,
+        operations,
+      },
+    }).then(async result => {
+      if (result.isError) {
+        root.dataset.sync = 'dirty'
+        setEditorDisabled(false)
+        await pullLatest()
+        return
+      }
+      const pulled = await app.callServerTool({
+        name: 'pull_project',
+        arguments: { projectId: savedProjectId },
+      })
+      const snapshot = snapshotFromResult(pulled)
+      if (snapshot === undefined) throw new Error('saved Workspace snapshot was not returned')
+      acceptSnapshot(
+        snapshot.project,
+        snapshot.revision,
+        'Saved Runtime scene edits',
+        snapshot.workspace,
+      )
+    }).catch(error => {
+      root.dataset.sync = 'error'
+      save.disabled = false
+      setEditorDisabled(false)
+      status.textContent = error instanceof Error ? error.message : String(error)
+    })
+    return
+  }
   if (title.value.trim() === '') return
   const savedProjectId = projectId
   const nextProject = serializeProject()
@@ -2109,7 +2459,11 @@ save.addEventListener('click', () => {
     project = cloneProject(nextProject)
     baseOperations = [...(nextProject.editor?.operations ?? [])]
     pendingOperations = []
-    history = [{ project: cloneProject(nextProject), pendingOperations: [] }]
+    history = [{
+      project: cloneProject(nextProject),
+      pendingOperations: [],
+      editorOperations: [],
+    }]
     historyIndex = 0
     refreshHistoryButtons()
     setEditorDisabled(false)

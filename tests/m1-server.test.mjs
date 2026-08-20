@@ -93,6 +93,7 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       'create_workspace',
       'open_editor',
       'inspect_project',
+      'report_editor_scene',
       'inspect_editor',
       'apply_editor_commands',
       'read_project_files',
@@ -125,8 +126,15 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     })
     assert.deepEqual(byName.get('inspect_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('build_project')?._meta?.ui?.visibility, ['model', 'app'])
-    assert.deepEqual(byName.get('inspect_editor')?._meta?.ui?.visibility, ['model'])
-    assert.deepEqual(byName.get('apply_editor_commands')?._meta?.ui?.visibility, ['model'])
+    assert.deepEqual(byName.get('report_editor_scene')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(
+      byName.get('inspect_editor')?._meta?.ui?.visibility,
+      ['model', 'app'],
+    )
+    assert.deepEqual(
+      byName.get('apply_editor_commands')?._meta?.ui?.visibility,
+      ['model', 'app'],
+    )
     assert.deepEqual(byName.get('read_project_files')?._meta?.ui?.visibility, ['model', 'app'])
     assert.deepEqual(byName.get('search_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('apply_project_files')?._meta?.ui?.visibility, ['model', 'app'])

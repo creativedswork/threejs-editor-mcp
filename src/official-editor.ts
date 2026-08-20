@@ -59,6 +59,20 @@ export type EditorCommandOperation =
   | { type: 'set_material_color'; objectUuid: string; value: string }
   | { type: 'set_material_value'; objectUuid: string; property: 'roughness'; value: number }
 
+export interface EditorObjectSnapshot {
+  uuid: string
+  parentUuid?: string
+  path: string
+  name: string
+  type: string
+  visible: boolean
+  position: [number, number, number]
+  rotationDegrees: [number, number, number]
+  scale: [number, number, number]
+  color?: string
+  commands: EditorCommandOperation['type'][]
+}
+
 function createEditor(inputScene?: THREE.Scene): ProofEditor {
   const scene = inputScene ?? new THREE.Scene()
   if (inputScene === undefined) {
@@ -128,6 +142,50 @@ function proofMesh(): THREE.Mesh<THREE.BoxGeometry, THREE.MeshStandardMaterial> 
 function sceneJson(editor: ProofEditor): string {
   editor.scene.updateMatrixWorld(true)
   return JSON.stringify(editor.scene.toJSON())
+}
+
+export function editorProjectFromSnapshots(
+  project: Project,
+  snapshots: EditorObjectSnapshot[],
+): Project {
+  const scene = new THREE.Scene()
+  const objects = new Map<string, THREE.Object3D>()
+  for (const snapshot of snapshots) {
+    const object = snapshot.type === 'Mesh'
+      ? new THREE.Mesh(
+          new THREE.BufferGeometry(),
+          snapshot.color === undefined
+            ? new THREE.Material()
+            : new THREE.MeshStandardMaterial({ color: snapshot.color }),
+        )
+      : new THREE.Group()
+    object.uuid = snapshot.uuid
+    object.name = snapshot.name
+    object.visible = snapshot.visible
+    object.position.fromArray(snapshot.position)
+    object.rotation.set(...snapshot.rotationDegrees.map(THREE.MathUtils.degToRad) as [
+      number,
+      number,
+      number,
+    ])
+    object.scale.fromArray(snapshot.scale)
+    objects.set(snapshot.uuid, object)
+  }
+  for (const snapshot of snapshots) {
+    const object = objects.get(snapshot.uuid)!
+    const parent = snapshot.parentUuid === undefined
+      ? scene
+      : objects.get(snapshot.parentUuid)
+    if (parent === undefined) {
+      throw new Error(`unknown editor parent ${snapshot.parentUuid}`)
+    }
+    parent.add(object)
+  }
+  scene.updateMatrixWorld(true)
+  return {
+    ...structuredClone(project),
+    scene: scene.toJSON() as unknown as Record<string, unknown>,
+  }
 }
 
 function commandForOperation(

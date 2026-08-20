@@ -43,6 +43,45 @@ try {
   await composer.press('Enter')
   const outer = page.locator('iframe[title="MCP App: mcp__threejs__open_editor"]').last()
   await outer.waitFor({ state: 'visible', timeout: 120_000 })
+  const outerFrame = await (await outer.elementHandle()).contentFrame()
+  assert.notEqual(outerFrame, null)
+  const inner = outerFrame.locator('iframe')
+  await inner.waitFor({ state: 'visible', timeout: 30_000 })
+  const appFrame = await (await inner.elementHandle()).contentFrame()
+  assert.notEqual(appFrame, null)
+  await appFrame.waitForFunction(() => {
+    const metrics = globalThis.__THREE_M7__?.metrics()
+    return metrics?.playState === 'editing'
+      && metrics.m7.ready?.mode === 'edit'
+      && metrics.m7.ready?.rendererBackend === 'WebGPUBackend'
+      && metrics.m7.ready?.emittedParts === 62
+  }, undefined, { timeout: 120_000 })
+  await appFrame.getByRole('button', { name: 'VF-26', exact: true }).waitFor()
+  const runtime = appFrame.locator('iframe[data-runtime-sandbox]')
+  const runtimeFrame = await (await runtime.elementHandle()).contentFrame()
+  assert.notEqual(runtimeFrame, null)
+  const pixels = await runtimeFrame.evaluate(async () => {
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const canvas = document.querySelector('canvas')
+    const sample = document.createElement('canvas')
+    sample.width = 240
+    sample.height = 150
+    const context = sample.getContext('2d', { willReadFrequently: true })
+    context.drawImage(canvas, 0, 0, sample.width, sample.height)
+    const data = context.getImageData(0, 0, sample.width, sample.height).data
+    const colors = new Set()
+    let lit = 0
+    for (let index = 0; index < data.length; index += 16) {
+      const red = data[index] ?? 0
+      const green = data[index + 1] ?? 0
+      const blue = data[index + 2] ?? 0
+      if (red + green + blue > 60) lit += 1
+      colors.add((red << 16) | (green << 8) | blue)
+    }
+    return { sampled: data.length / 16, lit, colors: colors.size }
+  })
+  assert.ok(pixels.lit > pixels.sampled * 0.7)
+  assert.ok(pixels.colors > 600)
   const body = await page.locator('body').innerText()
   assert.doesNotMatch(body, /npm install|gallery server|打开 HTML/i)
 
@@ -59,6 +98,9 @@ try {
       'mcp__threejs__list_projects',
       'mcp__threejs__open_editor',
     ],
+    editMode: true,
+    editorObject: 'VF-26',
+    pixels,
   }, null, 2)}\n`)
 } finally {
   await browser.close()

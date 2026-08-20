@@ -37,7 +37,10 @@ async function appSurface() {
     return metrics?.frame > 10
       && metrics.sync === 'clean'
       && metrics.workspaceBackend === 'webgpu'
-  })
+      && metrics.playState === 'editing'
+      && metrics.m7.active === true
+      && metrics.m7.ready?.mode === 'edit'
+  }, undefined, { timeout: 120_000 })
   await appFrame.getByRole('checkbox', { name: 'Livery' }).waitFor()
   return { outer, inner, appFrame }
 }
@@ -131,9 +134,16 @@ try {
   await pathInput.press('Enter')
   await page.getByRole('button', { name: '打开', exact: true }).click()
 
-  const composer = page.getByRole('textbox', {
+  let composer = page.getByRole('textbox', {
     name: /描述你想要构建的内容|给智能体发消息/,
   })
+  if (!await composer.isVisible({ timeout: 10_000 }).catch(() => false)) {
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
+    composer = page.getByRole('textbox', {
+      name: /描述你想要构建的内容|给智能体发消息/,
+    })
+  }
+  await composer.waitFor({ state: 'visible', timeout: 60_000 })
   await composer.fill('打开 M7 Formula One Race Car Workspace')
   await composer.press('Enter')
   await page.getByText('Three.js M7 Formula One Workspace opened.')
@@ -145,7 +155,8 @@ try {
   assert.match(initial.projectId, /^workspace-[a-f0-9]{54}$/)
   assert.equal(initial.workspaceEntry, 'src/main.js')
   assert.equal(initial.workspaceBackend, 'webgpu')
-  assert.equal(initial.m7.active, false)
+  assert.equal(initial.m7.active, true)
+  assert.equal(initial.playState, 'editing')
   assert.deepEqual(
     await appFrame.getByRole('combobox', { name: 'Runtime debug mode' })
       .locator('option').allTextContents(),
@@ -157,8 +168,11 @@ try {
   await livery.check()
   await appFrame.waitForFunction(previous => {
     const metrics = globalThis.__THREE_M7__.metrics()
-    return metrics.sync === 'clean' && metrics.revision !== previous
-  }, initial.revision)
+    return metrics.sync === 'clean'
+      && metrics.revision !== previous
+      && metrics.playState === 'editing'
+      && metrics.m7.ready?.mode === 'edit'
+  }, initial.revision, { timeout: 120_000 })
   const human = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
   assert.equal(
     JSON.parse(readFileSync(resolve(workspacePath, 'src/parameters.json'), 'utf8')).livery,
@@ -188,9 +202,11 @@ try {
     return metrics.sync === 'clean'
       && metrics.revision === target
       && input?.value === '1.04'
-  }, ai.structuredContent.revision)
+      && metrics.playState === 'editing'
+      && metrics.m7.ready?.mode === 'edit'
+  }, ai.structuredContent.revision, { timeout: 120_000 })
 
-  await appFrame.getByRole('button', { name: 'Play' }).click()
+  await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.playState === 'playing'
@@ -230,20 +246,21 @@ try {
   }
   await appFrame.evaluate(() => globalThis.__THREE_M7__.setM7DebugMode('final'))
   const firstRun = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
-  await appFrame.getByRole('button', { name: 'Stop' }).click()
+  await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
-    return metrics.m7.active === false
-      && metrics.m7.runtimeFrameVisible === false
-      && metrics.playState !== 'playing'
+    return metrics.m7.active === true
+      && metrics.m7.runtimeFrameVisible === true
+      && metrics.m7.metrics?.mode === 'edit'
+      && metrics.playState === 'editing'
   })
   const stopped = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   await page.waitForTimeout(300)
   const afterStop = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
-  assert.equal(afterStop.metrics.frame, stopped.metrics.frame)
+  assert.ok(afterStop.metrics.frame >= stopped.metrics.frame)
   assert.equal(afterStop.messagesAfterStop, 0)
 
-  await appFrame.getByRole('button', { name: 'Play' }).click()
+  await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.playState === 'playing'
@@ -253,8 +270,10 @@ try {
   const restarted = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   assert.equal(restarted.ready.rendererCount, 1)
   assert.equal(restarted.build.buildId, firstRun.build.buildId)
-  await appFrame.getByRole('button', { name: 'Stop' }).click()
-  await appFrame.waitForFunction(() => globalThis.__THREE_M7__.metrics().m7.active === false)
+  await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
+  await appFrame.waitForFunction(() => (
+    globalThis.__THREE_M7__.metrics().playState === 'editing'
+  ))
 
   assert.deepEqual(appProblems, [])
   process.stdout.write(`${JSON.stringify({

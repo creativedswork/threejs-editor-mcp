@@ -3,10 +3,10 @@
   "date": "2026-08-19",
   "status": "pass",
   "harness": {
-    "url": "http://127.0.0.1:51844",
+    "url": "http://127.0.0.1:51860",
     "freshProfile": true,
     "replayLoaded": false,
-    "sessionId": "session-78e6ea2a-5d84-4313-ba84-00de74b11530",
+    "sessionId": "session-5de5d974-bd64-4959-8f3e-64a27b4fc10a",
     "turns": 2,
     "steps": 4
   },
@@ -47,23 +47,31 @@
     "restricted": 4
   },
   "opened": {
-    "projectId": "example-e997526fb0453fd60582b6a171aee02e8cd61371b8dac9437eb97e64",
-    "revision": "c5c0426da08b32e3256f9ffc68a4fed5e46fd7eebcf5690c8df630595e808c7f",
+    "projectId": "example-34e1a56340a7fb109943b55a7280f17f39a0019250f7296e160923bb",
+    "revision": "da7ddd097581425e27b2a52892fba9c5c0a3666321302e5d43c4842a806c07f2",
     "kind": "managed-workspace",
     "appTool": "mcp__threejs__open_editor"
   },
   "buildAudit": {
-    "buildId": "d9c8a13b0b72ceee8315084a14aae77a8565750d8d15b5a593be3818d49ad622",
+    "buildId": "b634f0c23459f2fe92347072247f52091eaa591a80ae863771443309edb505a1",
     "status": "ready",
     "backend": "webgpu",
     "diagnostics": [],
-    "inputs": 15,
-    "bundleBytes": 3168474,
-    "sourceMapBytes": 6561027
+    "inputs": 17,
+    "bundleBytes": 3213537,
+    "sourceMapBytes": 6651680
+  },
+  "editMode": {
+    "playRequired": false,
+    "rendererBackend": "WebGPUBackend",
+    "editorObject": "VF-26",
+    "sampledPixels": 9000,
+    "litPixels": 7847,
+    "colors": 1133
   },
   "visualEvidence": {
     "path": "reports/assets/m7-gallery-real-direct-open.png",
-    "sha256": "d9c1bef02975bf1f24c87831d0910ab1c8908b3f79c84ca3a9145c6b0871a0a7",
+    "sha256": "ea6d769f40b2493a8a49909fc50dddf4c30ed371fc35d9d607714d4ce93d56ba",
     "transport": "fresh non-Replay DeepSeek over the real Harness, Host, MCP Server, and MCP App"
   },
   "environmentNotes": [

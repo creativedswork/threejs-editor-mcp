@@ -313,6 +313,16 @@ open_editor({
 打开；它不会修改示例仓库、执行 `npm install`、启动 gallery server 或打开 HTML
 页面。
 
+打开完成后会自动构建 exact revision，并直接进入编辑态，不需要点击 Play：
+
+- 画布应显示真实 Formula One Race Car，而不是黑色空 Scene；
+- Scene graph 应包含 `VF-26`、`hull` 等真实 Runtime 对象；
+- 可以从 Scene graph 或画布选择对象，通过 Properties 或 TransformControls
+  修改位置、旋转、缩放、可见性和支持的材质属性；
+- Save 将官方 Editor Command 覆盖写入 Managed Workspace 的
+  `threejs.editor.json` 并产生新 revision，不修改只读 corpus；
+- Play 只负责从当前编辑状态进入运行态；Stop 返回同一编辑场景并保留修改。
+
 该只读父级映射只适用于已识别的 `dev/example-gallery/examples` 固定布局，并且
 只允许 `dev/` 和 `skills/`。普通 Workspace 不会自动向父目录扩大范围，也不会
 退回外部 dev server。

@@ -37,6 +37,7 @@ import {
   type Project,
   type ProjectTemplate,
 } from './projects.js'
+import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 const MAX_FILES = 512
@@ -537,6 +538,11 @@ export class WorkspaceStore {
         }),
         { flag: 'wx', mode: 0o600 },
       )
+      await writeFile(
+        join(temporary, WORKSPACE_EDITOR_STATE_PATH),
+        canonicalBytes({ schemaVersion: 1, operations: [] }),
+        { flag: 'wx', mode: 0o600 },
+      )
       await rename(temporary, target)
       this.workspaces.set(projectId, {
         path: target,
@@ -580,6 +586,11 @@ export class WorkspaceStore {
         flag: 'wx',
         mode: 0o600,
       })
+      await writeFile(
+        join(path, WORKSPACE_EDITOR_STATE_PATH),
+        canonicalBytes({ schemaVersion: 1, operations: [] }),
+        { flag: 'wx', mode: 0o600 },
+      )
       this.workspaces.set(projectId, { path, kind: 'managed-workspace' })
       const snapshot = await this.load(projectId)
       return {
@@ -766,6 +777,39 @@ export class WorkspaceStore {
       this.metadataPath(registration.path, 'builds', buildId, artifact),
       'utf8',
     )
+  }
+
+  async reportEditorScene(
+    projectId: string,
+    revision: string,
+    document: unknown,
+  ): Promise<void> {
+    validateProjectId(projectId)
+    if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid editor scene revision')
+    await this.withLock(projectId, async () => {
+      const snapshot = await this.loadUnlocked(projectId)
+      if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
+      await this.writeAtomic(
+        this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
+        canonicalBytes(document),
+      )
+    })
+  }
+
+  async readEditorScene(projectId: string, revision: string): Promise<unknown | undefined> {
+    validateProjectId(projectId)
+    if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid editor scene revision')
+    const snapshot = await this.load(projectId)
+    if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
+    try {
+      return JSON.parse(await readFile(
+        this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
+        'utf8',
+      ))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
   }
 
   async apply(
@@ -1239,6 +1283,7 @@ export class WorkspaceStore {
       mkdir(this.metadataPath(path, 'transactions'), { recursive: true }),
       mkdir(this.metadataPath(path, 'builds'), { recursive: true }),
       mkdir(this.metadataPath(path, 'diagnostics'), { recursive: true }),
+      mkdir(this.metadataPath(path, 'editor-scenes'), { recursive: true }),
     ])
   }
 

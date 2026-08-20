@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-19",
+  "status": "pass-awaiting-approval",
+  "transport": "deterministic replay over fresh Harness",
+  "workspace": "dev/example-gallery/examples",
+  "projectPath": "threejs-procedural-geometry/formula-one-race-car",
+  "projectId": "example-cd2159d38e7137e2819eabda6af3d475071f7e3a5eb2eb979c7abffa",
+  "backend": "webgpu",
+  "editMode": {
+    "playRequired": false,
+    "rendererBackend": "WebGPUBackend",
+    "editorObject": "VF-26",
+    "pixels": {
+      "width": 730,
+      "height": 564,
+      "sampled": 9000,
+      "lit": 7847,
+      "contrast": 6944,
+      "colors": 1133
+    }
+  },
+  "collaboration": {
+    "human": {
+      "operation": "set_position",
+      "positionX": 0.25,
+      "revision": "d66d0185aea54affff2c1ae7cb140765c2823f942511c901e6f3288841ed6a67"
+    },
+    "ai": {
+      "operation": "set_position",
+      "sameObjectUuid": true,
+      "positionX": 0.5,
+      "revision": "f21fe9be20b2507e7cc4b81af696810c789a49ef9c1248032296e3f133dc73b4"
+    }
+  },
+  "lifecycle": {
+    "playMode": "run",
+    "stopMode": "edit",
+    "positionAfterStop": 0.5,
+    "emittedParts": 62,
+    "uniqueTriangles": 375964
+  },
+  "appProblems": []
+}

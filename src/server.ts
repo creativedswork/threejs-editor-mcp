@@ -33,15 +33,21 @@ import {
 } from './projects.js'
 import {
   applyOfficialEditorCommands,
+  editorProjectFromSnapshots,
   inspectOfficialEditor,
   officialCommandProof,
   type EditorCommandOperation,
+  type EditorObjectSnapshot,
 } from './official-editor.js'
 import {
   M5_COMMAND_PROOF_RESOURCE_URI,
   M5_RUNTIME_MANIFEST,
   M5_RUNTIME_RESOURCE_URI,
 } from './m5-runtime.js'
+import {
+  WORKSPACE_EDITOR_STATE_PATH,
+  type WorkspaceEditorState,
+} from './m7-runtime.js'
 import {
   WorkspaceStore,
   workspaceChangeSchema,
@@ -57,6 +63,7 @@ const RESOURCE_URI = 'ui://threejs-editor/app'
 const BUILD_RESOURCE_TEMPLATE =
   'threejs-build://runtime/{projectId}/{buildId}/{artifact}'
 const DSH_WORKSPACE_META_KEY = 'ai.deepseek.dsh/workspace'
+const MAX_RUNTIME_EDITOR_OBJECTS = 2_048
 const CSP = {
   connectDomains: [] as string[],
   resourceDomains: [] as string[],
@@ -149,6 +156,8 @@ const sceneObjectSchema = z.object({
 })
 const editorObjectSchema = z.object({
   uuid: z.string().uuid(),
+  parentUuid: z.string().uuid().optional(),
+  path: z.string().min(1).max(1_024).optional(),
   name: z.string(),
   type: z.string(),
   visible: z.boolean(),
@@ -231,6 +240,20 @@ const editorCommandSchema = z.discriminatedUnion('type', [
     value: z.number().min(0).max(1),
   }),
 ])
+const runtimeEditorObjectSchema = editorObjectSchema.extend({
+  path: z.string().min(1).max(1_024),
+  position: vector3Schema,
+  rotationDegrees: vector3Schema,
+  scale: vector3Schema,
+})
+const runtimeEditorSceneSchema = z.object({
+  schemaVersion: z.literal(1),
+  objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
+})
+const workspaceEditorStateSchema = z.object({
+  schemaVersion: z.literal(1),
+  operations: z.array(editorCommandSchema).max(4_096),
+})
 const workspaceReadSchema = z.object({
   path: workspacePathSchema,
   sha256: revisionSchema,
@@ -374,6 +397,24 @@ function applyEditorCommands(
   }, operations)
   applied.project.scene = restoreTextureImages(applied.project.scene, project.scene)
   return applied
+}
+
+function editorOperationKey(operation: EditorCommandOperation): string {
+  return `${operation.objectUuid}\0${operation.type}${
+    operation.type === 'set_material_value' ? `\0${operation.property}` : ''
+  }`
+}
+
+function compactEditorOperations(
+  operations: EditorCommandOperation[],
+): EditorCommandOperation[] {
+  const compacted = new Map<string, EditorCommandOperation>()
+  for (const operation of operations) {
+    const key = editorOperationKey(operation)
+    compacted.delete(key)
+    compacted.set(key, operation)
+  }
+  return [...compacted.values()]
 }
 
 function inspectEditor(project: z.infer<typeof projectSchema>): ReturnType<typeof inspectOfficialEditor> {
@@ -1220,6 +1261,33 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     )
   })
 
+  registerAppTool(server, 'report_editor_scene', {
+    title: 'Report Three.js Runtime editor scene',
+    description: 'Records the editable Runtime object catalog for one exact Workspace revision.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
+    },
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      objects: z.number().int().nonnegative(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, revision, objects }) => {
+    const document = runtimeEditorSceneSchema.parse({
+      schemaVersion: 1,
+      objects,
+    })
+    await workspaces.reportEditorScene(projectId, revision, document)
+    return textResult(`Recorded ${objects.length} Runtime editor objects.`, {
+      projectId,
+      revision,
+      objects: objects.length,
+    })
+  })
+
   registerAppTool(server, 'inspect_editor', {
     title: 'Inspect Three.js editor objects',
     description: 'Lists object UUIDs and the official Three.js Editor commands available for each object.',
@@ -1230,15 +1298,21 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       revision: revisionSchema,
       objects: z.array(editorObjectSchema),
     }),
-    _meta: { ui: { visibility: ['model'] } },
+    _meta: { ui: { visibility: ['model', 'app'] } },
   }, async ({ projectId }) => {
     const workspace = await loadWorkspace(projectId)
     const snapshot = workspace ?? await store.load(projectId)
+    const reported = workspace === undefined
+      ? undefined
+      : await workspaces.readEditorScene(projectId, snapshot.revision)
+    const objects = reported === undefined
+      ? inspectEditor(snapshot.project)
+      : runtimeEditorSceneSchema.parse(reported).objects
     const detail = {
       projectId,
       title: snapshot.title,
       revision: snapshot.revision,
-      objects: inspectEditor(snapshot.project),
+      objects,
     }
     return textResult(`Three.js editor objects:\n${JSON.stringify(detail)}`, detail)
   })
@@ -1261,7 +1335,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       conflict: z.literal(true).optional(),
       currentRevision: revisionSchema.optional(),
     }),
-    _meta: { ui: { visibility: ['model'] } },
+    _meta: { ui: { visibility: ['model', 'app'] } },
   }, async ({ projectId, baseRevision, operations }) => {
     try {
       const workspace = await loadWorkspace(projectId)
@@ -1269,14 +1343,87 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       if (snapshot.revision !== baseRevision) {
         throw new RevisionConflictError(snapshot.revision)
       }
-      const applied = applyEditorCommands(snapshot.project, operations)
-      const summary = workspace === undefined
-        ? await store.push(projectId, baseRevision, applied.project)
-        : await workspaces.apply(
-          projectId,
-          baseRevision,
-          workspaceProjectChanges(applied.project),
+      let applied: ReturnType<typeof applyEditorCommands>
+      let summary: ProjectSummary | WorkspaceSummary
+      if (workspace === undefined) {
+        applied = applyEditorCommands(snapshot.project, operations)
+        summary = await store.push(projectId, baseRevision, applied.project)
+      } else {
+        const reportedDocument = await workspaces.readEditorScene(projectId, baseRevision)
+        if (reportedDocument === undefined) {
+          applied = applyEditorCommands(snapshot.project, operations)
+          summary = await workspaces.apply(
+            projectId,
+            baseRevision,
+            workspaceProjectChanges(applied.project),
+          )
+          return textResult(
+            `Applied official Three.js Editor commands to ${projectId}: `
+            + applied.commandTypes.join(', '),
+            {
+              projectId,
+              title: summary.title,
+              revision: summary.revision,
+              kind: workspace.kind,
+              commandTypes: applied.commandTypes,
+              history: applied.history,
+            },
+          )
+        }
+        const reported = runtimeEditorSceneSchema.parse(reportedDocument)
+        applied = applyEditorCommands(
+          editorProjectFromSnapshots(
+            snapshot.project,
+            reported.objects as EditorObjectSnapshot[],
+          ),
+          operations,
         )
+        let editorState: WorkspaceEditorState = {
+          schemaVersion: 1,
+          operations: [],
+        }
+        if (workspace.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
+          const [file] = await workspaces.readFiles(projectId, [{
+            path: WORKSPACE_EDITOR_STATE_PATH,
+          }])
+          editorState = workspaceEditorStateSchema.parse(JSON.parse(file!.text!))
+        }
+        const nextState = workspaceEditorStateSchema.parse({
+          schemaVersion: 1,
+          operations: compactEditorOperations([
+            ...editorState.operations,
+            ...operations,
+          ]),
+        })
+        summary = await workspaces.apply(projectId, baseRevision, [{
+          type: 'write',
+          path: WORKSPACE_EDITOR_STATE_PATH,
+          text: `${JSON.stringify(nextState, null, 2)}\n`,
+        }])
+        const inspected = new Map(
+          inspectOfficialEditor(applied.project).map(object => [object.uuid, object]),
+        )
+        const carried = reported.objects.map(object => {
+          const updated = inspected.get(object.uuid)
+          if (updated === undefined) {
+            throw new Error(`official Editor omitted Runtime object ${object.uuid}`)
+          }
+          return {
+            ...object,
+            name: updated.name,
+            visible: updated.visible,
+            position: updated.position,
+            rotationDegrees: updated.rotationDegrees,
+            scale: updated.scale,
+            commands: updated.commands,
+            ...updated.color === undefined ? {} : { color: updated.color },
+          }
+        })
+        await workspaces.reportEditorScene(projectId, summary.revision, {
+          schemaVersion: 1,
+          objects: carried,
+        })
+      }
       return textResult(
         `Applied official Three.js Editor commands to ${projectId}: `
         + applied.commandTypes.join(', '),
