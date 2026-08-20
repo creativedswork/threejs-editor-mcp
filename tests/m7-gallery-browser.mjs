@@ -177,6 +177,25 @@ try {
   const runtimeCanvas = runtimeFrame.locator('canvas')
   const canvasBox = await runtimeCanvas.boundingBox()
   assert.notEqual(canvasBox, null)
+  const runtimeIdentity = await runtimeFrame.evaluate(() => {
+    globalThis.__M7_RUNTIME_IDENTITY__ = crypto.randomUUID()
+    let topPointerDowns = 0
+    document.querySelector('canvas').addEventListener('pointerdown', event => {
+      if (event.clientY <= 32) topPointerDowns += 1
+    })
+    globalThis.__M7_TOP_POINTER_DOWNS__ = () => topPointerDowns
+    return globalThis.__M7_RUNTIME_IDENTITY__
+  })
+  await runtimeCanvas.click({
+    position: {
+      x: canvasBox.width * 0.5,
+      y: 20,
+    },
+  })
+  assert.equal(
+    await runtimeFrame.evaluate(() => globalThis.__M7_TOP_POINTER_DOWNS__()),
+    1,
+  )
   let cycledSelection = false
   for (const [xRatio, yRatio] of [[0.5, 0.55], [0.62, 0.5], [0.4, 0.6]]) {
     const position = {
@@ -258,7 +277,7 @@ try {
     operations: [{
       type: 'set_position',
       objectUuid: carUuid,
-      value: [0.5, 0, 0],
+      value: [0, 0, 0],
     }],
   })
   assert.equal(ai.isError, undefined)
@@ -268,8 +287,26 @@ try {
       && metrics.playState === 'editing'
       && metrics.revision === nextRevision
   }, ai.structuredContent.revision, { timeout: 120_000 })
+  const runtimeAfterAi = await (await runtime.elementHandle()).contentFrame()
+  assert.notEqual(runtimeAfterAi, null)
+  assert.equal(
+    await runtimeAfterAi.evaluate(() => globalThis.__M7_RUNTIME_IDENTITY__),
+    runtimeIdentity,
+  )
+  const aiPixels = await pixelStats(runtimeAfterAi)
+  assert.ok(aiPixels.lit > aiPixels.sampled * 0.7)
+  assert.ok(aiPixels.colors > 600)
   await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
-  assert.equal(Number(await positionX.inputValue()), 0.5)
+  assert.equal(Number(await positionX.inputValue()), 0)
+
+  await page.getByTitle('Open mcp__threejs__open_editor fullscreen').click()
+  await page.locator('[data-mcp-app-view][data-display-mode="fullscreen"]').waitFor()
+  await appFrame.waitForFunction(() => (
+    globalThis.__THREE_M7__.metrics().displayMode === 'fullscreen'
+  ))
+  const fullscreenPixels = await pixelStats(runtimeAfterAi)
+  assert.ok(fullscreenPixels.lit > fullscreenPixels.sampled * 0.7)
+  assert.ok(fullscreenPixels.colors > 600)
 
   await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
   await appFrame.waitForFunction(() => {
@@ -289,7 +326,7 @@ try {
   metrics = await appFrame.evaluate(() => globalThis.__THREE_M7__.requestM7Metrics())
   assert.equal(metrics.mode, 'edit')
   await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
-  assert.equal(Number(await positionX.inputValue()), 0.5)
+  assert.equal(Number(await positionX.inputValue()), 0)
   assert.equal(await runtimeFrame.evaluate(() => location.origin), 'null')
 
   const conversation = await page.locator('body').innerText()
@@ -315,8 +352,12 @@ try {
     editorObject: 'VF-26',
     humanPositionX: 0.25,
     humanRevision: edited.revision,
-    aiPositionX: 0.5,
+    aiPositionX: 0,
     aiRevision: ai.structuredContent.revision,
+    aiPixels,
+    fullscreenPixels,
+    runtimePreservedAcrossAiEdit: true,
+    topCanvasPointerReachable: true,
     rendererBackend: metrics.rendererBackend,
     emittedParts: metrics.emittedParts,
     uniqueTriangles: metrics.uniqueTriangles,

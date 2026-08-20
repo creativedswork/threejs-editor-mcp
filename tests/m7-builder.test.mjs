@@ -403,6 +403,23 @@ export function createCar() {
         }],
       },
     )
+    const pulledEditorRevision = await client.callTool({
+      name: 'pull_project',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        currentRevision: opened.structuredContent.revision,
+      },
+    })
+    assert.equal(pulledEditorRevision.structuredContent.changed, true)
+    assert.equal(
+      pulledEditorRevision.structuredContent.revision,
+      edited.structuredContent.revision,
+    )
+    assert.deepEqual(pulledEditorRevision.structuredContent.editorOperations, [{
+      type: 'set_position',
+      objectUuid: carUuid,
+      value: [0.25, 0, 0],
+    }])
     const inspectedAfterEdit = await client.callTool({
       name: 'inspect_editor',
       arguments: { projectId: opened.structuredContent.projectId },

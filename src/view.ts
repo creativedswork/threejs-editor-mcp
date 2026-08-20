@@ -25,6 +25,7 @@ import {
 } from './m5-runtime.js'
 import {
   M7_RUNTIME_CHANNEL,
+  WORKSPACE_EDITOR_STATE_PATH,
   m7BootstrapHtml,
   type M7RuntimeEvent,
 } from './m7-runtime.js'
@@ -97,6 +98,7 @@ interface RemoteSnapshot {
   project: Project
   revision: string
   workspace?: WorkspaceView
+  editorOperations?: EditorCommandOperation[]
 }
 
 interface HistoryEntry {
@@ -1332,10 +1334,19 @@ function snapshotFromResult(result: CallToolResult): RemoteSnapshot | undefined 
   if (candidate === undefined || typeof nextRevision !== 'string') {
     throw new Error('pull_project returned an invalid snapshot')
   }
+  const editorOperations = Array.isArray(structured.editorOperations)
+    ? structured.editorOperations.map(editorCommandOperation)
+    : undefined
+  if (editorOperations?.some(operation => operation === undefined)) {
+    throw new Error('pull_project returned invalid Editor operations')
+  }
   return {
     project: candidate as unknown as Project,
     revision: nextRevision,
     workspace: workspaceFromResult(structured.workspace),
+    ...editorOperations === undefined
+      ? {}
+      : { editorOperations: editorOperations as EditorCommandOperation[] },
   }
 }
 
@@ -1965,6 +1976,67 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
   await pullLatest()
 }
 
+function canApplyEditorRevision(snapshot: RemoteSnapshot): boolean {
+  if (navigationTab !== 'scene'
+    || workspace === undefined
+    || snapshot.workspace === undefined
+    || snapshot.editorOperations === undefined
+    || project === undefined
+    || m7ActiveRun === undefined
+    || workspace.kind !== snapshot.workspace.kind
+    || workspace.entry !== snapshot.workspace.entry
+    || workspace.backend !== snapshot.workspace.backend) return false
+
+  const currentFiles = new Map(workspace.files.map(file => [file.path, file.sha256]))
+  const nextFiles = new Map(snapshot.workspace.files.map(file => [file.path, file.sha256]))
+  const paths = new Set([...currentFiles.keys(), ...nextFiles.keys()])
+  const changedPaths = [...paths].filter(path => currentFiles.get(path) !== nextFiles.get(path))
+  if (changedPaths.length !== 1 || changedPaths[0] !== WORKSPACE_EDITOR_STATE_PATH) return false
+
+  return snapshot.editorOperations.every(operation => {
+    const object = scene.getObjectByProperty('uuid', operation.objectUuid)
+    if (object === undefined) return false
+    const material = editableMaterial(object)
+    if (operation.type === 'set_material_color') return material !== undefined
+    if (operation.type === 'set_material_value') {
+      return material !== undefined
+        && operation.property === 'roughness'
+        && 'roughness' in material
+    }
+    return true
+  })
+}
+
+async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
+  if (!canApplyEditorRevision(snapshot)
+    || m7ActiveRun === undefined
+    || snapshot.workspace === undefined
+    || snapshot.editorOperations === undefined) return false
+
+  const run = m7ActiveRun
+  status.textContent = 'Applying external Editor changes'
+  const applied = waitForM7Event(['editor-scene', 'runtime-error'], run.runId, 10_000)
+  postM7('apply-operations', { operations: snapshot.editorOperations })
+  if ((await applied).type === 'runtime-error') return false
+
+  workspace = snapshot.workspace
+  renderFileTree()
+  pendingOperations = []
+  pendingEditorOperations = []
+  const baseline = serializeProject()
+  project = cloneProject(baseline)
+  history = [{
+    project: cloneProject(baseline),
+    pendingOperations: [],
+    editorOperations: [],
+  }]
+  historyIndex = 0
+  refreshHistoryButtons()
+  setClean(snapshot.revision)
+  status.textContent = 'Updated Editor changes from server'
+  return true
+}
+
 async function pullLatest(): Promise<void> {
   if (pulling
     || root.dataset.playState === 'starting'
@@ -1981,7 +2053,9 @@ async function pullLatest(): Promise<void> {
     if (snapshot === undefined) return
     if (root.dataset.sync === 'saving' || snapshot.revision === revision) return
     if (root.dataset.sync === 'clean') {
-      acceptSnapshot(snapshot.project, snapshot.revision, 'Updated from server', snapshot.workspace)
+      if (!await applyEditorRevision(snapshot)) {
+        acceptSnapshot(snapshot.project, snapshot.revision, 'Updated from server', snapshot.workspace)
+      }
     } else {
       showConflict(snapshot)
     }

@@ -898,7 +898,7 @@ function viewHtml(script: string): string {
     .transform-tools{
       position:absolute;
       z-index:3;
-      top:12px;
+      bottom:12px;
       left:50%;
       display:flex;
       gap:4px;
@@ -987,8 +987,15 @@ function viewHtml(script: string): string {
       .panel{top:auto;bottom:8px;height:176px}
       .hierarchy{left:8px;width:calc(50% - 12px)}
       .inspector{right:8px;width:calc(50% - 12px)}
-      .transform-tools{top:8px}
-      .status{left:8px;bottom:192px;max-width:calc(100% - 16px)}
+      .transform-tools{
+        top:auto;
+        right:8px;
+        bottom:192px;
+        left:auto;
+        transform:none;
+        animation:none;
+      }
+      .status{left:8px;bottom:192px;max-width:calc(100% - 160px)}
     }
     @media (prefers-reduced-transparency:reduce){
       .topbar,.panel,.panel h2,.transform-tools,.status{background:#09111c;backdrop-filter:none;-webkit-backdrop-filter:none}
@@ -1813,12 +1820,23 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       revision: revisionSchema,
       project: projectSchema.optional(),
       workspace: workspaceViewSchema.optional(),
+      editorOperations: z.array(editorCommandSchema).optional(),
     }),
     _meta: { ui: { visibility: ['app'] } },
   }, async ({ projectId, currentRevision }) => {
     const workspace = await loadWorkspace(projectId)
     const snapshot = workspace ?? await store.load(projectId)
     const changed = currentRevision !== snapshot.revision
+    let editorOperations: EditorCommandOperation[] | undefined
+    if (changed
+      && workspace?.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
+      const [file] = await workspaces.readFiles(projectId, [{
+        path: WORKSPACE_EDITOR_STATE_PATH,
+      }])
+      editorOperations = workspaceEditorStateSchema.parse(
+        JSON.parse(file!.text!),
+      ).operations
+    }
     return textResult(changed ? 'Project snapshot returned.' : 'Project is current.', {
       projectId,
       changed,
@@ -1826,6 +1844,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       ...changed ? {
         project: snapshot.project,
         ...workspace === undefined ? {} : { workspace: workspaceView(workspace) },
+        ...editorOperations === undefined ? {} : { editorOperations },
       } : {},
     })
   })

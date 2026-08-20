@@ -1,0 +1,93 @@
+{
+  "status": "pass",
+  "sourceSession": {
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash",
+    "humanRevision": "5d1e660a1feef4d9637ef6bced811c9a8773c8d892f1c8a6f72f013f51f7e130",
+    "aiRevision": "99512c65b9a00aa826b7154a840b0f09a06e1a2ce731619fa32a8a16205f95a9",
+    "operation": {
+      "type": "set_position",
+      "objectName": "hull",
+      "objectUuid": "b1f5044c-c25a-47c3-87dd-839a3a8e0629",
+      "before": [0, 0.8903357061400037, 0],
+      "after": [0, 0, 0]
+    },
+    "buildStatus": "ready",
+    "buildErrors": 0,
+    "editorObjects": 87
+  },
+  "deterministicBrowser": {
+    "humanPositionX": 0.25,
+    "aiPositionX": 0,
+    "runtimePreservedAcrossAiEdit": true,
+    "topCanvasPointerReachable": true,
+    "pixelsBeforeSave": {
+      "sampled": 9000,
+      "lit": 7847,
+      "colors": 1133
+    },
+    "pixelsAfterSave": {
+      "sampled": 9000,
+      "lit": 7763,
+      "colors": 1163
+    },
+    "pixelsAfterAiUndo": {
+      "sampled": 9000,
+      "lit": 7853,
+      "colors": 1150
+    },
+    "pixelsAfterFullscreenReturn": {
+      "sampled": 9000,
+      "lit": 8036,
+      "colors": 975
+    },
+    "rendererBackend": "WebGPUBackend",
+    "appProblems": []
+  },
+  "realDeepSeek": {
+    "sessionId": "session-f1da8f3b-b07a-4161-8800-8b09543edede",
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash",
+    "toolSequence": [
+      "mcp__threejs__list_projects",
+      "mcp__threejs__open_editor",
+      "mcp__threejs__inspect_project",
+      "mcp__threejs__apply_editor_commands",
+      "mcp__threejs__inspect_project"
+    ],
+    "humanRevision": "173b0277ad417c5ddd041888690b7afa92ce868ffd00ce37b6653edc23f22ddd",
+    "aiRevision": "78379074d05342c7b81690129256f096daaeb95ca19da45b8fa00c51e6d7b63e",
+    "humanPositionX": 0.25,
+    "aiPositionX": 0,
+    "runtimePreservedAcrossAiUndo": true,
+    "pixelsAfterAiUndo": {
+      "sampled": 9000,
+      "lit": 7853,
+      "colors": 1150
+    },
+    "pixelsAfterFullscreenReturn": {
+      "sampled": 9000,
+      "lit": 8036,
+      "colors": 975
+    }
+  },
+  "responsiveLayout": {
+    "viewport": [520, 900],
+    "visibleTopHit": "runtime",
+    "toolbarAbovePanels": true
+  },
+  "artifacts": [
+    {
+      "path": "reports/assets/m7-ai-undo-continuity.png",
+      "sha256": "ff34da2e28a8e9caf142a50ae9a4c2ebd4a398377b78c78c0140dfa64b6d7c2c"
+    },
+    {
+      "path": "reports/assets/m7-ai-undo-real-deepseek.png",
+      "sha256": "c5104de1313ee675ade12d2a2b0c3996fa4f18e6ca38e4c30ede2a02a595ace5"
+    },
+    {
+      "path": "reports/assets/m7-ai-undo-mobile.png",
+      "sha256": "c3ce478233d12d1a4121daacbd498fb2c0e8f83410c75b94071f06d1dac50201"
+    }
+  ]
+}
