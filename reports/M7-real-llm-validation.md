@@ -197,7 +197,7 @@ The Session source records:
 
 ## Discarded Setup Attempt
 
-An earlier fresh profile at port `51838` omitted the `dsh-mcp-apps` bundle, so
+An earlier fresh profile at port `51838` omitted the `dsh-uni-editor` bundle, so
 the model had no Three.js MCP tools. That run was stopped after one read-only
 shell attempt and before any Workspace write. The Workspace was regenerated
 from the pinned corpus before the passing run. It is not counted as M7

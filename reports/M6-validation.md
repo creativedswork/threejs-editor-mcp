@@ -28,7 +28,7 @@ M6 已完成实现和最终验证：
 - stale revision、路径穿越、绝对路径、metadata、symlink、oversize 和 crash recovery
   均有负向测试；
 - 标准 MCP Apps fullscreen 在同一个 iframe、bridge、session 和 Chat 卡片内切换；
-- Three.js package release checks、`dsh-mcp-apps` checks 和 fresh Harness Browser E2E
+- Three.js package release checks、`dsh-uni-editor` checks 和 fresh Harness Browser E2E
   全部通过。
 
 M6 没有实现通用 Vite/ESM/TypeScript 构建、source map 或任意复杂项目运行。
@@ -55,7 +55,7 @@ human-facing UI intentionally exposes no source-code editor.
 | Gate | Evidence | Result |
 |---|---|---|
 | Release checks | Upstream hashes, TypeScript, build, Node tests, packed install and executable | PASS |
-| Host regression | `dsh-mcp-apps` typecheck, build, and 3 tests | PASS |
+| Host regression | `dsh-uni-editor` typecheck, build, and 3 tests | PASS |
 | Linked Workspace | Existing Git directory opened in place through registered `projectId` | PASS |
 | Managed Workspace | Created and rediscovered after Store restart | PASS |
 | Model path boundary | Replay tool arguments contained only `projectId` and relative file paths | PASS |
@@ -241,7 +241,7 @@ tree. It is phase-validation evidence, not clean-commit PR evidence.
 ```sh
 pnpm run release:check
 
-cd ../dsh-mcp-apps
+cd ../dsh-uni-editor
 pnpm run check
 
 cd ../threejs-editor-mcp

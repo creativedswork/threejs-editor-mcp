@@ -15,7 +15,7 @@ M5 已完成并通过最终验证：
 - 在 Harness Proxy 和 MCP App 内增加第三层 opaque Runtime Sandbox；
 - 真实 Harness Browser E2E 已通过 WebGL2、WebGPU、DOM/导航/AppBridge 隔离、
   伪造 RPC、build error、unhandled rejection 和 teardown 验证；
-- `dsh-mcp-apps` 仅增加受控 `frame-src 'self'`，外部 frame 仍需显式 allowlist；
+- `dsh-uni-editor` 仅增加受控 `frame-src 'self'`，外部 frame 仍需显式 allowlist；
 - 748x636 inline 卡片可继续作为默认入口；M6 将增加标准 fullscreen，服务于本地
   多文件工程的 Files、Viewport 和 Inspector 深度编辑。
 
@@ -31,7 +31,7 @@ M5 validates the foundations required before opening local multi-file projects:
 - standard MCP Resource loading without a new Agent turn or project revision;
 - a third, opaque Runtime Sandbox inside the existing MCP App Sandbox;
 - WebGL2 rendering, WebGPU capability detection, diagnostics, and teardown;
-- the minimal `dsh-mcp-apps` CSP change needed for controlled `srcdoc` frames.
+- the minimal `dsh-uni-editor` CSP change needed for controlled `srcdoc` frames.
 
 Linked Workspace registration, local file transactions, module building, and
 the final `inspect_editor` / `apply_editor_commands` tools remain M6/M7 work.
@@ -41,7 +41,7 @@ the final `inspect_editor` / `apply_editor_commands` tools remain M6/M7 work.
 | Gate | Evidence | Result |
 |---|---|---|
 | Release checks | Upstream hashes, TypeScript, build, protocol/storage test, packed install | PASS |
-| Host regression | `dsh-mcp-apps` typecheck, build, and 3 tests | PASS |
+| Host regression | `dsh-uni-editor` typecheck, build, and 3 tests | PASS |
 | Compatibility corpus | External graphics corpus fixed at commit `98453747...` with 7 case IDs | PASS |
 | Official Editor source | Three.js r185 commit `2431a09f...`; 28 files verified by SHA-256 | PASS |
 | Command JSON | `AddObjectCommand` serialized, restored, executed, undone, and redone | PASS |
@@ -147,7 +147,7 @@ rejects late events.
 
 ## Host CSP
 
-`dsh-mcp-apps` changes the default frame directive from:
+`dsh-uni-editor` changes the default frame directive from:
 
 ```text
 frame-src 'none'
@@ -193,7 +193,7 @@ to open or run the inline App.
 ```sh
 pnpm run release:check
 
-cd ../dsh-mcp-apps
+cd ../dsh-uni-editor
 pnpm run check
 
 cd ../threejs-editor-mcp

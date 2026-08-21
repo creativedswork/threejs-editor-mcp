@@ -5,7 +5,7 @@
   "flow": [
     "DSH Web Workspace picker",
     "Session.header.cwd",
-    "dsh-mcp-apps request _meta",
+    "dsh-uni-editor request _meta",
     "threejs-editor-mcp Linked Workspace registration",
     "opaque projectId",
     "Editor card"

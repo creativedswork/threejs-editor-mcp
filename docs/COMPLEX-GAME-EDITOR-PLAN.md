@@ -73,7 +73,7 @@ AI 创建或修改源码
 | npm `three` 导出 core、addons、WebGPU、TSL 和 src，但不导出 `editor/js` | `three@0.185.1` package exports | 官方 renderer、controls、loaders/exporters 可直接依赖 | Editor Command/History 不是稳定 npm export，不能直接依赖 |
 | 官方 r185 Editor 有场景模型、History、Loader、Player 和 24 类可序列化 Command | [官方 Editor r185](https://github.com/mrdoob/three.js/tree/r185/editor/js) | 有成熟编辑语义可复用 | 完整官方 UI 能无改造嵌入 Chat 卡片 |
 | App SDK 支持 `readServerResource()` | `@modelcontextprotocol/ext-apps@1.7.5` | App 可经 Host 读取同 Server Resource | 大资源、缓存和 revision 绑定已实现 |
-| `dsh-mcp-apps` 已代理 App 的 `resources/read` | [`dsh-mcp-apps/src/host.ts`](../../dsh-mcp-apps/src/host.ts) | 不必增加独立 Editor Web 服务 | 嵌套 Runtime Sandbox 和大资源门禁已验证 |
+| `dsh-uni-editor` 已代理 App 的 `resources/read` | [`dsh-uni-editor/src/host.ts`](../../dsh-uni-editor/src/host.ts) | 不必增加独立 Editor Web 服务 | 嵌套 Runtime Sandbox 和大资源门禁已验证 |
 
 结论：主要瓶颈是本地项目接入、revision、runtime ownership 和 MCP 映射，不是
 重新实现 Three.js 已经具备的编辑语义。
@@ -294,7 +294,7 @@ base64 资产。
 - Stop、revision reload、卡片 teardown 都必须执行 `dispose`，随后销毁 iframe；
 - network 默认关闭；项目如需网络必须显式声明并经过 CSP 审批。
 
-当前 `dsh-mcp-apps` 默认 `frame-src 'none'`。M5 只增加允许受控 `srcdoc` 子
+当前 `dsh-uni-editor` 默认 `frame-src 'none'`。M5 只增加允许受控 `srcdoc` 子
 Sandbox 的通用能力，并用负向测试证明它不能导航外域或访问 AppBridge。
 
 ### 5. Runtime Contract
@@ -449,7 +449,7 @@ error”写成“画面质量合格”。
 - 建立最小 multi-file WebGL fixture 和 WebGPU capability fixture；
 - App 通过 `readServerResource()` 读取 bundle/resource；
 - 增加嵌套 Runtime Sandbox、run nonce、消息 schema 和 teardown；
-- `dsh-mcp-apps` 增加最小 `srcdoc` frame CSP 支持及安全负向测试；
+- `dsh-uni-editor` 增加最小 `srcdoc` frame CSP 支持及安全负向测试；
 - 量化 inline 模式下 Canvas + Scene/Properties 的可用空间，决定 fullscreen。
 
 验收：
@@ -461,7 +461,7 @@ error”写成“画面质量合格”。
 - build/runtime 错误、unhandled rejection 和 teardown 均可观察；
 - Stop 后 frame counter、监听器和 GPU metrics 不再变化；
 - 标准 Resource read 不创建 Agent turn；
-- `pnpm run check` 和 `dsh-mcp-apps pnpm run check` 通过。
+- `pnpm run check` 和 `dsh-uni-editor pnpm run check` 通过。
 
 产物：`reports/M5-validation.md`、架构截图、Runtime isolation trace。
 
@@ -509,7 +509,7 @@ Server 启动前预注册游戏路径。
 
 实现：
 
-- `dsh-mcp-apps` 对可信本地 stdio Server 提供显式 `forwardWorkspace`；
+- `dsh-uni-editor` 对可信本地 stdio Server 提供显式 `forwardWorkspace`；
 - Host 从调用 Agent 的 `Session.header.cwd` 读取已授权 Workspace；
 - 路径只通过 MCP request `_meta` 传递，不进入模型 tool 参数或结果；
 - `open_editor` 省略 `projectId` 时动态注册当前 DSH Workspace；
@@ -774,7 +774,7 @@ materialize exact source revision
 
 1. “任意复杂度”采用 C0-C5 兼容分级，不承诺无资源和环境上限。
 2. Runtime 使用 Editor 内部的第三层 opaque Sandbox，必要时对
-   `dsh-mcp-apps` 做通用、可复用的最小安全增强。
+   `dsh-uni-editor` 做通用、可复用的最小安全增强。
 3. 外部案例仅作为固定 commit 的测试语料，不进入 npm tarball。
 4. 首批必过案例为 P1-P6；P7 raw WebGPU 是 stretch case。
 5. M5 用真实 E2E 决定是否为深度编辑启用标准 fullscreen；inline 仍是默认入口。

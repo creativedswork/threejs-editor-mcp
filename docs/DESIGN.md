@@ -54,9 +54,9 @@
 |---|---|---|---|
 | 官方公开事实 | npm `three` 提供场景、渲染、序列化和 `three/addons` | 核心编辑能力可以建立在官方包上 | 官方包包含完整 Editor 产品 |
 | 官方源码 | 官方 Editor 展示了 hierarchy、viewport、inspector、transform、history 和 player 的可行交互 | 可以参考已验证的编辑器交互模型 | 需要复制或 vendoring 官方 Editor |
-| 当前代码 | `dsh-mcp-apps` 从 tool `_meta` 取得 `resourceUri`，再向同一个 MCP Server 调用 `resources/read` | MCP App View 可以作为 Server 包内 Resource 分发 | Editor UI 已存在 |
-| 当前代码 | `dsh-mcp-apps` 已支持 AppBridge、双 iframe、CSP 和 app-only tool 调用 | 人工操作可以直接保存到 MCP Server | Editor UI 已存在 |
-| 当前代码 | `dsh-mcp-apps` 支持动态高度的 `inline` View，当前上限为 800px | 轻量 Editor 可以先复用现有 Host 验证 | 长期编辑体验不需要 fullscreen |
+| 当前代码 | `dsh-uni-editor` 从 tool `_meta` 取得 `resourceUri`，再向同一个 MCP Server 调用 `resources/read` | MCP App View 可以作为 Server 包内 Resource 分发 | Editor UI 已存在 |
+| 当前代码 | `dsh-uni-editor` 已支持 AppBridge、双 iframe、CSP 和 app-only tool 调用 | 人工操作可以直接保存到 MCP Server | Editor UI 已存在 |
+| 当前代码 | `dsh-uni-editor` 支持动态高度的 `inline` View，当前上限为 800px | 轻量 Editor 可以先复用现有 Host 验证 | 长期编辑体验不需要 fullscreen |
 | 当前代码 | Harness Browser Composer 已通过 Session 启动普通用户回合 | 用户可在保存后自然发起下一轮 | 无需修改 Agent Loop |
 | 当前代码 | MCP App 的 app-only tool 调用直接经过 Host 到 MCP Server | 人工保存不需要经过 Agent Loop | 人工修改会自动进入模型上下文 |
 
@@ -97,7 +97,7 @@ flowchart LR
   Session["Current Session and Agent Loop"]
   Model["AI Agent"]
 
-  subgraph Host["dsh-mcp-apps"]
+  subgraph Host["dsh-uni-editor"]
     Tools["MCP tool adapter"]
     Bridge["AppBridge + Sandbox"]
   end
@@ -159,7 +159,7 @@ No Agent Loop implementation change is required. V1 deliberately avoids injectin
 |---|---|---|
 | `threejs-editor-mcp` Server process | Tools, View Resource, project storage, revision checks, scene operations and validation | Harness Session lifecycle |
 | `threejs-editor-mcp` View code | Bundled in the same package; lightweight editor, local history, Play and sync state | Independent deployment or direct Session access |
-| `dsh-mcp-apps` | Existing MCP transport, visibility authorization and View isolation | Three.js project semantics |
+| `dsh-uni-editor` | Existing MCP transport, visibility authorization and View isolation | Three.js project semantics |
 | DeepSeek Harness | Existing Session and Agent Loop | Product-specific Editor code |
 | Human | Visual editing, playtest, conflict choice and explicit Save | Manual JSON editing as a required path |
 | AI Agent | Inspect project, apply changes and judge diagnostics | Silent replacement of dirty human state |
@@ -275,7 +275,7 @@ sequenceDiagram
   participant H as Human
   participant E as Lightweight Editor
   participant S as threejs-editor-mcp
-  participant B as dsh-mcp-apps AppBridge
+  participant B as dsh-uni-editor AppBridge
   participant A as Agent Loop
 
   H->>E: edit scene, material or script
@@ -295,7 +295,7 @@ The saved project is the handoff artifact. The App-generated user message expres
 
 ### MCP Apps Host 关系
 
-V1 uses the existing inline View, AppBridge, Sandbox, app-only tools and dynamic height up to the current 800px limit. M0 found one generic Sandbox bug: the outer card resized, but the nested iframe remained at its browser-default height because the wrapper used `min-height: 100%`. `dsh-mcp-apps` therefore needs the one-line `html, body { height: 100% }` fix. This changes no MCP Apps capability or Three.js-specific behavior.
+V1 uses the existing inline View, AppBridge, Sandbox, app-only tools and dynamic height up to the current 800px limit. M0 found one generic Sandbox bug: the outer card resized, but the nested iframe remained at its browser-default height because the wrapper used `min-height: 100%`. `dsh-uni-editor` therefore needs the one-line `html, body { height: 100% }` fix. This changes no MCP Apps capability or Three.js-specific behavior.
 
 The M0 bundle is 862,453 bytes, above the Host's default 512 KiB Resource limit. Deployment explicitly sets the existing `maxBodyBytes` option to 2 MiB; the Host still enforces a finite bound. The inline layout keeps the Viewport primary and collapses hierarchy, Inspector and script surfaces into tabs when width is insufficient. Generic fullscreen remains a separate proposal only if later Editor E2E shows the core workflow cannot fit.
 
@@ -351,7 +351,7 @@ threejs-editor-mcp/
 | Milestone | Work | Exit criteria |
 |---|---|---|
 | M0: npm 与 Sandbox 验证 | Bundle official `three`, render a movable cube and run Pong in the real Sandbox | Harness Web E2E shows nonblank moving pixels, working keyboard input, correct resize and no unexpected console errors |
-| M1: Server 与 View 基础 | Register tools and `ui://threejs-editor/app` in one package; add project create/open/pull/push | Existing `dsh-mcp-apps` loads the inline View and saves a project without additional Host changes |
+| M1: Server 与 View 基础 | Register tools and `ui://threejs-editor/app` in one package; add project create/open/pull/push | Existing `dsh-uni-editor` loads the inline View and saves a project without additional Host changes |
 | M2: Editor MVP | Add project store, hierarchy, viewport, selection, transform, inspector, history and save | Human edits survive reload; AI clean updates reload; dirty conflicts preserve both versions |
 | M3: 游戏协作 | Add script lifecycle, Play, diagnostics, Composer handoff and model scene operations | Human saves; the next Composer turn reads that revision and the Editor displays the next revision |
 | M4: 资产与发布 | Add bounded GLTF/texture support, export, package hardening, CI and npm release | Packaged install works through `dsh plugin`; Browser and security gates pass |
@@ -393,7 +393,7 @@ Implementation starts only after review confirms:
 1. V1 builds a product-owned lightweight Editor from `three` npm and selected addons.
 2. `project.json` wraps native Three.js scene/camera JSON and one game script.
 3. Human edits save outside Agent Loop; only a later Harness Composer message starts the next ordinary turn.
-4. `dsh-mcp-apps` provides the M0-proven Sandbox height fix; fullscreen and App-originated messages remain deferred.
+4. `dsh-uni-editor` provides the M0-proven Sandbox height fix; fullscreen and App-originated messages remain deferred.
 5. V1 is limited to `empty`, `pong`, primitives and small local assets.
 
 ---
@@ -420,7 +420,7 @@ No Agent Loop implementation change is required. Real-time injection of each hum
 
 ### Host interaction
 
-V1 uses the existing `dsh-mcp-apps` inline View and 800px height limit after one generic nested-iframe height fix proven by M0. A 2 MiB `maxBodyBytes` deployment bound accommodates the offline View. The Editor prioritizes its Viewport and collapses secondary panels responsively. Fullscreen, App-originated messages and model-context injection remain deferred.
+V1 uses the existing `dsh-uni-editor` inline View and 800px height limit after one generic nested-iframe height fix proven by M0. A 2 MiB `maxBodyBytes` deployment bound accommodates the offline View. The Editor prioritizes its Viewport and collapses secondary panels responsively. Fullscreen, App-originated messages and model-context injection remain deferred.
 
 ### Delivery order
 
@@ -435,4 +435,4 @@ M0 proves the official npm runtime inside the real Sandbox. M1 establishes the S
 - [Official Three.js Editor interaction reference](https://threejs.org/editor/)
 - [Official Three.js Editor source reference](https://github.com/mrdoob/three.js/tree/dev/editor)
 - [MCP Apps stable specification 2026-01-26](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)
-- [Current dsh-mcp-apps package](../../dsh-mcp-apps/README.md)
+- [Current dsh-uni-editor package](../../dsh-uni-editor/README.md)

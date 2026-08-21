@@ -23,7 +23,7 @@ Agent messages, and npm publication remain outside M4.
 | Gate | Evidence | Result |
 |---|---|---|
 | Release checks | TypeScript, production build, protocol/storage test, tarball install | PASS |
-| Host regression | `dsh-mcp-apps` typecheck, build, and 3 tests | PASS |
+| Host regression | `dsh-uni-editor` typecheck, build, and 3 tests | PASS |
 | Package version | `threejs-editor-mcp@0.1.0` | PASS |
 | Tarball contents | Only `dist/server.js`, `dist/view.js`, `README.md`, `LICENSE`, `package.json` | PASS |
 | Executable install | Fresh offline install launched `node_modules/.bin/threejs-editor-mcp` | PASS |
@@ -90,7 +90,7 @@ The app-only `export_project` tool returns one bounded JSON document:
 }
 ```
 
-Direct iframe downloads are blocked by the MCP Apps Sandbox. `dsh-mcp-apps`
+Direct iframe downloads are blocked by the MCP Apps Sandbox. `dsh-uni-editor`
 therefore implements standard `ui/download-file` for one embedded JSON
 resource up to 4 MiB. The outer Host validates the file URI, MIME, filename,
 and size before creating the browser download.
@@ -184,7 +184,7 @@ Observed:
 pnpm run release:check
 pnpm run test:e2e:m4
 
-cd ../dsh-mcp-apps
+cd ../dsh-uni-editor
 pnpm run check
 ```
 

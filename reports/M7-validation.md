@@ -95,7 +95,7 @@ project ID. The source repository is not modified.
 | Direct MCP App open | Natural-language request mounts a non-black editable App without Play | PASS |
 | Gallery corpus adapter | Fixed layout maps only `dev/` and `skills/`; unrelated parent files remain inaccessible | PASS |
 | Gallery build | Managed Workspace builds WebGPU with 17 inputs and 0 diagnostics | PASS |
-| Host regression | `dsh-mcp-apps` typecheck, build, and 7 tests | PASS |
+| Host regression | `dsh-uni-editor` typecheck, build, and 7 tests | PASS |
 | Package boundary | 10-file tarball excludes corpus, tests, reports, `.tmp`, assets, and credentials | PASS |
 
 ## Builder Contract
@@ -343,7 +343,7 @@ node scripts/prepare-m7-p1.mjs
 node tests/m7-p1-build.mjs
 pnpm run test:pack
 
-cd ../dsh-mcp-apps
+cd ../dsh-uni-editor
 pnpm run check
 ```
 

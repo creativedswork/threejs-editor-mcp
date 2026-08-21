@@ -12,7 +12,7 @@ tools, and the bundled `ui://threejs-editor/app` MCP App.
 
 ```mermaid
 flowchart LR
-  Agent["Harness Agent"] -->|"model-visible tools"| Host["dsh-mcp-apps"]
+  Agent["Harness Agent"] -->|"model-visible tools"| Host["dsh-uni-editor"]
   Host --> Server["threejs-editor-mcp<br/>stdio server"]
   Server --> Store["project.json<br/>diagnostics.json<br/>assets/"]
   Server -->|"resources/read"| App["MCP App Sandbox<br/>Three.js Editor"]
@@ -29,7 +29,7 @@ is vendored and no separate web service is required.
 Install the MCP Apps Host and this MCP Server:
 
 ```sh
-dsh plugin --profile web add @creative-dswork/dsh-mcp-apps
+dsh plugin --profile web add @creative-dswork/dsh-uni-editor
 npm install --global threejs-editor-mcp@0.1.0
 threejs-editor-mcp --root /absolute/path/to/threejs-projects
 ```

@@ -23,7 +23,7 @@ Loop changes remain outside M3.
 | Gate | Evidence | Result |
 |---|---|---|
 | `threejs-editor-mcp` checks | TypeScript, production build, and protocol/storage test | PASS |
-| `dsh-mcp-apps` regression | TypeScript, build, and 3 Host tests | PASS |
+| `dsh-uni-editor` regression | TypeScript, build, and 3 Host tests | PASS |
 | Tool visibility | Inspect/apply/check are model-visible; pull/push/report are app-only | PASS |
 | Script editing | Human source persisted with operation `Updated game script` | PASS |
 | Save-before-Play | Dirty source disabled Play until `push_project` succeeded | PASS |
@@ -123,7 +123,7 @@ receiving raw `project.json`.
 
 ## Host Boundary
 
-M3 adds no `dsh-mcp-apps` feature and changes no Harness source. It uses the
+M3 adds no `dsh-uni-editor` feature and changes no Harness source. It uses the
 existing inline App card, app-only bridge, polling, Sandbox Proxy, and the
 M0-approved nested iframe height fix. The final live catalog exposed only
 `create_project` and `open_editor` as App-rendering tools; mutation tools did

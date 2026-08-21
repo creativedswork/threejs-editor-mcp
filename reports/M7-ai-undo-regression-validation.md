@@ -93,7 +93,7 @@ non-black pixel evidence after undo and fullscreen return.
 Three.js Editor r185 upstream files: 28 verified
 TypeScript: PASS
 Node tests: 5 / 5
-dsh-mcp-apps tests: 7 / 7
+dsh-uni-editor tests: 7 / 7
 npm package boundary: 10 files
 packed install and executable MCP call: PASS
 ```

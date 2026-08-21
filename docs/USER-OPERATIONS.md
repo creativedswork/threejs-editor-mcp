@@ -5,21 +5,21 @@
 | 组件 | 类型 | 职责 |
 |---|---|---|
 | `deepseek-harness` / `dsh` | Agent Runtime 与 Web Host | 启动 Web、管理 Profile、Session、LLM、Workspace 和 Agent Loop |
-| `dsh-mcp-apps` | DSH Cordis bundle 插件 | 管理 MCP 连接，把 MCP tools 注册到 DSH，并在 Web 中托管 MCP App |
+| `dsh-uni-editor` | DSH Cordis bundle 插件 | 管理 MCP 连接，把 MCP tools 注册到 DSH，并在 Web 中托管 MCP App |
 | `threejs-editor-mcp` | stdio MCP Server + MCP App Resource | 提供 Three.js tools、Editor HTML、Workspace revision 和文件事务 |
 
 `threejs-editor-mcp` **不是 DSH 插件**，不会被 `dsh plugin add` 直接加载。
-DSH 只加载 `dsh-mcp-apps`；`dsh-mcp-apps` 再根据自己的 `servers` 配置启动
+DSH 只加载 `dsh-uni-editor`；`dsh-uni-editor` 再根据自己的 `servers` 配置启动
 `threejs-editor-mcp` 子进程：
 
 ```text
 dsh web
-  -> Web profile 加载 dsh-mcp-apps
-  -> dsh-mcp-apps 读取 config.servers
+  -> Web profile 加载 dsh-uni-editor
+  -> dsh-uni-editor 读取 config.servers
   -> spawn threejs-editor-mcp (stdio)
   -> tools/list 注册为 DSH model tools
   -> resources/read 获取 Three.js Editor MCP App
-  -> dsh-mcp-apps 在 Chat 卡片中渲染 App
+  -> dsh-uni-editor 在 Chat 卡片中渲染 App
 ```
 
 用户在 DSH Web 中选择游戏目录后：
@@ -27,7 +27,7 @@ dsh web
 ```text
 DSH Workspace picker
   -> Session.header.cwd
-  -> dsh-mcp-apps request _meta
+  -> dsh-uni-editor request _meta
   -> threejs-editor-mcp 动态注册 Linked Workspace
   -> 返回 opaque projectId
   -> Editor 原地读写该工程
@@ -52,7 +52,7 @@ DSH_HOME=/tmp/threejs-editor-...
 
 各类验收的配置来源如下：
 
-| 验收 | `dsh-mcp-apps` 安装位置 | Three.js Server 配置 | LLM |
+| 验收 | `dsh-uni-editor` 安装位置 | Three.js Server 配置 | LLM |
 |---|---|---|---|
 | M6/M6.1 确定性测试 | 临时 `$DSH_HOME/profiles/web` | 启动参数 `--patch tests/fixtures/m6/cordis.patch.yml` | Replay |
 | M6.1 真实 LLM | 临时 `$DSH_HOME/profiles/web` | 临时 profile 的 `cordis.patch.yml` | `deepseek-official` |
@@ -76,15 +76,15 @@ DSH_HOME=/tmp/threejs-editor-real-home pnpm dsh web
 所以“曾成功运行”只证明临时组合配置有效，不表示默认 `~/.dsh` 已经持久化。
 测试使用临时 Home 是为了不污染用户已有的插件、凭据、Session 和 Workspace。
 
-## `dsh-mcp-apps` 如何配置 `threejs-editor-mcp`
+## `dsh-uni-editor` 如何配置 `threejs-editor-mcp`
 
 配置分为两步。
 
-### 第一步：把 `dsh-mcp-apps` 安装到 Web profile
+### 第一步：把 `dsh-uni-editor` 安装到 Web profile
 
 ```bash
 cd /path/to/deepseek-harness
-pnpm dsh plugin --profile web add /path/to/dsh-mcp-apps
+pnpm dsh plugin --profile web add /path/to/dsh-uni-editor
 ```
 
 该命令自动修改：
@@ -104,14 +104,14 @@ $DSH_HOME/profiles/web/package.json
 ```json
 {
   "dependencies": {
-    "@creative-dswork/dsh-mcp-apps": "link:/path/to/dsh-mcp-apps"
+    "@creative-dswork/dsh-uni-editor": "link:/path/to/dsh-uni-editor"
   },
   "dsh": {
     "profile": {
       "bundles": [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app",
-        "@creative-dswork/dsh-mcp-apps"
+        "@creative-dswork/dsh-uni-editor"
       ]
     }
   }
@@ -120,12 +120,12 @@ $DSH_HOME/profiles/web/package.json
 
 不要手工编辑该 `package.json`。`dsh plugin` 负责安装依赖和维护 bundle 列表。
 
-`dsh-mcp-apps` 自带的 `cordis.patch.yml` 只做一件事：
+`dsh-uni-editor` 自带的 `cordis.patch.yml` 只做一件事：
 
 ```yaml
 - insert:
     - id: mcp-apps
-      name: '@creative-dswork/dsh-mcp-apps'
+      name: '@creative-dswork/dsh-uni-editor'
 ```
 
 它把 Host 插件插入 DSH 配置树，但不知道用户要连接哪个 MCP Server。
@@ -167,12 +167,12 @@ $DSH_HOME/profiles/web/cordis.patch.yml
 |---|---|
 | `serverName` | MCP 工具前缀，最终工具名类似 `mcp__threejs__open_editor` |
 | `transport` | 使用本地 stdio MCP transport |
-| `command` | `dsh-mcp-apps` 要启动的 Server 可执行文件 |
+| `command` | `dsh-uni-editor` 要启动的 Server 可执行文件 |
 | `args --root` | Editor Managed Workspace 数据目录，不是用户游戏目录 |
 | `cwd` | MCP Server 子进程工作目录 |
 | `forwardWorkspace` | 将当前 DSH Session Workspace 可信传给 Server |
 
-不要修改 `/path/to/dsh-mcp-apps/cordis.patch.yml` 来添加 Server。它是 npm bundle
+不要修改 `/path/to/dsh-uni-editor/cordis.patch.yml` 来添加 Server。它是 npm bundle
 的默认层；本机连接配置属于用户的 Web profile。
 
 Cordis 按以下顺序组合配置：
@@ -180,7 +180,7 @@ Cordis 按以下顺序组合配置：
 ```text
 dsh-base bundle
   -> dsh-web-app bundle
-  -> dsh-mcp-apps bundle（插入 mcp-apps）
+  -> dsh-uni-editor bundle（插入 mcp-apps）
   -> Web profile cordis.patch.yml（配置 servers）
   -> $DSH_HOME/cordis.patch.yml
   -> 命令行 --patch overlays
@@ -191,19 +191,19 @@ dsh-base bundle
 ### 1. 构建两个插件项目
 
 ```bash
-cd /Users/bytedanceo/Workspace/DeepSeekSpace/dsh-mcp-apps
+cd /Users/bytedanceo/Workspace/DeepSeekSpace/dsh-uni-editor
 pnpm run build
 
 cd /Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp
 pnpm run build
 ```
 
-### 2. 安装 `dsh-mcp-apps`
+### 2. 安装 `dsh-uni-editor`
 
 ```bash
 cd /Users/bytedanceo/Workspace/DeepSeekSpace/deepseek-harness
 pnpm dsh plugin --profile web add \
-  /Users/bytedanceo/Workspace/DeepSeekSpace/dsh-mcp-apps
+  /Users/bytedanceo/Workspace/DeepSeekSpace/dsh-uni-editor
 ```
 
 ### 3. 写入 MCP Server 配置
@@ -235,7 +235,7 @@ pnpm dsh --profile web --dump-config
 输出中应同时出现：
 
 ```text
-@creative-dswork/dsh-mcp-apps
+@creative-dswork/dsh-uni-editor
 serverName: threejs
 forwardWorkspace: true
 ```
@@ -270,7 +270,7 @@ unset DEEPSEEK_API_KEY
 3. 选择已有的本地 Three.js 游戏目录。
 4. 在该 Workspace 中新建 Session。
 5. 输入“用 Three.js Editor 打开当前工程”。
-6. `dsh-mcp-apps` 启动的 Three.js MCP tools 会在同一 Chat 卡片中打开 Editor。
+6. `dsh-uni-editor` 启动的 Three.js MCP tools 会在同一 Chat 卡片中打开 Editor。
 
 不需要先进入游戏目录启动 DSH，也不需要把游戏路径写进 MCP 配置。
 

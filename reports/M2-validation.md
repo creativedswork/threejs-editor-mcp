@@ -24,7 +24,7 @@ and Agent Loop changes remain outside M2.
 | Gate | Evidence | Result |
 |---|---|---|
 | `threejs-editor-mcp` checks | TypeScript, production build, and 1 protocol/storage test | PASS |
-| `dsh-mcp-apps` regression | TypeScript, build, and 3 Host tests | PASS |
+| `dsh-uni-editor` regression | TypeScript, build, and 3 Host tests | PASS |
 | Native scene load | Six stored scene objects appear in Hierarchy | PASS |
 | Viewport selection | `Left Paddle` selected through Editor controls | PASS |
 | Inspector transform | Position X changed from `-4.45` to `-3.75` | PASS |
@@ -110,7 +110,7 @@ ignored while saving or when their revision already equals the App revision.
 
 ### Host boundary
 
-M2 requires no additional `dsh-mcp-apps` change. The View remains in the
+M2 requires no additional `dsh-uni-editor` change. The View remains in the
 existing inline double iframe and uses only app-only MCP tool calls for human
 save and conflict-copy actions.
 

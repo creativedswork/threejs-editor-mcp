@@ -10,7 +10,7 @@
 
 ```mermaid
 flowchart LR
-  Agent["Harness Agent"] -->|"模型可见工具"| Host["dsh-mcp-apps"]
+  Agent["Harness Agent"] -->|"模型可见工具"| Host["dsh-uni-editor"]
   Host --> Server["threejs-editor-mcp<br/>stdio server"]
   Server --> Store["project.json<br/>diagnostics.json<br/>assets/"]
   Server -->|"resources/read"| App["MCP App Sandbox<br/>Three.js Editor"]
@@ -25,7 +25,7 @@ flowchart LR
 安装 MCP Apps Host 和本 MCP Server：
 
 ```sh
-dsh plugin --profile web add @creative-dswork/dsh-mcp-apps
+dsh plugin --profile web add @creative-dswork/dsh-uni-editor
 npm install --global threejs-editor-mcp@0.1.0
 threejs-editor-mcp --root /absolute/path/to/threejs-projects
 ```

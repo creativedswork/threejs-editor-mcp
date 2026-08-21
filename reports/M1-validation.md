@@ -22,7 +22,7 @@ Hierarchy, TransformControls, Inspector, script editing, fullscreen, and
 | Gate | Evidence | Result |
 |---|---|---|
 | `threejs-editor-mcp` checks | TypeScript, production build, and 1 protocol/storage test | PASS |
-| `dsh-mcp-apps` regression | TypeScript, build, and 3 Host tests | PASS |
+| `dsh-uni-editor` regression | TypeScript, build, and 3 Host tests | PASS |
 | Tool visibility | Model tools marked `model`; pull/push marked `app` | PASS |
 | Live Host catalog | Contains `create_project` and `open_editor`; excludes pull/push | PASS |
 | Project root fence | Traversal and symlink project paths rejected | PASS |
@@ -77,7 +77,7 @@ nested iframe heights of 422px.
 
 ### Host boundary
 
-M1 requires no additional `dsh-mcp-apps` source change. It uses the M0-approved
+M1 requires no additional `dsh-uni-editor` source change. It uses the M0-approved
 generic nested-iframe height fix and the existing 2 MiB `maxBodyBytes` option.
 Agent Loop, Session behavior, fullscreen, and `ui/message` remain unchanged.
 
