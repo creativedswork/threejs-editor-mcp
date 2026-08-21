@@ -309,10 +309,41 @@ try {
   assert.ok(fullscreenPixels.colors > 600)
   await page.setViewportSize({ width: 1346, height: 650 })
   await page.waitForTimeout(500)
-  await runtimeCanvas.click({ position: { x: 866, y: 160 } })
-  await appFrame.waitForFunction(() => (
-    globalThis.__THREE_M7__.metrics().selected === 'rearWing'
-  ))
+  const fullscreenCanvas = await runtimeCanvas.boundingBox()
+  assert.notEqual(fullscreenCanvas, null)
+  for (const [from, to] of [
+    [[1000, 430], [700, 330]],
+    [[1000, 430], [900, 430]],
+  ]) {
+    await page.mouse.move(fullscreenCanvas.x + from[0], fullscreenCanvas.y + from[1])
+    await page.mouse.down()
+    await page.mouse.move(
+      fullscreenCanvas.x + to[0],
+      fullscreenCanvas.y + to[1],
+      { steps: 20 },
+    )
+    await page.mouse.up()
+  }
+  const haloPoint = { x: 770, y: 188 }
+  await runtimeCanvas.click({ position: haloPoint })
+  try {
+    await appFrame.waitForFunction(() => (
+      globalThis.__THREE_M7__.metrics().selected === 'halo'
+    ), undefined, { timeout: 5_000 })
+  } catch (error) {
+    await page.screenshot({
+      path: resolve(artifacts, 'm7-gallery-halo-selection-failure.png'),
+      fullPage: false,
+    })
+    throw new Error(JSON.stringify({
+      selected: await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().selected),
+      fullscreenCanvas,
+      haloPoint,
+      canvas: await runtimeFrame.evaluate(() => (
+        document.querySelector('canvas')?.getBoundingClientRect().toJSON()
+      )),
+    }, null, 2), { cause: error })
+  }
 
   await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
   await appFrame.waitForFunction(() => {
@@ -364,7 +395,10 @@ try {
     fullscreenPixels,
     runtimePreservedAcrossAiEdit: true,
     topCanvasPointerReachable: true,
-    edgeToleranceSelection: 'rearWing',
+    thinObjectSelection: {
+      point: [haloPoint.x, haloPoint.y],
+      selected: 'halo',
+    },
     rendererBackend: metrics.rendererBackend,
     emittedParts: metrics.emittedParts,
     uniqueTriangles: metrics.uniqueTriangles,

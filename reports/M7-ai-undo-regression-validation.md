@@ -22,9 +22,10 @@ WebGPU build 均有效，build 为 `ready` 且无 error。
 重新构建并重启完整 WebGPU Runtime。赛车场景重新创建约 37.6 万三角形时，
 旧画面已被移除，用户返回 Editor 会先看到黑屏。
 
-对象选择还有第二个独立原因：Runtime 原先只发射一条精确射线。细零件边缘
-即使可见，射线也可能穿过它并命中后方无名舞台 `Mesh`。真实赛车场景中，
-固定坐标 `(866, 160)` 修复前选中舞台，左侧 `6px` 才能命中 `rearWing`。
+对象选择还有第二个独立原因：Runtime 原先只接受精确三角面交点。Halo 的
+整体轮廓很大，但它是内部留空的细管框架，屏幕上的实体命中区域很窄。三个
+相机视角的三角形投影探针均确认 Raycaster、面朝向、矩阵和深度排序正常；
+失败像素位于管体附近但没有精确交点，约 `6px` 的相邻射线才命中 Halo。
 
 ## 修复
 
@@ -33,14 +34,15 @@ WebGPU build 均有效，build 为 `ready` 且无 error。
 - 保留 iframe、renderer、相机、选择和 Runtime identity，只推进 revision。
 - 源码、依赖、参数或其他文件变化仍使用原有 revision-bound rebuild。
 - Transform toolbar 从画布顶部移到底部；窄屏时放在属性面板上方右侧。
-- 点击选择使用约 `6px` 多射线容差；有名称的场景零件优先于无名舞台，
-  同时保留重叠对象循环选择。
+- 点击选择优先使用中心射线并按距离选择最近对象；中心射线没有 Editor
+  对象时，才使用约 `6px` 多射线容差并选择最近对象。重复点击仍循环选择
+  更深层对象。
 
 ## Fresh Replay Browser
 
 ```text
 top canvas pointer: reachable
-edge tolerance selection: rearWing
+thin object selection: halo at (770, 188), fallback offset (0, 6)
 Runtime identity across AI undo: preserved
 pixels after AI undo: 7,853 / 9,000 lit; 1,150 colors
 pixels after fullscreen return: 8,036 / 9,000 lit; 975 colors

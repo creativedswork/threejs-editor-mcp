@@ -21,12 +21,12 @@
     "aiPositionX": 0,
     "runtimePreservedAcrossAiEdit": true,
     "topCanvasPointerReachable": true,
-    "edgeToleranceSelection": {
+    "thinObjectSelection": {
       "viewport": [1346, 650],
-      "point": [866, 160],
-      "before": "Mesh",
-      "neighborAt6px": "rearWing",
-      "after": "rearWing"
+      "point": [770, 188],
+      "exactRayHits": [],
+      "fallbackOffset": [0, 6],
+      "after": "halo"
     },
     "pixelsBeforeSave": {
       "sampled": 9000,

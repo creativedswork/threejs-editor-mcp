@@ -252,6 +252,7 @@ export function m7BootstrapHtml(): string {
       const raycaster = new current.THREE.Raycaster()
       const pointer = new current.THREE.Vector2()
       const candidates = new Map()
+      const exactCandidates = new Map()
       for (const [offsetX, offsetY] of offsets) {
         const x = clientX + offsetX
         const y = clientY + offsetY
@@ -267,22 +268,24 @@ export function m7BootstrapHtml(): string {
           const object = current.objects.get(result.object.uuid)
           if (!object) continue
           const offset = Math.hypot(offsetX, offsetY)
+          const candidate = {
+            uuid: object.uuid,
+            distance: result.distance,
+            offset,
+          }
+          if (offset === 0 && !exactCandidates.has(object.uuid)) {
+            exactCandidates.set(object.uuid, candidate)
+          }
           const previous = candidates.get(object.uuid)
           if (!previous
             || result.distance < previous.distance
             || (result.distance === previous.distance && offset < previous.offset)) {
-            candidates.set(object.uuid, {
-              uuid: object.uuid,
-              named: object.name !== '',
-              distance: result.distance,
-              offset,
-            })
+            candidates.set(object.uuid, candidate)
           }
         }
       }
-      return [...candidates.values()]
-        .sort((left, right) => Number(right.named) - Number(left.named)
-          || left.distance - right.distance
+      return [...(exactCandidates.size === 0 ? candidates : exactCandidates).values()]
+        .sort((left, right) => left.distance - right.distance
           || left.offset - right.offset)
         .map(candidate => candidate.uuid)
     }
