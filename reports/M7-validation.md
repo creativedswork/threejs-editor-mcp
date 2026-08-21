@@ -25,6 +25,12 @@ Runtime 验收。此前“只有 Play 后可见”的 Player 证据已作废：
   均可重建；
 - `final`、`topology`、`no-livery` 三种 debug mode 有独立视觉证据；
 - Stop/Restart 后 renderer 仍为 1、没有停止后的消息、build cache ID 不变；
+- DSH 进程重启后，Session 历史中的旧 MCP App `viewId` 会按相同 tool 和
+  resource URI 重绑定到当前 View，不再显示 `MCP App unavailable`；
+- Gizmo、OrbitControls 和场景拾取统一按 pointer 手势互斥；拖动 `helmet`
+  Gizmo 或旋转视角不再把选择切换到底层 `sidepod`；
+- 顶点直接写在世界语义坐标中的对象通过临时 pivot proxy 在可见包围盒中心
+  显示和操作 Gizmo，不修改 geometry 或持久化 proxy；
 - fresh Harness 的真实 DeepSeek 模型只用 Three.js MCP tools 完成
   open/build/read/apply/build/check，并准确报告两个 build ID；
 - 用户日志中的 `dev/example-gallery/examples` 目录可直接作为 DSH Workspace：
@@ -95,7 +101,9 @@ project ID. The source repository is not modified.
 | Direct MCP App open | Natural-language request mounts a non-black editable App without Play | PASS |
 | Gallery corpus adapter | Fixed layout maps only `dev/` and `skills/`; unrelated parent files remain inaccessible | PASS |
 | Gallery build | Managed Workspace builds WebGPU with 17 inputs and 0 diagnostics | PASS |
-| Host regression | `dsh-uni-editor` typecheck, build, and 7 tests | PASS |
+| Host regression | `dsh-uni-editor` typecheck, build, and 9 tests | PASS |
+| Session reload | Persisted App result loaded after Host restart with a new process `viewId` | PASS |
+| Interaction arbitration | Orbit preserved `VF-26`; centered Y-axis Gizmo moved and preserved `helmet` | PASS |
 | Package boundary | 10-file tarball excludes corpus, tests, reports, `.tmp`, assets, and credentials | PASS |
 
 ## Builder Contract
@@ -350,18 +358,23 @@ pnpm run check
 Node test result:
 
 ```text
-tests: 5
-pass: 5
+tests: 7
+pass: 7
 fail: 0
 ```
 
 Host test result:
 
 ```text
-tests: 7
-pass: 7
+tests: 9
+pass: 9
 fail: 0
 ```
+
+The cross-process Session reload regression is documented in
+[`M7-session-reload-regression-validation.md`](M7-session-reload-regression-validation.md).
+The Gizmo, camera and scene-pick arbitration regression is documented in
+[`M7-interaction-arbitration-regression-validation.md`](M7-interaction-arbitration-regression-validation.md).
 
 `pnpm run release:check` completed all assertions, including packed
 installation and executable MCP calls. Its outer command then exited nonzero

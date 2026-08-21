@@ -28,6 +28,8 @@ import {
   WORKSPACE_EDITOR_STATE_PATH,
   m7BootstrapHtml,
   type M7RuntimeEvent,
+  type PointerPickGesture,
+  shouldPickAfterPointerGesture,
 } from './m7-runtime.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
@@ -384,7 +386,7 @@ let frame = 0
 let animation = 0
 let pollTimer: number | undefined
 let pulling = false
-let pointerStart: { x: number; y: number } | undefined
+let pointerGesture: PointerPickGesture | undefined
 let lifecycle: GameLifecycle | undefined
 let playingProject: Project | undefined
 let playingRevision: string | undefined
@@ -2689,23 +2691,13 @@ canvas.addEventListener('pointerdown', event => {
   canvas.focus()
   if (root.dataset.playState === 'playing') {
     updateRuntimePointer(event)
-    pointerStart = undefined
+    pointerGesture = undefined
     return
   }
-  pointerStart = { x: event.clientX, y: event.clientY }
-})
-canvas.addEventListener('pointermove', event => {
-  if (root.dataset.playState === 'playing') updateRuntimePointer(event)
-})
-canvas.addEventListener('pointerup', event => {
-  if (root.dataset.playState === 'playing') {
-    updateRuntimePointer(event)
+  if (!event.isPrimary || event.button !== 0) {
+    pointerGesture = undefined
     return
   }
-  if (pointerStart === undefined || transform?.dragging === true) return
-  const distance = Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y)
-  pointerStart = undefined
-  if (distance > 4) return
   const rect = canvas.getBoundingClientRect()
   pointer.set(
     ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -2716,11 +2708,49 @@ canvas.addEventListener('pointerup', event => {
   scene.traverse(object => {
     if (object instanceof THREE.Mesh && !isHelper(object)) meshes.push(object)
   })
-  selectObject(raycaster.intersectObjects(meshes, false)[0]?.object)
+  pointerGesture = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    moved: false,
+    blocked: transform?.axis != null || transform?.dragging === true,
+    pickIds: raycaster.intersectObjects(meshes, false)
+      .slice(0, 1)
+      .map(result => result.object.uuid),
+  }
+})
+canvas.addEventListener('pointermove', event => {
+  if (root.dataset.playState === 'playing') {
+    updateRuntimePointer(event)
+    return
+  }
+  if (pointerGesture?.pointerId !== event.pointerId) return
+  if (Math.hypot(event.clientX - pointerGesture.x, event.clientY - pointerGesture.y) > 4) {
+    pointerGesture.moved = true
+  }
+})
+canvas.addEventListener('pointerup', event => {
+  if (root.dataset.playState === 'playing') {
+    updateRuntimePointer(event)
+    return
+  }
+  const gesture = pointerGesture
+  pointerGesture = undefined
+  if (!shouldPickAfterPointerGesture(
+    gesture,
+    event.pointerId,
+    event.clientX,
+    event.clientY,
+    transform?.dragging === true,
+  )) return
+  const pickedUuid = gesture?.pickIds?.[0]
+  selectObject(pickedUuid === undefined
+    ? undefined
+    : scene.getObjectByProperty('uuid', pickedUuid))
 })
 canvas.addEventListener('pointercancel', event => {
   if (root.dataset.playState === 'playing') updateRuntimePointer(event)
-  pointerStart = undefined
+  if (pointerGesture?.pointerId === event.pointerId) pointerGesture = undefined
 })
 canvas.addEventListener('webglcontextlost', event => {
   event.preventDefault()

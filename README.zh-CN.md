@@ -4,7 +4,7 @@
 
 在 DeepSeek Harness 的对话卡片中创建、编辑、运行和检查小型 Three.js 游戏。一个 npm 包包含 stdio MCP Server、模型工具、app-only 工具，以及打包后的 `ui://threejs-editor/app` MCP App。
 
-![DeepSeek Harness 中的 Three.js Editor](https://raw.githubusercontent.com/creativedswork/threejs-editor-mcp/main/reports/assets/m4-harness-assets-export.png)
+[![观看 Three.js Editor 演示](https://img.youtube.com/vi/KkvLgN2GeTI/maxresdefault.jpg)](https://www.youtube.com/watch?v=KkvLgN2GeTI)
 
 ## 架构
 

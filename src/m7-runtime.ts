@@ -20,6 +20,30 @@ export interface M7RuntimeEvent {
   data?: Record<string, unknown>
 }
 
+export interface PointerPickGesture {
+  pointerId: number
+  x: number
+  y: number
+  moved: boolean
+  blocked: boolean
+  pickIds?: string[]
+}
+
+export function shouldPickAfterPointerGesture(
+  gesture: PointerPickGesture | undefined,
+  pointerId: number,
+  clientX: number,
+  clientY: number,
+  transformDragging: boolean,
+): boolean {
+  return gesture !== undefined
+    && gesture.pointerId === pointerId
+    && !gesture.moved
+    && !gesture.blocked
+    && !transformDragging
+    && Math.hypot(clientX - gesture.x, clientY - gesture.y) <= 4
+}
+
 export function stableEditorUuid(value: string): string {
   const hash = (seed: number): number => {
     let result = seed >>> 0
@@ -65,6 +89,7 @@ export function m7BootstrapHtml(): string {
   (() => {
     const channel = ${JSON.stringify(M7_RUNTIME_CHANNEL)}
     const stableEditorUuid = ${stableEditorUuid.toString()}
+    const shouldPickAfterPointerGesture = ${shouldPickAfterPointerGesture.toString()}
     const canvas = document.querySelector('canvas')
     let active
     let bundleUrl
@@ -113,11 +138,31 @@ export function m7BootstrapHtml(): string {
       objects: current.objectOrder.map(object => snapshotObject(current, object)),
       selectedUuid: current.selected?.uuid,
     })
+    const selectedScreenPosition = current => {
+      if (!current.selected) return null
+      const point = objectCenterWorld(current, current.selected)
+      point.project(current.camera)
+      return [
+        ((point.x + 1) / 2) * canvas.clientWidth,
+        ((1 - point.y) / 2) * canvas.clientHeight,
+      ]
+    }
     const metrics = current => ({
       frame: current.frame,
       mode: current.mode,
+      cameraPosition: current.camera.position.toArray(),
       editorObjectCount: current.objectOrder.length,
       selectedUuid: current.selected?.uuid,
+      selectedScreenPosition: selectedScreenPosition(current),
+      selectedBoundsCenter: current.selected
+        ? objectCenterWorld(current, current.selected).toArray()
+        : null,
+      gizmoWorldPosition: current.transformPivot
+        ? current.transformPivot.getWorldPosition(new current.THREE.Vector3()).toArray()
+        : null,
+      transformAxis: current.transform?.axis ?? null,
+      transformDragging: current.transformDragging,
+      lastPointerPick: current.lastPointerPick,
       rendererCount: 1,
       secureContext: isSecureContext,
       webgpuApi: Boolean(navigator.gpu),
@@ -194,6 +239,48 @@ export function m7BootstrapHtml(): string {
         value: (mode === 'scale' ? object.scale : object.position).toArray(),
       }
     }
+    const objectCenterWorld = (current, object) => {
+      current.scene.updateMatrixWorld(true)
+      const bounds = new current.THREE.Box3().setFromObject(object)
+      return bounds.isEmpty()
+        ? object.getWorldPosition(new current.THREE.Vector3())
+        : bounds.getCenter(new current.THREE.Vector3())
+    }
+    const syncTransformPivot = current => {
+      if (!current.selected || !current.transformPivot) return
+      current.selected.updateWorldMatrix(true, true)
+      const world = current.selected.matrixWorld.clone()
+      world.setPosition(objectCenterWorld(current, current.selected))
+      const local = current.scene.matrixWorld.clone().invert().multiply(world)
+      local.decompose(
+        current.transformPivot.position,
+        current.transformPivot.quaternion,
+        current.transformPivot.scale,
+      )
+      current.transformPivot.updateMatrix()
+      current.transformPivot.updateMatrixWorld(true)
+      current.transformPivotStart = current.transformPivot.matrixWorld.clone()
+      current.transformObjectStart = current.selected.matrixWorld.clone()
+    }
+    const applyTransformPivot = current => {
+      if (!current.selected
+        || !current.transformPivotStart
+        || !current.transformObjectStart) return
+      current.transformPivot.updateMatrixWorld(true)
+      const delta = current.transformPivot.matrixWorld.clone()
+        .multiply(current.transformPivotStart.clone().invert())
+      const world = delta.multiply(current.transformObjectStart)
+      const local = current.selected.parent
+        ? current.selected.parent.matrixWorld.clone().invert().multiply(world)
+        : world
+      local.decompose(
+        current.selected.position,
+        current.selected.quaternion,
+        current.selected.scale,
+      )
+      current.selected.updateMatrix()
+      current.selected.updateMatrixWorld(true)
+    }
     const applyOperation = (current, operation, notify = true) => {
       const object = current.objects.get(operation?.objectUuid)
       if (!object) throw new Error('Unknown Runtime editor object ' + operation?.objectUuid)
@@ -225,6 +312,9 @@ export function m7BootstrapHtml(): string {
       }
       object.updateMatrix()
       current.scene.updateMatrixWorld(true)
+      if (current.selected === object && !current.transformDragging) {
+        syncTransformPivot(current)
+      }
       if (notify) {
         emit(current.runId, current.nonce, 'editor-object', {
           object: snapshotObject(current, object),
@@ -236,7 +326,10 @@ export function m7BootstrapHtml(): string {
       const object = typeof uuid === 'string' ? current.objects.get(uuid) : undefined
       current.selected = object
       current.transform.detach()
-      if (object) current.transform.attach(object)
+      if (object) {
+        syncTransformPivot(current)
+        current.transform.attach(current.transformPivot)
+      }
       if (notify) {
         emit(current.runId, current.nonce, 'editor-selection', {
           selectedUuid: object?.uuid,
@@ -307,6 +400,7 @@ export function m7BootstrapHtml(): string {
         current.renderer.setAnimationLoop?.(null)
         current.transform.detach()
         current.transformHelper.removeFromParent()
+        current.transformPivot?.removeFromParent()
         current.transform.dispose()
         await current.example?.dispose?.()
         current.controls?.dispose()
@@ -413,8 +507,12 @@ export function m7BootstrapHtml(): string {
           controls,
           transform: undefined,
           transformHelper: undefined,
+          transformPivot: undefined,
+          transformPivotStart: undefined,
+          transformObjectStart: undefined,
           transformMode: 'translate',
           transformDragging: false,
+          pointerGesture: undefined,
           pickCycle: undefined,
           selected: undefined,
           objects: new Map(),
@@ -467,12 +565,19 @@ export function m7BootstrapHtml(): string {
         current.transformHelper.userData.editorHelper = true
         current.transformHelper.visible = current.mode === 'edit'
         scene.add(current.transformHelper)
+        current.transformPivot = new THREE.Object3D()
+        current.transformPivot.userData.editorHelper = true
+        scene.add(current.transformPivot)
+        current.transform.addEventListener('mouseDown', () => {
+          syncTransformPivot(current)
+        })
         current.transform.addEventListener('dragging-changed', event => {
           current.transformDragging = event.value === true
           if (current.controls) current.controls.enabled = !current.transformDragging
         })
         current.transform.addEventListener('objectChange', () => {
           if (!current.selected) return
+          applyTransformPivot(current)
           emit(runId, nonce, 'editor-object', {
             object: snapshotObject(current, current.selected),
           })
@@ -560,7 +665,48 @@ export function m7BootstrapHtml(): string {
       const current = active
       if (!current || current.mode !== 'edit' || current.transformDragging) return
       const bounds = canvas.getBoundingClientRect()
-      const uuids = pickObjects(current, event.clientX, event.clientY, bounds)
+      const pickIds = pickObjects(current, event.clientX, event.clientY, bounds)
+      current.lastPointerPick = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        button: event.button,
+        isPrimary: event.isPrimary,
+        blocked: current.transform.axis !== null,
+        pickIds,
+      }
+      current.pointerGesture = event.isPrimary && event.button === 0
+        ? {
+            pointerId: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            moved: false,
+            blocked: current.transform.axis !== null,
+            pickIds,
+          }
+        : undefined
+    })
+    canvas.addEventListener('pointermove', event => {
+      const gesture = active?.pointerGesture
+      if (!gesture || gesture.pointerId !== event.pointerId) return
+      if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 4) {
+        gesture.moved = true
+      }
+    })
+    canvas.addEventListener('pointerup', event => {
+      const current = active
+      const gesture = current?.pointerGesture
+      if (current) current.pointerGesture = undefined
+      if (!current
+        || current.mode !== 'edit'
+        || !shouldPickAfterPointerGesture(
+          gesture,
+          event.pointerId,
+          event.clientX,
+          event.clientY,
+          current.transformDragging,
+        )) return
+      const uuids = gesture.pickIds ?? []
       const previous = current.pickCycle
       const samePoint = previous
         && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) <= 6
@@ -575,6 +721,12 @@ export function m7BootstrapHtml(): string {
         index,
       }
       selectObject(current, uuids[index])
+    })
+    canvas.addEventListener('pointercancel', event => {
+      const current = active
+      if (current?.pointerGesture?.pointerId === event.pointerId) {
+        current.pointerGesture = undefined
+      }
     })
     window.addEventListener('error', event => {
       if (!active) return

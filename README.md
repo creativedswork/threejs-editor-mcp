@@ -6,7 +6,7 @@ Create, edit, run, and inspect small Three.js games inside a DeepSeek Harness
 chat card. One npm package provides the stdio MCP Server, model tools, app-only
 tools, and the bundled `ui://threejs-editor/app` MCP App.
 
-![Three.js Editor in DeepSeek Harness](https://raw.githubusercontent.com/creativedswork/threejs-editor-mcp/main/reports/assets/m4-harness-assets-export.png)
+[![Watch the Three.js Editor demo](https://img.youtube.com/vi/KkvLgN2GeTI/maxresdefault.jpg)](https://www.youtube.com/watch?v=KkvLgN2GeTI)
 
 ## Architecture
 
