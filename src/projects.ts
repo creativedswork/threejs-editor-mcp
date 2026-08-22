@@ -42,6 +42,7 @@ export const editorStateSchema = z.object({
 })
 export const diagnosticsSchema = z.object({
   testedRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  runId: z.string().uuid().optional(),
   updatedAt: z.string(),
   errors: z.array(z.string().min(1).max(2_000)).max(20),
   warnings: z.array(z.string().min(1).max(2_000)).max(20),
@@ -457,6 +458,7 @@ export class ProjectStore {
     testedRevision: string,
     errors: string[],
     warnings: string[],
+    runId?: string,
   ): Promise<Diagnostics> {
     validateProjectId(projectId)
     return this.withLock(projectId, async () => {
@@ -466,6 +468,7 @@ export class ProjectStore {
       }
       const diagnostics = diagnosticsSchema.parse({
         testedRevision,
+        ...runId === undefined ? {} : { runId },
         updatedAt: new Date().toISOString(),
         errors,
         warnings,

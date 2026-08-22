@@ -1,6 +1,6 @@
 # Three.js Collaborative Game Studio V2 可执行规划
 
-状态：**M6 与 M6.1 已获批准；M7 编辑态 Runtime 已完成验证、等待批准；M8-M11 继续执行阶段确认门禁**
+状态：**M6-M8 已获批准；M8 于 2026-08-23 验收通过并获提交授权；M8.1 `PLANNED`、尚未实施；M9-M11 未开始**
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
 [`98453747`](https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills/tree/98453747cc0678f6a5d910f38d7483596a5f9a40)
@@ -49,6 +49,10 @@ AI 创建或修改源码
 中的普通用户消息创建下一轮 Agent。
 
 ## 用户可感知契约
+
+下表是 V2 最终契约。M8 已验证单个 Editor 和 Runtime 的 revision reload；
+M8.1 负责去掉对第二次 `open_editor` 调用的依赖，并补齐持久 Editor 实例、
+dirty 冲突和能力热加载。
 
 | 场景 | 用户看到的行为 | 系统保证 |
 |---|---|---|
@@ -530,7 +534,7 @@ Server 启动前预注册游戏路径。
 
 ### M7：Module Builder、source map 与复杂程序几何
 
-状态：**编辑态 Runtime 实现和验证完成；等待用户批准**
+状态：**实现和验证完成；用户于 2026-08-21 批准**
 
 目标：建立通用多文件构建、renderer ownership，以及复杂 Workspace 的真实
 场景编辑态。M7 及后续案例不得以“Editor 外壳 + 仅运行时可见的 Player”作为
@@ -602,6 +606,8 @@ open exact revision
 
 ### M8：交互式多 Pass WebGL
 
+状态：**ACCEPTED；实现、自动验证与独立审查完成，用户于 2026-08-23 验收通过并授权原子提交**
+
 目标：覆盖 pointer、temporal state 和 simulation render targets。
 
 实施：
@@ -615,11 +621,292 @@ open exact revision
 
 - Frost pointer deposit、衰减、resize/reset 和 history debug mode 通过；
 - Pool 拖球、wave propagation、normals 和 caustics debug mode 通过；
+- 在验收服务 `14733` 当前 Session 打开固定 post-fix Pool revision，Play 后点击
+  水体生成小球，确认球心在水面之上，并随同一点波高可见地上下浮动；
+- M8 过渡行为：Chat UI 不刷新页面时，显式调用 `open_editor` 后卡片即时出现；
+  `apply_project_files` 本身不创建新卡，修改后 assistant 再次调用
+  `open_editor`；M8.1 将移除该编排依赖；
 - 人改参数、AI 修复源码、Runtime clean reload 的完整闭环通过；
 - diagnostics 绑定确切 revision/runId；
 - Play/Stop 重复十次无旧 pointer listener 或递增 render target 数量。
 
-产物：`reports/M8-validation.md`、交互 GIF、资源生命周期表。
+产物：[`reports/M8-validation.md`](../reports/M8-validation.md)、交互 GIF、
+报告内资源生命周期表。
+
+### M8.1：Editor Continuity & Capability Protocol
+
+状态：**PLANNED；用户于 2026-08-23 确认范围，尚未开始实施**
+
+目标：让 Editor 成为绑定工程的持久协作界面。AI 修改工程或编辑能力后，
+当前 Chat 卡片原位更新；是否出现、恢复或更新 Editor 不再依赖模型记住再次调用
+`open_editor`。
+
+#### 核心对象
+
+| 对象 | 起点与边界 | 结束与产物 | 明确排除 |
+|---|---|---|---|
+| Project | 创建或注册本地工程后，以 `projectId` 覆盖其完整生命周期 | 每次保存或 AI 原子修改产生不可变 revision | 不等同于某次 tool call 或某张卡片 |
+| Editor Instance | Chat 首次需要展示某个 Project 时创建，在当前 Harness Session 内持续存在 | 持久记录当前 revision、dirty state、选中对象、视图和布局 | `viewId` 只标识 App 资源，不作为实例或 revision 身份 |
+| Revision Update | Human 保存或 AI 提交新 revision 时开始 | Editor 接受、拒绝或进入冲突状态后结束 | Prompt 要求和消息重放不算确定性交付 |
+| Capability Manifest | Project revision 声明可编辑 surface 时生效 | 校验后形成参数、面板、命令和 debug surface | 不允许项目代码直接修改 Host DOM 或取得任意本地文件权限 |
+
+默认身份：
+
+```text
+EditorInstance = Harness Session + MCP Server + projectId
+Runtime         = projectId + revision + runId + nonce
+```
+
+`toolCallId` 只用于审计一次调用。显式“打开新视图”才允许同一 Project 创建额外
+Editor Instance；普通修改不得生成重复卡片。
+
+#### 确定性更新协议
+
+```text
+AI / Human 修改
+-> Server 原子提交 revision
+-> Server 发布 project.updated
+-> Host 按 EditorInstance identity 路由
+-> Editor 处理 dirty / playing / building 状态
+-> 构建 exact revision
+-> 成功后原位切换，失败则保留 last-good revision
+```
+
+`project.updated` 至少携带：
+
+```text
+projectId
+baseRevision
+revision
+changedPaths
+source: human | agent
+mutationId
+```
+
+更新规则：
+
+| 当前状态 | 新 revision 到达后的行为 |
+|---|---|
+| Editor 尚未打开 | Host 在当前 Chat 中创建一个 Project 绑定卡片 |
+| clean edit | 保留可映射的选中、相机和布局状态，原位加载新 revision |
+| dirty edit | 显示冲突界面；允许保存为新 revision、放弃本地修改或稍后处理，禁止静默覆盖 |
+| playing | 先完整 dispose 旧 Runtime，再构建并启动 exact 新 revision |
+| building | 取消或作废旧 build，只接受最新 mutation/revision 的结果 |
+| build failed | 保留 last-good 编辑态或运行态，并把源码诊断交给用户和 Agent |
+| 重复或迟到事件 | 依据 mutation、revision 和连接代次幂等忽略 |
+
+这是 Server、Host 和 Editor 共同执行的状态协议，不是模型 Prompt。模型只负责说明
+修改意图和调用工程工具，不负责记忆卡片生命周期。
+
+#### 持久状态与恢复
+
+- Host 持久化 Editor Instance record，而不是只从历史 tool result 猜测卡片；
+- Session reload 后按 `projectId` 恢复卡片，再读取 Server 当前 revision；
+- dirty command/draft 与持久 revision 分开保存，恢复后仍标记为未保存；
+- inline、fullscreen 和多个 Editor 切换时保留各自未保存状态、选中对象、相机和布局；
+- MCP Server 暂时不可用时保留卡片和恢复入口，显示可重试状态，不退化成永久
+  `MCP App unavailable`；
+- 重连产生新的 connection generation，旧连接的迟到 update、build 或 Runtime
+  结果必须被拒绝。
+
+#### AI 定制编辑能力
+
+Project 可在 revision 中声明 Editor capability manifest：
+
+| 能力 | 允许内容 | 执行边界 |
+|---|---|---|
+| Parameters | 类型化输入、枚举、颜色、向量、范围和资源选择 | 绑定 revision 内可验证的参数或 Command |
+| Panels | Scene 专用面板、状态表和诊断视图 | 使用 Editor App 组件，不直接扩展 Harness Host |
+| Commands | 可撤销的场景或工程操作 | 输入输出经过 schema 校验并进入 History |
+| Debug surfaces | render target、buffer、metric 和 capability 状态 | 只读或显式受控写入 |
+| Extension module | Project 自带的专用编辑逻辑 | 在 Editor/Runtime sandbox 内加载，受 CSP、依赖和权限清单限制 |
+
+AI 可以修改 manifest 和扩展模块，但 Server 必须在 revision 提交前校验 schema、
+路径、依赖、大小和权限。所有工程写入继续经过 MCP tools；扩展不能绕过 Workspace
+边界、调用 Host 私有 API 或直接写本地目录。
+
+#### Three.js Runtime Harness 工具
+
+`threejs-editor-mcp` 提供以下模型可见 MCP tools；`dsh-uni-editor` 通过现有
+MCP-to-Harness bridge 将它们注册为 Harness tools，但不实现 Three.js 取证或玩家
+操作语义。
+
+| MCP tool | 输入边界 | 成功产物 |
+|---|---|---|
+| `capture_runtime_frame` | 指定 exact `projectId + revision + runId + nonce` 和 active/validation Runtime | 当前 Canvas 的标准 MCP image/resource 内容，以及尺寸、frame、时间、digest 和 `evidenceId` |
+| `read_runtime_logs` | 指定 exact Runtime identity、cursor、level 和有界 limit | 按序分页的 console、Runtime、WebGL 错误与诊断，包含 `nextCursor` 和截断状态 |
+| `simulate_player_actions` | 指定 exact Runtime identity 和有界 action sequence | 实际执行的 action trace、起止 frame、取消或失败位置和 `evidenceId` |
+
+玩家 action 使用 Canvas 归一化坐标，首期支持：
+
+```text
+pointerMove
+pointerDown
+pointerUp
+click
+drag
+wheel
+keyDown
+keyUp
+waitFrames
+```
+
+执行协议：
+
+```text
+Agent 调用 Harness tool
+-> Three.js MCP Server 校验 Runtime identity、owner 和 control lease
+-> Editor App 中的目标 Runtime 执行截图、日志读取或输入序列
+-> Runtime 将 bounded result 回传 Server
+-> Server 返回绑定 exact revision/run 的 evidence
+```
+
+- 玩家操作默认在隔离的 validation Runtime 执行，不抢占焦点、不发送事件到 Chat
+  Host，也不改变用户正在操作的 active Editor；
+- 只有用户明确要求演示当前运行实例时，才允许把 action 发给 active Runtime；
+- 截图只能覆盖 Runtime Canvas，不得捕获 Chat、Host DOM 或其他 iframe；
+- 日志只采集目标 Runtime 的 console、未捕获异常、promise rejection、WebGL
+  context/error 和 Editor 已声明的诊断，不采集 Host 凭据或其他 Session；
+- 每个 Runtime 同时最多持有一个 control lease；取消、超时、revision rollover、
+  Runtime dispose 或 connection generation 变化都会使未完成命令失败；
+- stale、foreign 或 identity 不完整的请求必须在执行 action 前拒绝，迟到结果不能
+  归入新 Runtime；
+- action 数量、总时长、日志条数、单项字节数、截图尺寸和 evidence retention
+  均有可配置硬上限；
+- 标准 MCP 图片/资源结果若需要 bridge 适配，`dsh-uni-editor` 只做内容无损透传，
+  不解释 Three.js evidence；
+- 这三个工具是 `threejs-editor-mcp` 的增强能力，不是所有 Editor 的公共强制接口。
+  其他 Editor 未提供同类工具时，不阻止 revision 生效，也不算验收失败；
+- Agent 可以报告“修改已应用”；只有实际调用取证工具并引用对应 `evidenceId` 时，
+  才能报告该 revision 已完成相应自动验证。工具存在不代表 Agent 已调用或已判断结果。
+
+#### Three.js MCP Prompt
+
+`threejs-editor-mcp` 提供 Server-scoped Prompt，`dsh-uni-editor` 负责按其 Prompt
+passthrough contract 注入当前 Harness Session。Prompt 指导 Agent 组合 SubAgent
+和当前 Server 实际提供的 Runtime Harness tools，不承担卡片生命周期、权限或工具
+可用性的强制逻辑。
+
+Prompt 基线：
+
+```text
+分析当前任务。
+
+如果当前 Harness 提供 SubAgent 工具，并且子任务能够独立并行，先并行启动：
+1. 测试清单生成 Agent
+2. 风险与覆盖分析 Agent
+
+SubAgent 只负责分析，不修改工程。合并结果后，使用当前可用的
+Three.js Runtime Harness 工具执行测试并收集证据。
+
+测试完成后，启动未参与修改和测试执行的独立评分 Agent。
+
+按正确性、覆盖率、回归风险控制、可复现性评分。
+低于 85 分时修正并重新测试，最多两轮。
+第二轮仍低于 85 分时，报告未通过项和残余风险，不得声称验证通过。
+
+仅使用当前实际提供的取证工具。工具不可用时，明确标记未自动验证，
+不得伪造截图、日志、玩家操作或测试结论。
+
+执行视觉验证前，先判断当前模型是否支持图像输入。
+支持图像输入时，使用 capture_runtime_frame 获取并检查视觉证据。
+不支持图像输入时，停止自动视觉判断并进入意图对齐：
+向用户说明需要操作和观察的内容，等待用户提供实际结果后继续。
+不得自行推断视觉结果或声称自动验证通过。
+```
+
+Prompt 生命周期：
+
+- Prompt 由 MCP Server 代码提供，不允许 Project、capability manifest 或未受信任
+  Workspace 内容修改；
+- passthrough 以 MCP Server 和 Prompt revision/hash 为身份，在一个 Harness
+  Session 的同一 generation 内只注入一次；
+- MCP 重连不得重复注入相同 Prompt；Prompt revision 变化只影响后续 Agent step，
+  已写入的历史消息不重写；
+- Server 卸载、禁用或与 Session 解绑后，后续 step 不再携带其 Prompt；
+- Prompt 的优先级低于 System、用户指令、权限、approval、sandbox 和实际 tool
+  schema；它不能创建不存在的工具或扩大工具权限；
+- SubAgent 工具不存在、任务不可独立拆分或并行会写入同一 Workspace 时，由 Main
+  Agent 顺序完成，不把缺少 SubAgent 当作任务失败；
+- 测试清单 Agent 与风险/覆盖分析 Agent 可并行，只返回分析产物；独立评分 Agent
+  必须在本轮测试 evidence 产生后启动，且不得参与本轮修改或测试执行；
+- “最多两轮”指首次测试和最多一次修正复测。第二轮未达 85 分即停止自动循环，
+  保留代码、测试 evidence、四项评分和残余风险供用户决策；
+- 工具缺失或 evidence 不足不阻止报告“修改已应用”，但禁止报告对应项目已经
+  自动验证。
+- 当前模型不支持图像输入时，Agent 必须暂停视觉评分和修正循环，通过意图对齐
+  获取用户观察结果；用户反馈标记为人工输入，不伪装成自动视觉 evidence。
+
+#### 责任边界
+
+| 组件 | 负责 | 不负责 |
+|---|---|---|
+| Three.js MCP Server | Project/revision 真值、原子修改、更新事件、构建、Runtime Harness tools、Server-scoped Prompt、evidence identity 与有界结果 | 决定 Chat 布局、提高 Prompt 优先级或直接执行浏览器代码 |
+| `dsh-uni-editor` Host | Editor Instance 路由、去重、持久化、恢复、连接代次、Prompt passthrough 和标准 MCP tool/result 透传 | 理解或改写 Three.js Prompt、取证和玩家操作语义 |
+| Editor App | dirty/conflict 状态、视图保持、capability 渲染、Runtime 切换和目标 Runtime 内的取证/action 执行 | 自行选择任意本地工程或覆盖 Server revision |
+| Agent | 根据用户意图修改 Project/capability，按 Prompt 编排分析、测试、评分，并在工具存在且任务需要时选择取证动作和解释结果 | 通过 Prompt 维持卡片、连接、恢复状态或伪造未执行的验证 |
+
+#### 验收
+
+- 已打开的 Project 连续执行 20 次 AI 修改，始终只有一个 Editor 卡片，页面不刷新；
+- `apply_project_files` 成功后无需第二次 `open_editor`，当前卡片自动进入 exact
+  revision；
+- Editor 未打开时，首次成功修改能够确定性创建一个绑定该 Project 的卡片；
+- clean 更新保留可映射的选中对象、相机、布局和 fullscreen/inline 状态；
+- dirty 更新必须进入冲突状态，三种处理路径均不丢失 Human 修改；
+- Play 中更新先释放旧 Runtime，旧 revision 的帧、事件、GPU 资源和迟到结果均失效；
+- build 失败保留 last-good revision，卡片不空白，Agent 能读取同一诊断；
+- 刷新 Chat、恢复历史 Session、重启 MCP Server 后，卡片和最新持久 revision
+  自动恢复；未保存 draft 的状态清楚可见；
+- 两个不同 Project 的 inline/fullscreen 切换互不丢失未保存状态；
+- AI 只修改 capability manifest 和 sandbox extension，即可新增一个参数面板、
+  一个可撤销命令和一个 debug surface，无需重建 Host；
+- 非法 schema、越界路径、未授权依赖和 Host API 访问均在加载前被拒绝；
+- 当前 DSH Profile 中三个 Three.js Runtime tools 均以模型可见 Harness tools
+  注册；插件重载后 schema 与可见性一致；
+- `capture_runtime_frame` 从真实 validation Runtime 返回可解码图片，图片尺寸、
+  frame、digest、`evidenceId` 和 exact Runtime identity 一致；
+- `read_runtime_logs` 能读取测试注入的 console、未捕获异常与 WebGL context
+  事件，cursor 分页不重复、不漏项、不越过目标 Runtime；
+- `simulate_player_actions` 在 Interactive Pool validation Runtime 中点击水面、
+  等待指定 frame 并拖动观察；前后截图可见新球和水面响应，日志无 fatal error；
+- validation action 不改变 active Editor 的焦点、选中、相机、dirty state 或
+  Runtime 世界；用户交互与 Agent 取证并发时仍相互隔离；
+- stale revision、错误 nonce、foreign Session、重复 action、执行中 dispose、
+  timeout 和 cancellation 的故障注入均产生确定性结果，且不遗留 control lease；
+- 不提供 evidence tools 的测试 Editor 仍可正常打开、更新和恢复，Harness 不注入
+  虚假的通用截图、日志或玩家操作能力；
+- Prompt 在 fresh Session 中只出现一次；MCP 重连不重复，Prompt revision 更新在
+  下一 Agent step 生效，Server 卸载后不再出现；
+- 可并行场景中先产生测试清单和风险/覆盖分析，再执行测试和取证，最后由未参与
+  修改与执行的 Agent 独立评分；并发分析 Agent 不写 Workspace；
+- 评分覆盖正确性、覆盖率、回归风险控制和可复现性；低于 85 分时只进行一次
+  修正复测，第二轮仍未达标时保留 evidence 并如实报告未通过；
+- SubAgent 或某项 Runtime Harness tool 不可用时，Prompt 不产生不存在的 tool
+  call，不伪造 evidence，也不阻断其余可执行的修改与人工验收；
+- 使用不支持图像输入的模型运行 Interactive Pool 验收时，Agent 不解释截图，
+  而是向用户给出明确操作与观察目标并等待输入；收到反馈前不启动视觉评分或
+  声称自动视觉验证通过；
+- 每项验收记录 Harness Session、Editor Instance、project revision、mutation、
+  build 和 Runtime identity；使用取证工具的项目额外记录 tool call、action trace、
+  `evidenceId`、图片 digest、日志 cursor、Prompt hash 和每轮评分，并保留
+  reload/reconnect 故障注入证据。
+
+非目标：
+
+- 不实现 Google Docs 式多人实时文本合并；
+- 不允许 AI 生成代码直接注入 Harness Host；
+- 不在本阶段扩展 M9 的大型资产、post-processing 或新 dependency profile；
+- 不保证所有第三方库对象都自动获得可视化 Inspector。
+- 不把 Three.js Runtime Harness tools 提升为所有 Editor 的公共接口或完成门禁；
+- 不提供浏览器级自动化、页面导航、Host DOM 控制、跨 iframe 观察或操作系统输入。
+
+产物：`docs/specs/editor-continuity.md`、`reports/M8.1-validation.md`、
+Editor Instance 状态迁移 trace、20 次连续修改 GIF、Session reload 与 MCP Server
+restart 故障注入报告、Interactive Pool action trace、Runtime 截图和日志 evidence、
+Prompt 注入/重连 trace 以及两轮评分记录。
+
+准入：M8 验收并原子提交后才能实施 M8.1；M8.1 验收并原子提交前不得进入 M9。
 
 ### M9：高级 Pipeline 与大型本地资产
 

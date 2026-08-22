@@ -1,0 +1,300 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m8_frost",
+          "name": "mcp__threejs__open_editor",
+          "arguments": "{\"projectPath\":\"threejs-temporal-surfaces/touch-history-frost\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已通过 Three.js MCP App 打开 Touch-History Frost。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "已通过 Three.js MCP App 打开 Touch-History Frost。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m8_pool",
+          "name": "mcp__threejs__open_editor",
+          "arguments": "{\"projectPath\":\"threejs-water-optics/interactive-pool-volume\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已通过 Three.js MCP App 打开 Interactive Pool Volume。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "已通过 Three.js MCP App 打开 Interactive Pool Volume。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m8_read_source",
+          "name": "mcp__threejs__read_project_files",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"files\":[{\"path\":\"dev/example-gallery/examples/threejs-water-optics/interactive-pool-volume/scene.js\"}]}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m8_apply_source",
+          "name": "mcp__threejs__apply_project_files",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"baseRevision\":\"{{fromRequest:baseRevision=([0-9a-f]{64})}}\",\"changes\":[{\"type\":\"write\",\"path\":\"dev/example-gallery/examples/threejs-water-optics/interactive-pool-volume/scene.js\",\"text\":\"{{fromRequest:(import \\* as THREE[\\s\\S]*?damping: )0\\.995,}}0.992,{{fromRequest:damping: 0\\.995,([\\s\\S]*?\\\\n\\};\\\\n)\"\\}\\]}}\"}]}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m8_build_source",
+          "name": "mcp__threejs__build_project",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"revision\":\"{{fromRequest:at revision ([0-9a-f]{64})}}\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m8_check_source",
+          "name": "mcp__threejs__check_project",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已读取并修复波纹衰减参数，构建与工程检查均已完成。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "已读取并修复波纹衰减参数，构建与工程检查均已完成。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m8_check_runtime",
+          "name": "mcp__threejs__check_project",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "最终运行诊断已绑定当前 revision 和 run ID。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "最终运行诊断已绑定当前 revision 和 run ID。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

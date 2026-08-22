@@ -65,7 +65,11 @@ const BUILD_RESOURCE_TEMPLATE =
 const DSH_WORKSPACE_META_KEY = 'ai.deepseek.dsh/workspace'
 const MAX_RUNTIME_EDITOR_OBJECTS = 2_048
 const CSP = {
-  connectDomains: [] as string[],
+  connectDomains: [
+    // #region debug-point H1,H2,H4:debug-server-csp
+    'http://127.0.0.1:7778',
+    // #endregion
+  ] as string[],
   resourceDomains: [] as string[],
   frameDomains: [] as string[],
   baseUriDomains: [] as string[],
@@ -248,6 +252,7 @@ const runtimeEditorObjectSchema = editorObjectSchema.extend({
 })
 const runtimeEditorSceneSchema = z.object({
   schemaVersion: z.literal(1),
+  runId: z.string().uuid(),
   objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
 })
 const editorChangeSchema = z.object({
@@ -1228,7 +1233,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'open_editor', {
     title: 'Open Three.js editor',
     description:
-      'Opens an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath. A successful call completes an open request; do not inspect or build unless the user explicitly asks. Never compile or serve project HTML as a fallback.',
+      'Opens an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath. apply_project_files does not create an MCP App card, so call open_editor({ projectId }) after using it when the updated editor should appear in the current turn. A successful call completes an open request; do not inspect or build unless the user explicitly asks. Never compile or serve project HTML as a fallback.',
     inputSchema: {
       projectId: projectIdSchema.optional(),
       projectPath: sessionProjectPathSchema.optional(),
@@ -1343,7 +1348,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     }
     const scriptError = syntaxError(snapshot.project.script.source)
     const [diagnostics, assets] = await Promise.all([
-      workspace === undefined ? store.readDiagnostics(projectId) : undefined,
+      workspace === undefined
+        ? store.readDiagnostics(projectId)
+        : workspaces.readDiagnostics(projectId),
       workspace === undefined ? store.listAssets(projectId) : [],
     ])
     const detail = {
@@ -1371,12 +1378,68 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     )
   })
 
+  registerAppTool(server, 'register_runtime_run', {
+    title: 'Register Three.js Runtime run',
+    description: 'Registers the active Runtime identity for one exact Workspace revision.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      runId: z.string().uuid(),
+      previousRevision: revisionSchema.optional(),
+    },
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      runId: z.string().uuid(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, revision, runId, previousRevision }, { signal }) => {
+    await workspaces.registerRuntimeRun(
+      projectId,
+      revision,
+      runId,
+      previousRevision,
+      signal,
+    )
+    return textResult(`Registered Runtime run ${runId}.`, {
+      projectId,
+      revision,
+      runId,
+    })
+  })
+
+  registerAppTool(server, 'release_runtime_run', {
+    title: 'Release Three.js Runtime run',
+    description: 'Releases one exact active Runtime identity during cancellation or teardown.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      runId: z.string().uuid(),
+    },
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      runId: z.string().uuid(),
+      released: z.boolean(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, revision, runId }) => {
+    const released = await workspaces.releaseRuntimeRun(projectId, revision, runId)
+    return textResult(`${released ? 'Released' : 'Ignored stale'} Runtime run ${runId}.`, {
+      projectId,
+      revision,
+      runId,
+      released,
+    })
+  })
+
   registerAppTool(server, 'report_editor_scene', {
     title: 'Report Three.js Runtime editor scene',
     description: 'Records the editable Runtime object catalog for one exact Workspace revision.',
     inputSchema: {
       projectId: projectIdSchema,
       revision: revisionSchema,
+      runId: z.string().uuid(),
       objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
     },
     outputSchema: z.object({
@@ -1385,12 +1448,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       objects: z.number().int().nonnegative(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, revision, objects }) => {
+  }, async ({ projectId, revision, runId, objects }) => {
     const document = runtimeEditorSceneSchema.parse({
       schemaVersion: 1,
+      runId,
       objects,
     })
-    await workspaces.reportEditorScene(projectId, revision, document)
+    await workspaces.reportEditorScene(projectId, revision, document, runId)
     return textResult(`Recorded ${objects.length} Runtime editor objects.`, {
       projectId,
       revision,
@@ -1447,6 +1511,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       baseRevision: revisionSchema,
+      runId: z.string().uuid().optional(),
       source: z.enum(['human', 'ai']).default('ai'),
       operations: z.array(editorCommandSchema).min(1).max(50),
     },
@@ -1461,7 +1526,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       currentRevision: revisionSchema.optional(),
     }),
     _meta: { ui: { visibility: ['model', 'app'] } },
-  }, async ({ projectId, baseRevision, source, operations }) => {
+  }, async ({ projectId, baseRevision, runId, source, operations }, { signal }) => {
     try {
       const workspace = await loadWorkspace(projectId)
       const snapshot = workspace ?? await store.load(projectId)
@@ -1474,13 +1539,21 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         applied = applyEditorCommands(snapshot.project, operations)
         summary = await store.push(projectId, baseRevision, applied.project)
       } else {
+        if (source === 'human' && runId === undefined) {
+          throw new Error('Human Workspace editor commands require a Runtime runId')
+        }
         const reportedDocument = await workspaces.readEditorScene(projectId, baseRevision)
         if (reportedDocument === undefined) {
+          if (runId !== undefined) {
+            throw new Error('Runtime editor scene is unavailable for this run')
+          }
           applied = applyEditorCommands(snapshot.project, operations)
           summary = await workspaces.apply(
             projectId,
             baseRevision,
             workspaceProjectChanges(applied.project),
+            undefined,
+            signal,
           )
           return textResult(
             `Applied official Three.js Editor commands to ${projectId}: `
@@ -1496,6 +1569,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
           )
         }
         const reported = runtimeEditorSceneSchema.parse(reportedDocument)
+        if (runId !== undefined && runId !== reported.runId) {
+          throw new Error('Runtime editor scene is unavailable for this run')
+        }
         applied = applyEditorCommands(
           editorProjectFromSnapshots(
             snapshot.project,
@@ -1531,30 +1607,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
           type: 'write',
           path: WORKSPACE_EDITOR_STATE_PATH,
           text: `${JSON.stringify(nextState, null, 2)}\n`,
-        }])
-        const inspected = new Map(
-          inspectOfficialEditor(applied.project).map(object => [object.uuid, object]),
-        )
-        const carried = reported.objects.map(object => {
-          const updated = inspected.get(object.uuid)
-          if (updated === undefined) {
-            throw new Error(`official Editor omitted Runtime object ${object.uuid}`)
-          }
-          return {
-            ...object,
-            name: updated.name,
-            visible: updated.visible,
-            position: updated.position,
-            rotationDegrees: updated.rotationDegrees,
-            scale: updated.scale,
-            commands: updated.commands,
-            ...updated.color === undefined ? {} : { color: updated.color },
-          }
-        })
-        await workspaces.reportEditorScene(projectId, summary.revision, {
-          schemaVersion: 1,
-          objects: carried,
-        })
+        }], reported.runId, signal)
       }
       return textResult(
         `Applied official Three.js Editor commands to ${projectId}: `
@@ -1631,7 +1684,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'apply_project_files', {
     title: 'Apply Three.js workspace file changes',
-    description: 'Atomically writes, moves, or deletes workspace files at one exact revision.',
+    description:
+      'Atomically writes, moves, or deletes workspace files at one exact revision. This tool does not create an MCP App card; call open_editor({ projectId }) afterward when the updated editor should appear in the current turn.',
     inputSchema: {
       projectId: projectIdSchema,
       baseRevision: revisionSchema,
@@ -1639,11 +1693,11 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     },
     outputSchema: workspaceConflictOutputSchema,
     _meta: { ui: { visibility: ['model', 'app'] } },
-  }, async ({ projectId, baseRevision, changes }) => {
+  }, async ({ projectId, baseRevision, changes }, { signal }) => {
     try {
       return summaryResult(
         'Updated Three.js workspace files',
-        await workspaces.apply(projectId, baseRevision, changes),
+        await workspaces.apply(projectId, baseRevision, changes, undefined, signal),
       )
     } catch (error) {
       if (!(error instanceof RevisionConflictError)) throw error
@@ -1735,6 +1789,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       warnings: z.array(z.string()),
       testedRevision: revisionSchema.optional(),
       testedAt: z.string().optional(),
+      runId: z.string().uuid().optional(),
     }),
     _meta: { ui: { visibility: ['model'] } },
   }, async ({ projectId }) => {
@@ -1772,9 +1827,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     }
     const playDiagnostics = workspace === undefined
       ? await store.readDiagnostics(projectId)
-      : undefined
+      : await workspaces.readDiagnostics(projectId)
     if (playDiagnostics === undefined) {
-      if (workspace === undefined) warnings.push('Play diagnostics have not been reported')
+      warnings.push('Play diagnostics have not been reported')
     } else {
       if (playDiagnostics.testedRevision !== snapshot.revision) {
         warnings.push(`Play diagnostics apply to older revision ${playDiagnostics.testedRevision}`)
@@ -1790,9 +1845,14 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         errors.push(`asset validation error: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    const diagnosticsProvenance = playDiagnostics === undefined
+      ? ''
+      : ` Diagnostics tested revision ${playDiagnostics.testedRevision}`
+        + `${playDiagnostics.runId === undefined ? '' : ` with run ${playDiagnostics.runId}`}.`
     return textResult(
       `Checked ${projectId} at revision ${snapshot.revision}: `
-      + `${String(errors.length)} errors, ${String(warnings.length)} warnings.`,
+      + `${String(errors.length)} errors, ${String(warnings.length)} warnings.`
+      + diagnosticsProvenance,
       {
         projectId,
         title: snapshot.title,
@@ -1802,6 +1862,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         ...playDiagnostics === undefined ? {} : {
           testedRevision: playDiagnostics.testedRevision,
           testedAt: playDiagnostics.updatedAt,
+          ...playDiagnostics.runId === undefined ? {} : { runId: playDiagnostics.runId },
         },
       },
     )
@@ -1859,7 +1920,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     },
     outputSchema: workspaceConflictOutputSchema,
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, baseRevision, project }) => {
+  }, async ({ projectId, baseRevision, project }, { signal }) => {
     try {
       const workspace = await loadWorkspace(projectId)
       return summaryResult(
@@ -1870,6 +1931,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             projectId,
             baseRevision,
             workspaceProjectChanges(project),
+            undefined,
+            signal,
           ),
       )
     } catch (error) {
@@ -1901,17 +1964,17 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       testedRevision: revisionSchema,
+      runId: z.string().uuid().optional(),
       errors: z.array(z.string().min(1).max(2_000)).max(20),
       warnings: z.array(z.string().min(1).max(2_000)).max(20),
     },
     outputSchema: diagnosticsSchema,
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, testedRevision, errors, warnings }) => {
-    const diagnostics = await store.reportDiagnostics(
-      projectId,
-      testedRevision,
-      errors,
-      warnings,
+  }, async ({ projectId, testedRevision, runId, errors, warnings }) => {
+    const diagnostics = await (
+      await loadWorkspace(projectId) === undefined
+        ? store.reportDiagnostics(projectId, testedRevision, errors, warnings, runId)
+        : workspaces.reportDiagnostics(projectId, testedRevision, errors, warnings, runId)
     )
     return textResult(
       `Recorded Play diagnostics for ${projectId} at ${testedRevision.slice(0, 12)}.`,

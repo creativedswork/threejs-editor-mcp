@@ -46,6 +46,8 @@
     "test:e2e:m6": "node tests/m6-browser.mjs",
     "test:e2e:m7": "node tests/m7-browser.mjs",
     "test:e2e:m7-gallery": "node tests/m7-gallery-browser.mjs",
+    "test:e2e:m8": "node tests/m8-browser.mjs",
+    "test:corpus:m8": "node tests/m8-corpus-build.mjs",
     "check:upstream": "node scripts/sync-three-editor.mjs",
     "test:pack": "pnpm run build && node tests/packed-install.mjs",
     "check": "pnpm run check:upstream && pnpm run typecheck && pnpm run test",
@@ -62,13 +64,13 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "esbuild": "0.25.3",
     "three": "0.185.1",
+    "typescript": "6.0.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "22.20.1",
     "@types/three": "0.185.4",
     "playwright": "1.61.1",
-    "tsdown": "0.22.14",
-    "typescript": "6.0.3"
+    "tsdown": "0.22.14"
   }
 }

@@ -21,6 +21,10 @@
       "threejs-volumetric-clouds/weather-volume-clouds",
       "threejs-procedural-vfx/volumetric-fluid-fire",
       "threejs-procedural-vegetation/gpu-culled-flower-field"
+    ],
+    "m8Cases": [
+      "threejs-temporal-surfaces/touch-history-frost",
+      "threejs-water-optics/interactive-pool-volume"
     ]
   },
   "m5Fixtures": {

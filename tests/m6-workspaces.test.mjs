@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import {
   copyFile,
+  link,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -15,10 +18,15 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import {
+  runtimeLockPathForWorkspace,
+  withRuntimeLock,
+} from '../src/runtime-lock.ts'
+import { replaceFileBound } from '../src/workspace-io.ts'
 
 const serverPath = fileURLToPath(new URL('../dist/server.js', import.meta.url))
 
-async function connect(root, allowlistedRoot, workspace) {
+async function connect(root, allowlistedRoot, workspace, projectId = 'linked-game') {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [
@@ -28,7 +36,7 @@ async function connect(root, allowlistedRoot, workspace) {
       '--workspace-root',
       allowlistedRoot,
       '--workspace',
-      `linked-game=${workspace}`,
+      `${projectId}=${workspace}`,
     ],
   })
   const client = new Client({
@@ -96,6 +104,410 @@ test('M6.1 opens the current DSH workspace without a model-visible path', async 
     await client.close()
     await rm(root, { recursive: true, force: true })
     await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('M8 rejects symlinked Workspace metadata without writing outside the root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-projects-'))
+  const allowlistedRoot = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-workspaces-'))
+  const outside = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-outside-'))
+  const workspace = join(allowlistedRoot, 'linked-game')
+  await mkdir(join(workspace, 'src'), { recursive: true })
+  await writeFile(join(workspace, 'package.json'), JSON.stringify({
+    name: 'linked-game',
+    private: true,
+    type: 'module',
+    dependencies: { three: '0.185.1' },
+  }, null, 2))
+  await writeFile(join(workspace, 'src', 'main.js'), 'export default {}\n')
+  await symlink(outside, join(workspace, '.threejs-editor'))
+  const client = await connect(root, allowlistedRoot, workspace)
+  try {
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'linked-game' },
+    })
+    assert.equal(opened.isError, true)
+    assert.match(opened.content[0].text, /workspace parent is not a real directory/)
+    assert.deepEqual(await readdir(outside), [])
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(allowlistedRoot, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('M8 does not release Runtime metadata through a symlinked parent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-projects-'))
+  const allowlistedRoot = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-workspaces-'))
+  const outside = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-outside-'))
+  const workspace = join(allowlistedRoot, 'linked-game')
+  await mkdir(join(workspace, 'src'), { recursive: true })
+  await writeFile(join(workspace, 'package.json'), JSON.stringify({
+    name: 'linked-game',
+    private: true,
+    type: 'module',
+    dependencies: { three: '0.185.1' },
+  }, null, 2))
+  await writeFile(join(workspace, 'src', 'main.js'), 'export default {}\n')
+  const client = await connect(root, allowlistedRoot, workspace)
+  try {
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'linked-game' },
+    })
+    const runId = '55555555-6666-4777-8888-999999999999'
+    const registered = await client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId,
+      },
+    })
+    assert.equal(registered.isError, undefined)
+
+    const diagnostics = join(workspace, '.threejs-editor', 'diagnostics')
+    const externalDiagnostics = join(outside, 'diagnostics')
+    await rename(diagnostics, externalDiagnostics)
+    await symlink(externalDiagnostics, diagnostics)
+    const activePath = join(externalDiagnostics, 'active-run.json')
+    const before = await readFile(activePath)
+
+    const released = await client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId,
+      },
+    })
+    assert.equal(released.isError, true)
+    assert.match(released.content[0].text, /workspace metadata is not a regular file/)
+    assert.deepEqual(await readFile(activePath), before)
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(allowlistedRoot, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('M8 replaces Runtime tombstones without truncating external hard links', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-projects-'))
+  const allowlistedRoot = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-workspaces-'))
+  const outside = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-outside-'))
+  const workspace = join(allowlistedRoot, 'linked-game')
+  await mkdir(join(workspace, 'src'), { recursive: true })
+  await writeFile(join(workspace, 'package.json'), JSON.stringify({
+    name: 'linked-game',
+    private: true,
+    type: 'module',
+    dependencies: { three: '0.185.1' },
+  }, null, 2))
+  await writeFile(join(workspace, 'src', 'main.js'), 'export default {}\n')
+  const client = await connect(root, allowlistedRoot, workspace)
+  try {
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'linked-game' },
+    })
+    const runId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    await client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId,
+      },
+    })
+    const activePath = join(
+      workspace,
+      '.threejs-editor',
+      'diagnostics',
+      'active-run.json',
+    )
+    const externalPath = join(outside, 'active-run.json')
+    await rename(activePath, externalPath)
+    await link(externalPath, activePath)
+    const before = await readFile(externalPath)
+
+    const released = await client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId,
+      },
+    })
+    assert.equal(released.structuredContent.released, true)
+    assert.equal((await readFile(activePath)).length, 0)
+    assert.deepEqual(await readFile(externalPath), before)
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(allowlistedRoot, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('M8 binds atomic replacement before a Workspace parent is swapped', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'threejs-editor-m8-bound-root-')))
+  const outside = await realpath(await mkdtemp(join(tmpdir(), 'threejs-editor-m8-bound-outside-')))
+  const parent = join(root, 'src')
+  const movedParent = join(outside, 'moved-src')
+  const replacementParent = join(outside, 'replacement-src')
+  await mkdir(parent)
+  await mkdir(replacementParent)
+  await writeFile(join(parent, 'main.js'), 'original\n')
+  await writeFile(join(replacementParent, 'main.js'), 'external\n')
+
+  try {
+    await replaceFileBound(root, join(parent, 'main.js'), 'updated\n', {
+      onBound: async () => {
+        await rename(parent, movedParent)
+        await symlink(replacementParent, parent)
+      },
+    })
+    assert.equal(await readFile(join(movedParent, 'main.js'), 'utf8'), 'updated\n')
+    assert.equal(await readFile(join(replacementParent, 'main.js'), 'utf8'), 'external\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('M8 serializes aliases of one Workspace across Server roots', async () => {
+  const rootA = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-projects-a-'))
+  const rootB = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-projects-b-'))
+  const allowlistedRoot = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-workspaces-'))
+  const workspace = join(allowlistedRoot, 'shared-game')
+  await mkdir(join(workspace, 'src'), { recursive: true })
+  await writeFile(join(workspace, 'package.json'), JSON.stringify({
+    name: 'shared-game',
+    private: true,
+    type: 'module',
+    dependencies: { three: '0.185.1' },
+  }, null, 2))
+  await writeFile(join(workspace, 'src', 'main.js'), 'export const winner = "none"\n')
+  const clientA = await connect(rootA, allowlistedRoot, workspace, 'alias-a')
+  const clientB = await connect(rootB, allowlistedRoot, workspace, 'alias-b')
+  try {
+    const [openedA, openedB] = await Promise.all([
+      clientA.callTool({ name: 'open_editor', arguments: { projectId: 'alias-a' } }),
+      clientB.callTool({ name: 'open_editor', arguments: { projectId: 'alias-b' } }),
+    ])
+    assert.equal(openedA.isError, undefined)
+    assert.equal(openedB.isError, undefined)
+    assert.equal(openedA.structuredContent.revision, openedB.structuredContent.revision)
+    const baseRevision = openedA.structuredContent.revision
+    let releaseLock
+    let notifyLock
+    const lockHeld = new Promise(resolve => {
+      notifyLock = resolve
+    })
+    const lock = withRuntimeLock(
+      runtimeLockPathForWorkspace(await realpath(workspace)),
+      async () => {
+        notifyLock()
+        await new Promise(resolve => {
+          releaseLock = resolve
+        })
+      },
+    )
+    await lockHeld
+    let settled = 0
+    const edits = [
+      clientA.callTool({
+        name: 'apply_project_files',
+        arguments: {
+          projectId: 'alias-a',
+          baseRevision,
+          changes: [{
+            type: 'write',
+            path: 'src/main.js',
+            text: 'export const winner = "a"\n',
+          }],
+        },
+      }),
+      clientB.callTool({
+        name: 'apply_project_files',
+        arguments: {
+          projectId: 'alias-b',
+          baseRevision,
+          changes: [{
+            type: 'write',
+            path: 'src/main.js',
+            text: 'export const winner = "b"\n',
+          }],
+        },
+      }),
+    ].map(promise => promise.finally(() => {
+      settled += 1
+    }))
+    await new Promise(resolve => setTimeout(resolve, 75))
+    assert.equal(settled, 0)
+    releaseLock()
+    const results = await Promise.all(edits)
+    await lock
+    assert.equal(results.filter(result => result.isError === undefined).length, 1)
+    assert.equal(results.filter(result => result.isError === true).length, 1)
+  } finally {
+    await clientA.close()
+    await clientB.close()
+    await rm(rootA, { recursive: true, force: true })
+    await rm(rootB, { recursive: true, force: true })
+    await rm(allowlistedRoot, { recursive: true, force: true })
+  }
+})
+
+test('M8 does not persist a Runtime registration cancelled while waiting for its lock', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-projects-'))
+  const allowlistedRoot = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-workspaces-'))
+  const workspace = join(allowlistedRoot, 'linked-game')
+  await mkdir(join(workspace, 'src'), { recursive: true })
+  await writeFile(join(workspace, 'package.json'), JSON.stringify({
+    name: 'linked-game',
+    private: true,
+    type: 'module',
+    dependencies: { three: '0.185.1' },
+  }, null, 2))
+  await writeFile(join(workspace, 'src', 'main.js'), 'export default {}\n')
+  const client = await connect(root, allowlistedRoot, workspace)
+  try {
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'linked-game' },
+    })
+    const previousRunId = '66666666-7777-4888-8999-aaaaaaaaaaaa'
+    await client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId: previousRunId,
+      },
+    })
+    const runId = '77777777-8888-4999-8aaa-bbbbbbbbbbbb'
+    let releaseLock
+    let notifyLock
+    const lockHeld = new Promise(resolve => {
+      notifyLock = resolve
+    })
+    const lock = withRuntimeLock(
+      runtimeLockPathForWorkspace(await realpath(workspace)),
+      async () => {
+        notifyLock()
+        await new Promise(resolve => {
+          releaseLock = resolve
+        })
+      },
+    )
+    await lockHeld
+    const controller = new AbortController()
+    const registration = client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId,
+      },
+    }, undefined, { signal: controller.signal })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    controller.abort()
+    await assert.rejects(registration, /abort/i)
+    releaseLock()
+    await lock
+    const released = await client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId,
+      },
+    })
+    assert.equal(released.structuredContent.released, false)
+    const previousReleased = await client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: 'linked-game',
+        revision: opened.structuredContent.revision,
+        runId: previousRunId,
+      },
+    })
+    assert.equal(previousReleased.structuredContent.released, true)
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(allowlistedRoot, { recursive: true, force: true })
+  }
+})
+
+test('M8 does not commit Workspace writes cancelled while waiting for its lock', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-projects-'))
+  const allowlistedRoot = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-workspaces-'))
+  const workspace = join(allowlistedRoot, 'linked-game')
+  await mkdir(join(workspace, 'src'), { recursive: true })
+  await writeFile(join(workspace, 'package.json'), JSON.stringify({
+    name: 'linked-game',
+    private: true,
+    type: 'module',
+    dependencies: { three: '0.185.1' },
+  }, null, 2))
+  await writeFile(join(workspace, 'src', 'main.js'), 'export const value = "before"\n')
+  const client = await connect(root, allowlistedRoot, workspace)
+  try {
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'linked-game' },
+    })
+    let releaseLock
+    let notifyLock
+    const lockHeld = new Promise(resolve => {
+      notifyLock = resolve
+    })
+    const lock = withRuntimeLock(
+      runtimeLockPathForWorkspace(await realpath(workspace)),
+      async () => {
+        notifyLock()
+        await new Promise(resolve => {
+          releaseLock = resolve
+        })
+      },
+    )
+    await lockHeld
+    const controller = new AbortController()
+    const update = client.callTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId: 'linked-game',
+        baseRevision: opened.structuredContent.revision,
+        changes: [{
+          type: 'write',
+          path: 'src/main.js',
+          text: 'export const value = "after"\n',
+        }],
+      },
+    }, undefined, { signal: controller.signal })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    controller.abort()
+    await assert.rejects(update, /abort/i)
+    releaseLock()
+    await lock
+
+    const file = await client.callTool({
+      name: 'read_project_files',
+      arguments: {
+        projectId: 'linked-game',
+        files: [{ path: 'src/main.js' }],
+      },
+    })
+    assert.equal(file.structuredContent.files[0].text, 'export const value = "before"\n')
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(allowlistedRoot, { recursive: true, force: true })
   }
 })
 
@@ -211,7 +623,23 @@ test('M6 workspaces preserve local files and commit revisioned atomic changes', 
       [1, 2, 3],
     )
 
-    const humanEdit = await client.callTool({
+    let releaseWorkspaceLock
+    let notifyWorkspaceLock
+    const workspaceLockHeld = new Promise(resolve => {
+      notifyWorkspaceLock = resolve
+    })
+    const workspaceLock = withRuntimeLock(
+      runtimeLockPathForWorkspace(await realpath(workspace)),
+      async () => {
+        notifyWorkspaceLock()
+        await new Promise(resolve => {
+          releaseWorkspaceLock = resolve
+        })
+      },
+    )
+    await workspaceLockHeld
+    let humanEditSettled = false
+    const humanEditPromise = client.callTool({
       name: 'apply_project_files',
       arguments: {
         projectId: 'linked-game',
@@ -229,7 +657,14 @@ test('M6 workspaces preserve local files and commit revisioned atomic changes', 
           },
         ],
       },
+    }).finally(() => {
+      humanEditSettled = true
     })
+    await new Promise(resolve => setTimeout(resolve, 75))
+    assert.equal(humanEditSettled, false)
+    releaseWorkspaceLock()
+    const humanEdit = await humanEditPromise
+    await workspaceLock
     assert.equal(humanEdit.isError, undefined)
     const humanRevision = humanEdit.structuredContent.revision
     assert.equal(await readFile(join(workspace, 'src', 'main.js'), 'utf8'), 'const linkedMarker = "human"\n')

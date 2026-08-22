@@ -93,6 +93,8 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       'create_workspace',
       'open_editor',
       'inspect_project',
+      'register_runtime_run',
+      'release_runtime_run',
       'report_editor_scene',
       'inspect_editor',
       'apply_editor_commands',
@@ -124,8 +126,14 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       resourceUri: 'ui://threejs-editor/app',
       visibility: ['model'],
     })
+    assert.match(
+      byName.get('open_editor')?.description ?? '',
+      /apply_project_files does not create an MCP App card.*open_editor\(\{ projectId \}\)/,
+    )
     assert.deepEqual(byName.get('inspect_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('build_project')?._meta?.ui?.visibility, ['model', 'app'])
+    assert.deepEqual(byName.get('register_runtime_run')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(byName.get('release_runtime_run')?._meta?.ui?.visibility, ['app'])
     assert.deepEqual(byName.get('report_editor_scene')?._meta?.ui?.visibility, ['app'])
     assert.deepEqual(
       byName.get('inspect_editor')?._meta?.ui?.visibility,
@@ -138,6 +146,10 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.deepEqual(byName.get('read_project_files')?._meta?.ui?.visibility, ['model', 'app'])
     assert.deepEqual(byName.get('search_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('apply_project_files')?._meta?.ui?.visibility, ['model', 'app'])
+    assert.match(
+      byName.get('apply_project_files')?.description ?? '',
+      /does not create an MCP App card.*open_editor\(\{ projectId \}\)/,
+    )
     assert.deepEqual(byName.get('apply_scene_changes')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('check_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('pull_project')?._meta?.ui?.visibility, ['app'])
@@ -684,7 +696,11 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.equal(content?.text?.includes('<script src='), false)
     assert.equal(content?.text?.includes('<link '), false)
     assert.deepEqual(content?._meta?.ui?.csp, {
-      connectDomains: [],
+      connectDomains: [
+        // #region debug-point H1,H2,H4:debug-server-csp
+        'http://127.0.0.1:7778',
+        // #endregion
+      ],
       resourceDomains: [],
       frameDomains: [],
       baseUriDomains: [],

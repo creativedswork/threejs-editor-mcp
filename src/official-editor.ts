@@ -155,7 +155,7 @@ export function editorProjectFromSnapshots(
       ? new THREE.Mesh(
           new THREE.BufferGeometry(),
           snapshot.color === undefined
-            ? new THREE.Material()
+            ? new THREE.MeshNormalMaterial()
             : new THREE.MeshStandardMaterial({ color: snapshot.color }),
         )
       : new THREE.Group()

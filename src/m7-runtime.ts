@@ -14,8 +14,10 @@ export interface WorkspaceEditorState {
 
 export interface M7RuntimeEvent {
   channel: typeof M7_RUNTIME_CHANNEL
+  projectId: string
   runId: string
   nonce: string
+  revision: string
   type: string
   data?: Record<string, unknown>
 }
@@ -92,14 +94,202 @@ export function m7BootstrapHtml(): string {
     const shouldPickAfterPointerGesture = ${shouldPickAfterPointerGesture.toString()}
     const canvas = document.querySelector('canvas')
     let active
+    let starting
+    let lastDisposed
     let bundleUrl
+    let eventProjectId
+    let eventRevision
 
-    const emit = (runId, nonce, type, data = {}) => {
-      window.parent.postMessage({ channel, runId, nonce, type, data }, '*')
+    const emit = (
+      runId,
+      nonce,
+      type,
+      data = {},
+      revision = eventRevision,
+      projectId = eventProjectId,
+    ) => {
+      window.parent.postMessage({
+        channel,
+        projectId,
+        runId,
+        nonce,
+        revision,
+        type,
+        data,
+      }, '*')
     }
     const message = error => error instanceof Error
       ? error.stack || error.message
       : String(error)
+    const runtimeInputEvents = new Set([
+      'click',
+      'contextmenu',
+      'dblclick',
+      'gotpointercapture',
+      'lostpointercapture',
+      'mousedown',
+      'mousemove',
+      'mouseup',
+      'pointercancel',
+      'pointerdown',
+      'pointerenter',
+      'pointerleave',
+      'pointermove',
+      'pointerout',
+      'pointerover',
+      'pointerrawupdate',
+      'pointerup',
+      'touchcancel',
+      'touchend',
+      'touchmove',
+      'touchstart',
+      'wheel',
+    ])
+    const listenerCapture = options => typeof options === 'boolean'
+      ? options
+      : options?.capture === true
+    const callListener = (listener, event, target) => typeof listener === 'function'
+      ? listener.call(target, event)
+      : listener.handleEvent(event)
+    const createRuntimeInputEvent = (current, event) => new Proxy(event, {
+      get(target, property) {
+        if (property === 'currentTarget') return current.runtimeCanvas
+        if (property === 'target' || property === 'srcElement') {
+          return Reflect.get(target, property, target) === canvas
+            ? current.runtimeCanvas
+            : Reflect.get(target, property, target)
+        }
+        if (property === 'composedPath') {
+          return () => target.composedPath().map(item => (
+            item === canvas ? current.runtimeCanvas : item
+          ))
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const createRuntimeCanvas = current => new Proxy(canvas, {
+      get(target, property) {
+        if (property === 'addEventListener') {
+          return (type, listener, options) => {
+            if (!runtimeInputEvents.has(type) || listener == null) {
+              target.addEventListener(type, listener, options)
+              return
+            }
+            const capture = listenerCapture(options)
+            if (current.runtimeInputListeners.some(record => (
+              record.type === type
+              && record.listener === listener
+              && record.capture === capture
+            ))) return
+            const once = typeof options === 'object' && options?.once === true
+            const signal = typeof options === 'object' ? options?.signal : undefined
+            if (signal?.aborted) return
+            const targetOptions = typeof options === 'boolean'
+              ? options
+              : { ...options, once: false, signal: undefined }
+            let record
+            const remove = () => {
+              const index = current.runtimeInputListeners.indexOf(record)
+              if (index !== -1) current.runtimeInputListeners.splice(index, 1)
+              target.removeEventListener(type, wrapped, capture)
+              signal?.removeEventListener('abort', remove)
+            }
+            const wrapped = event => {
+              if (!current.stopped && current.mode === 'run') {
+                current.runtimeInputEvents.set(
+                  type,
+                  (current.runtimeInputEvents.get(type) ?? 0) + 1,
+                )
+                try {
+                  const runtimeEvent = createRuntimeInputEvent(current, event)
+                  current.runtimeEventFacade = runtimeEvent.currentTarget === current.runtimeCanvas
+                    && runtimeEvent.target === current.runtimeCanvas
+                  callListener(listener, runtimeEvent, current.runtimeCanvas)
+                } finally {
+                  if (once) remove()
+                }
+              }
+            }
+            record = {
+              type,
+              listener,
+              capture,
+              options: targetOptions,
+              wrapped,
+              remove,
+            }
+            current.runtimeInputListeners.push(record)
+            target.addEventListener(type, wrapped, targetOptions)
+            signal?.addEventListener('abort', remove, { once: true })
+          }
+        }
+        if (property === 'removeEventListener') {
+          return (type, listener, options) => {
+            const capture = listenerCapture(options)
+            const index = current.runtimeInputListeners.findIndex(record => (
+              record.type === type
+              && record.listener === listener
+              && record.capture === capture
+            ))
+            if (index === -1) {
+              target.removeEventListener(type, listener, options)
+              return
+            }
+            current.runtimeInputListeners[index].remove()
+          }
+        }
+        if (property === 'setPointerCapture') {
+          return pointerId => {
+            if (current.mode !== 'run') return
+            target.setPointerCapture(pointerId)
+            current.runtimeCapturedPointers.add(pointerId)
+          }
+        }
+        if (property === 'releasePointerCapture') {
+          return pointerId => {
+            current.runtimeCapturedPointers.delete(pointerId)
+            if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId)
+          }
+        }
+        if (property === 'matches') {
+          return selector => selector === ':hover'
+            ? current.mode === 'run' && target.matches(selector)
+            : target.matches(selector)
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const createRuntimeRenderer = (renderer, runtimeCanvas) => new Proxy(renderer, {
+      get(target, property) {
+        if (property === 'domElement') return runtimeCanvas
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+      set(target, property, value) {
+        return Reflect.set(target, property, value, target)
+      },
+    })
+    const cancelRuntimeInput = current => {
+      if (current.mode !== 'run') return
+      for (const pointerId of [...current.runtimeCapturedPointers]) {
+        canvas.dispatchEvent(new PointerEvent('pointercancel', {
+          pointerId,
+          pointerType: 'touch',
+        }))
+        if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId)
+      }
+      current.runtimeCapturedPointers.clear()
+      canvas.dispatchEvent(new PointerEvent('pointerout', {
+        pointerId: -1,
+        pointerType: 'mouse',
+      }))
+    }
+    const disposeRuntimeCanvas = current => {
+      for (const record of [...current.runtimeInputListeners]) record.remove()
+      current.runtimeCapturedPointers.clear()
+    }
     const editableMaterial = object => {
       if (!object?.isMesh) return
       const material = Array.isArray(object.material) ? object.material[0] : object.material
@@ -147,7 +337,20 @@ export function m7BootstrapHtml(): string {
         ((1 - point.y) / 2) * canvas.clientHeight,
       ]
     }
-    const metrics = current => ({
+    const metrics = current => {
+      const drawingBufferSize = new current.THREE.Vector2()
+      current.renderer.getDrawingBufferSize(drawingBufferSize)
+      let gpuRenderer
+      let gpuRendererUnmasked = false
+      try {
+        const context = current.renderer.getContext?.()
+        const debug = context?.getExtension?.('WEBGL_debug_renderer_info')
+        if (debug) {
+          gpuRenderer = context.getParameter(debug.UNMASKED_RENDERER_WEBGL)
+          gpuRendererUnmasked = true
+        }
+      } catch {}
+      return {
       frame: current.frame,
       mode: current.mode,
       cameraPosition: current.camera.position.toArray(),
@@ -163,27 +366,44 @@ export function m7BootstrapHtml(): string {
       transformAxis: current.transform?.axis ?? null,
       transformDragging: current.transformDragging,
       lastPointerPick: current.lastPointerPick,
+      inputOwner: current.mode === 'run' ? 'runtime' : 'editor',
+      runtimeInputListeners: current.runtimeInputListeners.length,
+      runtimeInputEvents: Object.fromEntries(current.runtimeInputEvents),
+      runtimeEventFacade: current.runtimeEventFacade,
+      capturedPointers: current.runtimeCapturedPointers.size,
+      rendererCanvasFacade: current.runtimeRenderer.domElement !== canvas,
+      resizeCount: current.resizeCount,
+      devicePixelRatio: current.state.dpr,
+      clientSize: [canvas.clientWidth, canvas.clientHeight],
+      drawingBufferSize: drawingBufferSize.toArray(),
+      gpuTextures: current.renderer.info?.memory?.textures ?? 0,
+      gpuGeometries: current.renderer.info?.memory?.geometries ?? 0,
+      gpuPrograms: current.renderer.info?.programs?.length ?? 0,
       rendererCount: 1,
       secureContext: isSecureContext,
       webgpuApi: Boolean(navigator.gpu),
       rendererBackend:
         current.renderer.backend?.constructor?.name
         ?? current.renderer.constructor.name,
+      gpuRenderer,
+      gpuRendererUnmasked,
       draws: current.renderer.info?.render?.calls ?? 0,
       triangles: current.renderer.info?.render?.triangles ?? 0,
       ...(typeof current.example?.metrics === 'function'
         ? current.example.metrics()
         : {}),
-    })
+      }
+    }
     const resize = current => {
       const width = Math.max(1, canvas.clientWidth)
       const height = Math.max(1, canvas.clientHeight)
       const dpr = Math.min(devicePixelRatio || 1, 2)
-      const expectedWidth = Math.round(width * dpr)
-      const expectedHeight = Math.round(height * dpr)
+      current.state.dpr = dpr
+      const expectedWidth = Math.floor(width * dpr)
+      const expectedHeight = Math.floor(height * dpr)
       const size = new current.THREE.Vector2()
       current.renderer.getDrawingBufferSize(size)
-      if (size.x === expectedWidth && size.y === expectedHeight) return
+      if (size.x === expectedWidth && size.y === expectedHeight) return false
       current.renderer.setPixelRatio(dpr)
       current.renderer.setSize(width, height, false)
       if (current.camera.isPerspectiveCamera) {
@@ -197,6 +417,8 @@ export function m7BootstrapHtml(): string {
         bufferHeight: expectedHeight,
         dpr,
       })
+      current.resizeCount += 1
+      return true
     }
     const indexScene = current => {
       current.objects = new Map()
@@ -382,50 +604,154 @@ export function m7BootstrapHtml(): string {
           || left.offset - right.offset)
         .map(candidate => candidate.uuid)
     }
-    const setMode = (current, mode) => {
-      current.mode = mode === 'run' ? 'run' : 'edit'
+    const mutateBetweenFrames = (current, mutate) => {
+      const transition = async () => {
+        current.modeTransitioning = true
+        cancelAnimationFrame(current.animation)
+        try {
+          await current.framePromise
+          if (current.stopped) throw new Error('Runtime stopped before mutation')
+          return mutate()
+        } finally {
+          current.modeTransitioning = false
+          if (!current.stopped && current.renderFrame) {
+            current.animation = requestAnimationFrame(current.renderFrame)
+          }
+        }
+      }
+      const pending = current.modeTransitionPromise.then(transition, transition)
+      current.modeTransitionPromise = pending.catch(() => {})
+      return pending
+    }
+    const setMode = (current, mode) => mutateBetweenFrames(current, () => {
+      const nextMode = mode === 'run' ? 'run' : 'edit'
+      if (current.mode === 'run' && nextMode === 'edit') cancelRuntimeInput(current)
+      current.mode = nextMode
       current.state.paused = current.mode === 'edit'
       current.previous = performance.now()
-      current.transform.enabled = current.mode === 'edit'
-      current.transformHelper.visible = current.mode === 'edit'
-      if (current.mode === 'run') selectObject(current, undefined)
+      if (current.transform) current.transform.enabled = current.mode === 'edit'
+      if (current.transformHelper) current.transformHelper.visible = current.mode === 'edit'
+      if (current.mode === 'run') {
+        current.transform?.detach()
+      } else if (current.selected && current.transform) {
+        syncTransformPivot(current)
+        current.transform.attach(current.transformPivot)
+      }
       emit(current.runId, current.nonce, 'mode', { mode: current.mode })
+    })
+    const disposeCurrent = async current => {
+      let evidence = {}
+      const failures = []
+      const cleanup = callback => {
+        try {
+          callback()
+        } catch (error) {
+          failures.push(message(error))
+        }
+      }
+      if (current) {
+        cleanup(() => cancelAnimationFrame(current.animation))
+        cleanup(() => current.renderer.setAnimationLoop?.(null))
+        try {
+          cancelRuntimeInput(current)
+        } catch (error) {
+          failures.push(message(error))
+        }
+        current.stopped = true
+        try {
+          await current.framePromise
+        } catch (error) {
+          failures.push(message(error))
+        }
+        try {
+          await current.modeTransitionPromise
+        } catch (error) {
+          failures.push(message(error))
+        }
+        try {
+          await current.setupPromise
+        } catch {
+          // The start path owns setup failures; disposal only waits for settlement.
+        }
+        try {
+          evidence = metrics(current)
+        } catch (error) {
+          failures.push(message(error))
+        }
+        try {
+          await current.example?.dispose?.()
+        } catch (error) {
+          failures.push(message(error))
+        } finally {
+          const inputListenersAfterExampleDispose = current.runtimeInputListeners.length
+          cleanup(() => current.transform?.detach())
+          cleanup(() => current.transformHelper?.removeFromParent())
+          cleanup(() => current.transformPivot?.removeFromParent())
+          cleanup(() => current.transform?.dispose())
+          cleanup(() => disposeRuntimeCanvas(current))
+          cleanup(() => current.controls?.dispose())
+          cleanup(() => current.renderer.dispose())
+          evidence = {
+            ...evidence,
+            runId: current.runId,
+            inputListenersAfterExampleDispose,
+            runtimeInputListenersAfterDispose: current.runtimeInputListeners.length,
+            capturedPointersAfterDispose: current.runtimeCapturedPointers.size,
+            rendererDisposed: true,
+            ...(failures.length === 0 ? {} : { disposeError: failures.join('\\n') }),
+          }
+        }
+      }
+      if (bundleUrl) cleanup(() => URL.revokeObjectURL(bundleUrl))
+      bundleUrl = undefined
+      const disposeError = failures.length === 0 ? undefined : failures.join('\\n')
+      return { evidence, disposeError }
     }
     const dispose = async (runId, nonce, notify = true) => {
       const current = active
       active = undefined
+      const { evidence, disposeError } = await disposeCurrent(current)
       if (current) {
-        current.stopped = true
-        cancelAnimationFrame(current.animation)
-        current.renderer.setAnimationLoop?.(null)
-        current.transform.detach()
-        current.transformHelper.removeFromParent()
-        current.transformPivot?.removeFromParent()
-        current.transform.dispose()
-        await current.example?.dispose?.()
-        current.controls?.dispose()
-        current.renderer.dispose()
+        lastDisposed = {
+          projectId: current.projectId,
+          runId: current.runId,
+          nonce: current.nonce,
+          revision: current.revision,
+          evidence,
+        }
       }
-      if (bundleUrl) URL.revokeObjectURL(bundleUrl)
-      bundleUrl = undefined
-      if (notify) emit(runId, nonce, 'disposed', current ? metrics(current) : {})
+      if (disposeError) emit(runId, nonce, 'runtime-error', { message: disposeError })
+      if (notify) emit(runId, nonce, 'disposed', evidence)
     }
     const start = async request => {
       const { runId, nonce } = request
+      const pending = {
+        projectId: request.projectId,
+        runId,
+        nonce,
+        revision: request.revision,
+        stopRequested: false,
+      }
+      starting = pending
       await dispose(runId, nonce, false)
+      eventProjectId = request.projectId
+      eventRevision = request.revision
       let current
+      let renderer
       try {
         bundleUrl = URL.createObjectURL(new Blob(
           [request.bundle],
           { type: 'text/javascript' },
         ))
         const module = await import(bundleUrl)
+        if (pending.stopRequested) throw new Error('Runtime start cancelled')
         const {
           adapter,
           THREE,
           OrbitControls,
           TransformControls,
           editorState,
+          resolveAsset,
         } = module
         if (!adapter || typeof adapter.setup !== 'function') {
           throw new Error('Workspace entry must default-export an adapter with setup(context)')
@@ -441,10 +767,11 @@ export function m7BootstrapHtml(): string {
           preserveDrawingBuffer: true,
           ...(adapter.renderer?.options ?? {}),
         }
-        const renderer = backend === 'webgpu'
+        renderer = backend === 'webgpu'
           ? new THREE.WebGPURenderer(options)
           : new THREE.WebGLRenderer(options)
         if (typeof renderer.init === 'function') await renderer.init()
+        if (pending.stopRequested) throw new Error('Runtime start cancelled')
         renderer.outputColorSpace =
           adapter.renderer?.outputColorSpace ?? THREE.SRGBColorSpace
         renderer.toneMapping =
@@ -498,10 +825,13 @@ export function m7BootstrapHtml(): string {
         }
 
         current = {
+          projectId: request.projectId,
           runId,
           nonce,
+          revision: request.revision,
           THREE,
           renderer,
+          runtimeRenderer: undefined,
           scene,
           camera,
           controls,
@@ -513,6 +843,11 @@ export function m7BootstrapHtml(): string {
           transformMode: 'translate',
           transformDragging: false,
           pointerGesture: undefined,
+          runtimeInputListeners: [],
+          runtimeInputEvents: new Map(),
+          runtimeEventFacade: undefined,
+          runtimeCapturedPointers: new Set(),
+          runtimeCanvas: undefined,
           pickCycle: undefined,
           selected: undefined,
           objects: new Map(),
@@ -533,12 +868,23 @@ export function m7BootstrapHtml(): string {
           animation: 0,
           stopped: false,
           frameInProgress: false,
+          framePromise: Promise.resolve(),
+          modeTransitioning: false,
+          modeTransitionPromise: Promise.resolve(),
+          revisionTransition: undefined,
+          setupPromise: Promise.resolve(),
+          renderFrame: undefined,
+          needsInitialUpdate: true,
+          resizeCount: 0,
         }
+        const runtimeCanvas = createRuntimeCanvas(current)
+        current.runtimeCanvas = runtimeCanvas
+        current.runtimeRenderer = createRuntimeRenderer(renderer, runtimeCanvas)
         active = current
-        current.example = await adapter.setup({
+        current.setupPromise = Promise.resolve(adapter.setup({
           THREE,
-          canvas,
-          renderer,
+          canvas: runtimeCanvas,
+          renderer: current.runtimeRenderer,
           scene,
           camera,
           controls,
@@ -550,8 +896,18 @@ export function m7BootstrapHtml(): string {
             },
           },
           moduleUrl: new URL('workspace:///entry'),
-          resolveAsset(path) { return path },
-        }) ?? {}
+          resolveAsset,
+        }))
+          .then(example => {
+            current.example = example ?? {}
+          })
+        try {
+          await current.setupPromise
+        } catch (error) {
+          if (current.stopped) return
+          throw error
+        }
+        if (current.stopped || active !== current) return
         current.example.setDebugMode?.(current.state.debugMode)
         indexScene(current)
         for (const operation of editorState?.operations ?? []) {
@@ -594,70 +950,103 @@ export function m7BootstrapHtml(): string {
         })
         emit(runId, nonce, 'editor-scene', editorScene(current))
 
-        const render = async now => {
+        const render = now => {
           if (current.stopped || current.frameInProgress) return
           current.frameInProgress = true
-          try {
-            resize(current)
-            const rawDelta = Math.min((now - current.previous) / 1000, 0.1)
-            current.previous = now
-            const delta = current.mode === 'run'
-              ? rawDelta * current.state.timeScale
-              : 0
-            if (current.mode === 'run') {
-              current.elapsed += delta
-              await current.example.update?.({
-                delta,
-                rawDelta,
-                elapsed: current.elapsed,
-                state: current.state,
-                camera: current.camera,
-                controls: current.controls,
+          current.framePromise = (async () => {
+            try {
+              if (resize(current)) current.needsInitialUpdate = true
+              const rawDelta = Math.min((now - current.previous) / 1000, 0.1)
+              current.previous = now
+              const delta = current.mode === 'run'
+                ? rawDelta * current.state.timeScale
+                : 0
+              if (current.mode === 'run' || current.needsInitialUpdate) {
+                if (current.mode === 'run') current.elapsed += delta
+                await current.example.update?.({
+                  delta,
+                  rawDelta,
+                  elapsed: current.elapsed,
+                  state: current.state,
+                  camera: current.camera,
+                  controls: current.controls,
+                })
+                current.needsInitialUpdate = false
+              }
+              current.controls?.update()
+              if (current.example.render) {
+                await current.example.render({
+                  renderer: current.runtimeRenderer,
+                  scene: current.scene,
+                  camera: current.camera,
+                  elapsed: current.elapsed,
+                  delta,
+                  rawDelta,
+                  state: current.state,
+                })
+              } else if (typeof current.renderer.renderAsync === 'function') {
+                await current.renderer.renderAsync(current.scene, current.camera)
+              } else {
+                current.renderer.render(current.scene, current.camera)
+              }
+              current.frame += 1
+              if (current.pendingDebugMode !== undefined) {
+                emit(runId, nonce, 'debug-mode', {
+                  debugMode: current.pendingDebugMode,
+                  frame: current.frame,
+                })
+                current.pendingDebugMode = undefined
+              }
+              const evidence = metrics(current)
+              if (current.frame === 1) {
+                emit(runId, nonce, 'ready', { backend, ...evidence })
+              } else if (current.frame % 30 === 0) {
+                emit(runId, nonce, 'frame', evidence)
+                emit(runId, nonce, 'metrics', evidence)
+              }
+            } catch (error) {
+              current.stopped = true
+              emit(runId, nonce, 'runtime-error', {
+                message: message(error),
+                fatal: true,
               })
+            } finally {
+              current.frameInProgress = false
+              if (!current.stopped && !current.modeTransitioning) {
+                current.animation = requestAnimationFrame(render)
+              }
             }
-            current.controls?.update()
-            if (current.example.render) {
-              await current.example.render({
-                renderer: current.renderer,
-                scene: current.scene,
-                camera: current.camera,
-                elapsed: current.elapsed,
-                delta,
-                rawDelta,
-                state: current.state,
-              })
-            } else if (typeof current.renderer.renderAsync === 'function') {
-              await current.renderer.renderAsync(current.scene, current.camera)
-            } else {
-              current.renderer.render(current.scene, current.camera)
-            }
-            current.frame += 1
-            if (current.pendingDebugMode !== undefined) {
-              emit(runId, nonce, 'debug-mode', {
-                debugMode: current.pendingDebugMode,
-                frame: current.frame,
-              })
-              current.pendingDebugMode = undefined
-            }
-            const evidence = metrics(current)
-            if (current.frame === 1) {
-              emit(runId, nonce, 'ready', { backend, ...evidence })
-            } else if (current.frame % 30 === 0) {
-              emit(runId, nonce, 'frame', evidence)
-              emit(runId, nonce, 'metrics', evidence)
-            }
-          } catch (error) {
-            current.stopped = true
-            emit(runId, nonce, 'runtime-error', { message: message(error) })
-          } finally {
-            current.frameInProgress = false
-            if (!current.stopped) current.animation = requestAnimationFrame(render)
-          }
+          })()
         }
+        current.renderFrame = render
         current.animation = requestAnimationFrame(render)
       } catch (error) {
-        if (current) await dispose(runId, nonce, false)
-        emit(runId, nonce, 'runtime-error', { message: message(error) })
+        if (active === current) active = undefined
+        let disposed
+        if (current) {
+          disposed = await disposeCurrent(current)
+        } else {
+          renderer?.setAnimationLoop?.(null)
+          renderer?.dispose?.()
+          disposed = await disposeCurrent(undefined)
+        }
+        lastDisposed = {
+          projectId: request.projectId,
+          runId,
+          nonce,
+          revision: request.revision,
+          evidence: disposed.evidence,
+        }
+        if (pending.stopRequested) {
+          if (disposed.disposeError) {
+            emit(runId, nonce, 'runtime-error', { message: disposed.disposeError })
+          }
+          emit(runId, nonce, 'disposed', disposed.evidence)
+        } else {
+          emit(runId, nonce, 'runtime-error', { message: message(error) })
+        }
+      } finally {
+        if (starting === pending) starting = undefined
       }
     }
 
@@ -728,6 +1117,12 @@ export function m7BootstrapHtml(): string {
         current.pointerGesture = undefined
       }
     })
+    canvas.addEventListener('lostpointercapture', event => {
+      active?.runtimeCapturedPointers.delete(event.pointerId)
+    })
+    canvas.addEventListener('gotpointercapture', event => {
+      if (active?.mode === 'run') active.runtimeCapturedPointers.add(event.pointerId)
+    })
     window.addEventListener('error', event => {
       if (!active) return
       event.preventDefault()
@@ -751,27 +1146,95 @@ export function m7BootstrapHtml(): string {
         await start(request)
         return
       }
-      if (!active || active.runId !== runId || active.nonce !== nonce) return
       if (action === 'stop') {
-        await dispose(runId, nonce)
-      } else if (action === 'set-debug') {
+        if (active?.projectId === request.projectId
+          && (active.revision === request.revision
+            || active.revisionTransition === request.revision)
+          && active.runId === runId
+          && active.nonce === nonce) {
+          active.revision = request.revision
+          eventRevision = request.revision
+          await dispose(runId, nonce)
+          return
+        }
+        if (starting?.projectId === request.projectId
+          && starting.revision === request.revision
+          && starting.runId === runId
+          && starting.nonce === nonce) {
+          starting.stopRequested = true
+          return
+        }
+        if (lastDisposed?.projectId === request.projectId
+          && lastDisposed.runId === runId
+          && lastDisposed.nonce === nonce
+          && lastDisposed.revision === request.revision) {
+          emit(
+            runId,
+            nonce,
+            'disposed',
+            lastDisposed.evidence,
+            lastDisposed.revision,
+            lastDisposed.projectId,
+          )
+        }
+        return
+      }
+      if (!active
+        || active.projectId !== request.projectId
+        || active.runId !== runId
+        || active.nonce !== nonce) return
+      if (action === 'apply-operations') {
+        const current = active
+        if (request.previousRevision !== current.revision
+          || typeof request.revision !== 'string'
+          || current.revisionTransition !== undefined) return
+        const previousRevision = current.revision
+        const nextRevision = request.revision
+        current.revisionTransition = nextRevision
+        try {
+          await mutateBetweenFrames(current, () => {
+            if (current.revision !== previousRevision
+              || current.revisionTransition !== nextRevision) {
+              throw new Error('Runtime revision changed before mutation')
+            }
+            for (const operation of request.operations ?? []) {
+              applyOperation(current, operation, false)
+            }
+            current.revision = nextRevision
+            eventRevision = nextRevision
+            current.revisionTransition = undefined
+            emit(runId, nonce, 'editor-scene', editorScene(current))
+          })
+        } finally {
+          if (current.revisionTransition === nextRevision) {
+            current.revisionTransition = undefined
+          }
+        }
+        return
+      }
+      if (active.revisionTransition !== undefined
+        || active.revision !== request.revision) return
+      if (action === 'set-debug') {
         active.state.debugMode = request.debugMode
         active.example?.setDebugMode?.(request.debugMode)
         active.pendingDebugMode = request.debugMode
       } else if (action === 'set-mode') {
-        setMode(active, request.mode)
+        await setMode(active, request.mode)
+      } else if (action === 'set-time-scale') {
+        const timeScale = Number(request.timeScale)
+        active.state.timeScale = Number.isFinite(timeScale)
+          ? Math.min(Math.max(timeScale, 0), 4)
+          : 1
+        emit(runId, nonce, 'time-scale', { timeScale: active.state.timeScale })
       } else if (action === 'set-transform-mode') {
         active.transformMode = request.mode
         active.transform.setMode(request.mode)
       } else if (action === 'select-object') {
         selectObject(active, request.objectUuid, false)
       } else if (action === 'apply-operation') {
-        applyOperation(active, request.operation)
-      } else if (action === 'apply-operations') {
-        for (const operation of request.operations ?? []) {
-          applyOperation(active, operation, false)
-        }
-        emit(runId, nonce, 'editor-scene', editorScene(active))
+        await mutateBetweenFrames(active, () => {
+          applyOperation(active, request.operation)
+        })
       } else if (action === 'editor-scene') {
         emit(runId, nonce, 'editor-scene', editorScene(active))
       } else if (action === 'metrics') {

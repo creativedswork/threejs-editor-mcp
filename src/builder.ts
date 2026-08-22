@@ -16,9 +16,10 @@ import {
   type Message,
   type Plugin,
 } from 'esbuild'
+import ts from 'typescript'
 import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
 
-export const BUILDER_VERSION = 'm7-edit-runtime-v2'
+export const BUILDER_VERSION = 'm8-multipass-runtime-v1'
 export const DEPENDENCY_PROFILE = `three@0.185.1+esbuild@${esbuildVersion}`
 
 const require = createRequire(import.meta.url)
@@ -26,6 +27,7 @@ const threeRoot = dirname(dirname(require.resolve('three/webgpu')))
 const runtimeEntry = 'threejs-editor:runtime'
 const workspaceNamespace = 'threejs-editor-workspace'
 const runtimeNamespace = 'threejs-editor-runtime'
+const MAX_GENERATED_SOURCE_BYTES = 64 * 1024 * 1024
 const resolveExtensions = [
   '.ts',
   '.tsx',
@@ -171,21 +173,434 @@ function loaderFor(file: BuildFile): Loader {
   return 'text'
 }
 
+function rewritesAssetLiterals(path: string): boolean {
+  return ['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.json', '.css']
+    .includes(extname(path).toLowerCase())
+}
+
+interface AssetStringLiteral {
+  start: number
+  end: number
+  quote: string
+  request: string
+}
+
+interface AssetCssUrl {
+  start: number
+  end: number
+  request: string
+}
+
+interface ModuleSpecifier {
+  start: number
+  end: number
+  request: string
+}
+
+const ASSET_REQUEST =
+  /^(?:\/(?:dev|skills)\/|\.\.?\/|assets\/)[^"'`$?#]+\.(?:gif|glb|jpe?g|png|webp)(?:[?#][^"'`\s]*)?$/i
+
+function scriptKind(path: string): ts.ScriptKind {
+  const extension = extname(path).toLowerCase()
+  if (extension === '.json') return ts.ScriptKind.JSON
+  if (extension === '.ts') return ts.ScriptKind.TS
+  if (extension === '.tsx') return ts.ScriptKind.TSX
+  if (extension === '.jsx') return ts.ScriptKind.JSX
+  return ts.ScriptKind.JS
+}
+
+function isDataKeyLiteral(node: ts.StringLiteralLike): boolean {
+  let current: ts.Node = node
+  while (current.parent !== undefined) {
+    const parent = current.parent
+    if ((parent as ts.Node & { name?: ts.Node }).name === current
+      || ts.isComputedPropertyName(parent)
+      || (ts.isElementAccessExpression(parent)
+        && parent.argumentExpression === current)) return true
+    if (ts.isStatement(parent) || ts.isSourceFile(parent)) return false
+    current = parent
+  }
+  return false
+}
+
+export function assetStringLiterals(
+  source: string,
+  path = 'workspace.js',
+): AssetStringLiteral[] {
+  const literals: AssetStringLiteral[] = []
+  const file = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind(path),
+  )
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteralLike(node)
+      && !isDataKeyLiteral(node)
+      && !(ts.isNoSubstitutionTemplateLiteral(node)
+        && ts.isTaggedTemplateExpression(node.parent))
+      && ASSET_REQUEST.test(node.text)) {
+      const start = node.getStart(file)
+      literals.push({
+        start,
+        end: node.getEnd(),
+        quote: source[start] ?? '"',
+        request: node.text,
+      })
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return literals
+}
+
+export function assetCssUrls(source: string): AssetCssUrl[] {
+  const urls: AssetCssUrl[] = []
+  const skipWhitespace = (start: number): number => {
+    let next = start
+    while (next < source.length) {
+      while (/\s/.test(source[next] ?? '')) next += 1
+      if (!source.startsWith('/*', next)) break
+      const end = source.indexOf('*/', next + 2)
+      if (end === -1) return source.length
+      next = end + 2
+    }
+    return next
+  }
+  const readEscape = (start: number): { next: number; value: string } => {
+    const tail = source.slice(start + 1)
+    const hex = tail.match(/^[0-9a-f]{1,6}/i)?.[0]
+    if (hex !== undefined) {
+      let next = start + 1 + hex.length
+      if (/\s/.test(source[next] ?? '')) next += 1
+      const codePoint = Number.parseInt(hex, 16)
+      return {
+        next,
+        value: codePoint === 0 || codePoint > 0x10ffff
+          ? '\uFFFD'
+          : String.fromCodePoint(codePoint),
+      }
+    }
+    const escaped = source[start + 1]
+    return escaped === undefined
+      ? { next: source.length, value: '' }
+      : { next: start + 2, value: escaped === '\n' ? '' : escaped }
+  }
+  let index = 0
+  while (index < source.length) {
+    if (source.startsWith('/*', index)) {
+      const end = source.indexOf('*/', index + 2)
+      if (end === -1) break
+      index = end + 2
+      continue
+    }
+    const quote = source[index]
+    if (quote === '"' || quote === "'") {
+      index += 1
+      while (index < source.length && source[index] !== quote) {
+        index = source[index] === '\\' ? readEscape(index).next : index + 1
+      }
+      index += 1
+      continue
+    }
+    if (source.slice(index, index + 3).toLowerCase() !== 'url'
+      || /[\w-]/.test(source[index - 1] ?? '')
+      || /[\w-]/.test(source[index + 3] ?? '')) {
+      index += 1
+      continue
+    }
+    const start = index
+    index = skipWhitespace(index + 3)
+    if (source[index] !== '(') continue
+    index = skipWhitespace(index + 1)
+    let request = ''
+    const valueQuote = source[index]
+    if (valueQuote === '"' || valueQuote === "'") {
+      index += 1
+      while (index < source.length && source[index] !== valueQuote) {
+        if (source[index] === '\\') {
+          const escaped = readEscape(index)
+          request += escaped.value
+          index = escaped.next
+        } else {
+          request += source[index]
+          index += 1
+        }
+      }
+      if (source[index] !== valueQuote) break
+      index = skipWhitespace(index + 1)
+    } else {
+      while (index < source.length && source[index] !== ')') {
+        if (source.startsWith('/*', index)) {
+          const end = source.indexOf('*/', index + 2)
+          if (end === -1) {
+            index = source.length
+            break
+          }
+          request += ' '
+          index = end + 2
+        } else if (source[index] === '\\') {
+          const escaped = readEscape(index)
+          request += escaped.value
+          index = escaped.next
+        } else {
+          request += source[index]
+          index += 1
+        }
+      }
+      request = request.trim()
+    }
+    if (source[index] !== ')') continue
+    index += 1
+    if (ASSET_REQUEST.test(request)) urls.push({ start, end: index, request })
+  }
+  return urls
+}
+
+function moduleSpecifierLiterals(source: string, path: string): ModuleSpecifier[] {
+  const specifiers: ModuleSpecifier[] = []
+  const file = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind(path),
+  )
+  const add = (node: ts.Expression | undefined): void => {
+    if (node !== undefined && ts.isStringLiteralLike(node)) {
+      specifiers.push({
+        start: node.getStart(file),
+        end: node.getEnd(),
+        request: node.text,
+      })
+    }
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      add(node.moduleSpecifier)
+    } else if (ts.isImportEqualsDeclaration(node)
+      && ts.isExternalModuleReference(node.moduleReference)) {
+      add(node.moduleReference.expression)
+    } else if (ts.isCallExpression(node)
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+        || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) {
+      add(node.arguments[0])
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return specifiers
+}
+
+export function moduleSpecifiers(source: string, path = 'workspace.js'): string[] {
+  return [...new Set(
+    moduleSpecifierLiterals(source, path).map(specifier => specifier.request),
+  )]
+}
+
+function moduleSpecifierRanges(source: string, path: string): Array<[number, number]> {
+  return moduleSpecifierLiterals(source, path)
+    .map(specifier => [specifier.start, specifier.end])
+}
+
+function assetDataUrl(file: BuildFile): string {
+  return `data:${file.mediaType};base64,${Buffer.from(file.bytes).toString('base64')}`
+}
+
+class GeneratedSourceLimitError extends Error {}
+
+function assetAlias(importer: string, request: string, length = request.length): string {
+  const hash = createHash('sha256')
+    .update(`${importer}\0${request}`)
+    .digest('base64url')
+  return `~${hash.repeat(Math.ceil(length / hash.length)).slice(0, length - 1)}`
+}
+
+function assetLiteralAlias(
+  importer: string,
+  request: string,
+  raw: string,
+): { source: string; value: string } {
+  const continuations = new Map<number, string>()
+  let valueLength = raw.length
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] !== '\\') continue
+    const next = raw[index + 1]
+    const length = next === '\r' && raw[index + 2] === '\n'
+      ? 3
+      : next === '\n' || next === '\r' || next === '\u2028' || next === '\u2029'
+        ? 2
+        : 0
+    if (length === 0) continue
+    continuations.set(index, raw.slice(index, index + length))
+    valueLength -= length
+    index += length - 1
+  }
+  const value = assetAlias(importer, request, valueLength)
+  let source = ''
+  let valueOffset = 0
+  for (let index = 0; index < raw.length;) {
+    const continuation = continuations.get(index)
+    if (continuation !== undefined) {
+      source += continuation
+      index += continuation.length
+    } else {
+      source += value[valueOffset]
+      valueOffset += 1
+      index += 1
+    }
+  }
+  return { source, value }
+}
+
+interface RuntimeAssets {
+  aliases: Array<[string, string]>
+  data: Array<[string, string]>
+}
+
+function runtimeAssets(files: Map<string, BuildFile>): RuntimeAssets {
+  const aliases = new Map<string, string>()
+  const data = new Map<string, string>()
+  const keys = new Map<string, string>()
+  for (const file of files.values()) {
+    if (file.text) continue
+    const path = `/${file.path}`
+    const key = String(keys.size)
+    keys.set(path, key)
+    aliases.set(path, key)
+    data.set(key, assetDataUrl(file))
+  }
+  for (const file of files.values()) {
+    if (!file.text
+      || !rewritesAssetLiterals(file.path)
+      || extname(file.path).toLowerCase() === '.css') continue
+    const source = new TextDecoder().decode(file.bytes)
+    const ranges = moduleSpecifierRanges(source, file.path)
+    for (const literal of assetStringLiterals(source, file.path)) {
+      if (ranges.some(([start, end]) => literal.start >= start && literal.start < end)) continue
+      const request = literal.request
+      const path = workspacePath(request.split(/[?#]/, 1)[0]!, file.path, files)
+      const asset = path === undefined ? undefined : files.get(path)
+      if (asset !== undefined && !asset.text) {
+        const alias = assetLiteralAlias(
+          file.path,
+          request,
+          source.slice(literal.start + 1, literal.end - 1),
+        )
+        aliases.set(alias.value, keys.get(`/${asset.path}`)!)
+      }
+    }
+  }
+  return {
+    aliases: [...aliases],
+    data: [...data],
+  }
+}
+
+function cssAssetVariable(path: string): string {
+  return `--threejs-editor-asset-${createHash('sha256').update(path).digest('hex')}`
+}
+
+function rewriteAssetUrls(
+  source: string,
+  importer: string,
+  files: Map<string, BuildFile>,
+): string {
+  const css = extname(importer).toLowerCase() === '.css'
+  if (css) {
+    const definitions = new Map<string, string>()
+    let rewritten = ''
+    let offset = 0
+    for (const asset of assetCssUrls(source)) {
+      const path = workspacePath(asset.request.split(/[?#]/, 1)[0]!, importer, files)
+      const file = path === undefined ? undefined : files.get(path)
+      if (file === undefined || file.text) continue
+      const variable = cssAssetVariable(file.path)
+      if (!definitions.has(variable)) definitions.set(variable, assetDataUrl(file))
+      rewritten += source.slice(offset, asset.start)
+        + `var(${variable})`
+      offset = asset.end
+    }
+    rewritten += source.slice(offset)
+    if (definitions.size === 0) return rewritten
+    return `${rewritten}\n:is(:root,:host){${
+      [...definitions]
+        .map(([variable, value]) => `${variable}:url(${JSON.stringify(value)});`)
+        .join('')
+    }}`
+  }
+  const ranges = moduleSpecifierRanges(source, importer)
+  let rewritten = ''
+  let offset = 0
+  for (const literal of assetStringLiterals(source, importer)) {
+    if (ranges.some(([start, end]) => literal.start >= start && literal.start < end)) continue
+    const path = workspacePath(
+      literal.request.split(/[?#]/, 1)[0]!,
+      importer,
+      files,
+    )
+    const file = path === undefined ? undefined : files.get(path)
+    if (file === undefined || file.text) continue
+    const alias = assetLiteralAlias(
+      importer,
+      literal.request,
+      source.slice(literal.start + 1, literal.end - 1),
+    )
+    rewritten += source.slice(offset, literal.start)
+      + literal.quote
+      + alias.source
+      + literal.quote
+    offset = literal.end
+  }
+  return rewritten + source.slice(offset)
+}
+
 function runtimeSource(input: BuildWorkspaceInput, files: Map<string, BuildFile>): string {
   const threeSpecifier = input.backend === 'webgpu' ? 'three/webgpu' : 'three'
+  const assets = runtimeAssets(files)
   return [
-    `import adapter from ${JSON.stringify(`/${input.entry}`)}`,
     `import * as THREE from ${JSON.stringify(threeSpecifier)}`,
     'import { OrbitControls } from "three/addons/controls/OrbitControls.js"',
     'import { TransformControls } from "three/addons/controls/TransformControls.js"',
     files.has(WORKSPACE_EDITOR_STATE_PATH)
       ? `import editorState from ${JSON.stringify(`/${WORKSPACE_EDITOR_STATE_PATH}`)}`
       : 'const editorState = { schemaVersion: 1, operations: [] }',
-    'export { adapter, THREE, OrbitControls, TransformControls, editorState }',
+    `const assetAliases = new Map(${JSON.stringify(assets.aliases)})`,
+    `const assetData = new Map(${JSON.stringify(assets.data)})`,
+    'const resolveAsset = path => {',
+    '  const value = String(path)',
+    '  const suffix = value.search(/[?#]/)',
+    '  const key = suffix === -1 ? value : value.slice(0, suffix)',
+    '  return assetData.get(assetAliases.get(key) ?? key) ?? value',
+    '}',
+    'THREE.DefaultLoadingManager.setURLModifier(resolveAsset)',
+    `const { default: adapter } = await import(${JSON.stringify(`/${input.entry}`)})`,
+    'export { adapter, THREE, OrbitControls, TransformControls, editorState, resolveAsset }',
   ].join('\n')
 }
 
 function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): Plugin {
+  const runtime = runtimeSource(input, files)
+  const contents = new Map<string, string | Uint8Array>()
+  let generatedBytes = Buffer.byteLength(runtime)
+  if (generatedBytes > MAX_GENERATED_SOURCE_BYTES) {
+    throw new GeneratedSourceLimitError('generated build input exceeds 64 MiB')
+  }
+  for (const file of files.values()) {
+    const content = file.text && rewritesAssetLiterals(file.path)
+      ? rewriteAssetUrls(new TextDecoder().decode(file.bytes), file.path, files)
+      : file.bytes
+    contents.set(file.path, content)
+    generatedBytes += typeof content === 'string'
+      ? Buffer.byteLength(content)
+      : file.text
+        ? file.bytes.byteLength
+        : Buffer.byteLength(assetDataUrl(file))
+    if (generatedBytes > MAX_GENERATED_SOURCE_BYTES) {
+      throw new GeneratedSourceLimitError('generated build input exceeds 64 MiB')
+    }
+  }
   return {
     name: 'threejs-editor-vfs',
     setup(builder) {
@@ -228,7 +643,7 @@ function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): P
         }
       })
       builder.onLoad({ filter: /.*/, namespace: runtimeNamespace }, () => ({
-        contents: runtimeSource(input, files),
+        contents: runtime,
         loader: 'js',
         resolveDir: '/',
       }))
@@ -236,7 +651,7 @@ function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): P
         const file = files.get(args.path)
         if (file === undefined) return { errors: [{ text: `workspace module not found: ${args.path}` }] }
         return {
-          contents: file.bytes,
+          contents: contents.get(args.path),
           loader: loaderFor(file),
           resolveDir: `/${posix.dirname(file.path)}`,
         }
@@ -295,13 +710,23 @@ function safeSource(source: string): string {
     : normalized.replace(/^(\.\.\/)+/, '')
 }
 
-function sanitizeSourceMap(sourceMap: string): string {
+function sanitizeSourceMap(sourceMap: string, files: Map<string, BuildFile>): string {
   const parsed = JSON.parse(sourceMap) as {
     sourceRoot?: string
     sources?: string[]
+    sourcesContent?: Array<string | null>
   }
   parsed.sourceRoot = ''
-  if (Array.isArray(parsed.sources)) parsed.sources = parsed.sources.map(safeSource)
+  if (Array.isArray(parsed.sources)) {
+    parsed.sources = parsed.sources.map((source, index) => {
+      const safe = safeSource(source)
+      if (safe.startsWith('workspace:///') && Array.isArray(parsed.sourcesContent)) {
+        const file = files.get(safe.slice('workspace:///'.length))
+        if (file?.text) parsed.sourcesContent[index] = new TextDecoder().decode(file.bytes)
+      }
+      return safe
+    })
+  }
   return JSON.stringify(parsed)
 }
 
@@ -364,7 +789,7 @@ export async function buildWorkspace(input: BuildWorkspaceInput): Promise<Worksp
     if (bundle === undefined || rawSourceMap === undefined || result.metafile === undefined) {
       throw new Error('esbuild did not return the expected bundle artifacts')
     }
-    const sourceMap = sanitizeSourceMap(rawSourceMap)
+    const sourceMap = sanitizeSourceMap(rawSourceMap, files)
     return {
       ...base,
       status: 'ready',
@@ -385,6 +810,16 @@ export async function buildWorkspace(input: BuildWorkspaceInput): Promise<Worksp
         .sort((left, right) => left.path.localeCompare(right.path)),
     }
   } catch (error) {
+    if (error instanceof GeneratedSourceLimitError) {
+      return {
+        ...base,
+        status: 'failed',
+        diagnostics: [{
+          severity: 'error',
+          message: error.message,
+        }],
+      }
+    }
     if (!isBuildFailure(error)) throw error
     return {
       ...base,

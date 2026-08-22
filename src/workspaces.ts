@@ -1,16 +1,17 @@
 import { isUtf8 } from 'node:buffer'
 import { createHash, randomUUID } from 'node:crypto'
+import { constants } from 'node:fs'
 import {
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
   rename,
   rm,
-  stat,
-  unlink,
   writeFile,
+  type FileHandle,
 } from 'node:fs/promises'
 import {
   dirname,
@@ -22,22 +23,37 @@ import {
   resolve,
   sep,
 } from 'node:path'
+import { transform, type Loader } from 'esbuild'
 import { z } from 'zod'
 import {
+  assetCssUrls,
+  assetStringLiterals,
   buildIdFor,
   buildWorkspace,
+  moduleSpecifiers,
   type FailedBuild,
   type ReadyBuild,
   type WorkspaceBuild,
 } from './builder.js'
 import {
   createProject,
+  diagnosticsSchema,
   projectSchema,
   RevisionConflictError,
+  type Diagnostics,
   type Project,
   type ProjectTemplate,
 } from './projects.js'
 import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
+import {
+  runtimeLockPathForWorkspace,
+  withRuntimeLock as withCrossProcessRuntimeLock,
+} from './runtime-lock.js'
+import {
+  createFileBound,
+  removeFileBound,
+  replaceFileBound,
+} from './workspace-io.js'
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 const MAX_FILES = 512
@@ -126,6 +142,12 @@ export const workspaceChangeSchema = z.discriminatedUnion('type', [
     path: workspacePathSchema,
   }),
 ])
+const activeRuntimeSchema = z.object({
+  revision: z.string().regex(/^[a-f0-9]{64}$/),
+  runId: z.string().uuid(),
+  ownerId: z.string().uuid().optional(),
+  ownerPid: z.number().int().positive().optional(),
+})
 
 export type WorkspaceManifest = z.infer<typeof workspaceManifestSchema>
 export type WorkspaceChange = z.infer<typeof workspaceChangeSchema>
@@ -258,17 +280,37 @@ function safeProjectPath(input: string): string {
   return input === '.' ? '' : safePath(input)
 }
 
-function moduleSpecifiers(source: string): string[] {
+function assetSpecifiers(filePath: string, source: string): string[] {
   const specifiers = new Set<string>()
-  // ponytail: static ESM imports cover the gallery; use a lexer if it adopts computed imports.
-  const patterns = [
-    /\b(?:import|export)\s+(?:[^"'();]*?\s+from\s*)?["']([^"']+)["']/g,
-    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
-  ]
-  for (const pattern of patterns) {
-    for (const match of source.matchAll(pattern)) specifiers.add(match[1])
+  const add = (specifier: string | undefined): void => {
+    if (specifier !== undefined) specifiers.add(specifier.replace(/[?#].*$/, ''))
   }
+  if (extname(filePath).toLowerCase() === '.css') {
+    for (const asset of assetCssUrls(source)) add(asset.request)
+    return [...specifiers]
+  }
+  for (const literal of assetStringLiterals(source, filePath)) add(literal.request)
   return [...specifiers]
+}
+
+async function dependencySource(path: string, source: string): Promise<string | undefined> {
+  const loader = new Map<string, Loader>([
+    ['.cjs', 'js'],
+    ['.css', 'css'],
+    ['.js', 'js'],
+    ['.json', 'json'],
+    ['.jsx', 'jsx'],
+    ['.mjs', 'js'],
+    ['.ts', 'ts'],
+    ['.tsx', 'tsx'],
+  ]).get(extname(path).toLowerCase())
+  if (loader === undefined) return undefined
+  if (loader === 'css') return source.replace(/\/\*[\s\S]*?\*\//g, '')
+  try {
+    return (await transform(source, { loader, legalComments: 'none' })).code
+  } catch {
+    return undefined
+  }
 }
 
 function isThreeSpecifier(specifier: string): boolean {
@@ -281,6 +323,16 @@ function projectFilePath(projectPath: string, fileName: string): string {
 
 function mediaType(path: string, bytes: Buffer): { mediaType: string; text: boolean } {
   const extension = extname(path).toLowerCase()
+  const binary = new Map([
+    ['.gif', 'image/gif'],
+    ['.glb', 'model/gltf-binary'],
+    ['.jpeg', 'image/jpeg'],
+    ['.jpg', 'image/jpeg'],
+    ['.png', 'image/png'],
+    ['.webp', 'image/webp'],
+  ])
+  const binaryType = binary.get(extension)
+  if (binaryType !== undefined) return { mediaType: binaryType, text: false }
   const known = new Map([
     ['.css', 'text/css'],
     ['.glsl', 'text/x-glsl'],
@@ -336,11 +388,11 @@ function defaultWorkspaceConfig(
 }
 
 export class WorkspaceStore {
+  private readonly runtimeOwnerId = randomUUID()
   private readonly managedRoot: Promise<string>
   private readonly ready: Promise<void>
   private readonly workspaces = new Map<string, RegisteredWorkspace>()
   private readonly sessionWorkspaceIds = new Set<string>()
-  private readonly locks = new Map<string, Promise<void>>()
 
   constructor(
     root: string,
@@ -621,7 +673,13 @@ export class WorkspaceStore {
     const revision = manifestRevision(manifest)
     await this.persistRevision(registration.path, revision, manifest)
     const head = await this.readHead(registration.path)
-    if (head !== revision) await this.writeAtomic(this.metadataPath(registration.path, 'HEAD'), `${revision}\n`)
+    if (head !== revision) {
+      await this.writeAtomic(
+        registration.path,
+        this.metadataPath(registration.path, 'HEAD'),
+        `${revision}\n`,
+      )
+    }
     return {
       projectId,
       path: registration.path,
@@ -712,13 +770,20 @@ export class WorkspaceStore {
         files: [],
       }
       const buildId = buildIdFor(input)
+      const directory = this.metadataPath(snapshot.path, 'builds', buildId)
+      await this.ensureSafeDirectory(snapshot.path, directory)
       const cached = await this.readStoredBuild(snapshot.path, buildId)
       if (cached?.status === 'ready') {
-        const directory = this.metadataPath(snapshot.path, 'builds', buildId)
         return {
           ...cached,
-          bundle: await readFile(join(directory, 'bundle.js'), 'utf8'),
-          sourceMap: await readFile(join(directory, 'bundle.js.map'), 'utf8'),
+          bundle: (await this.readMetadataFile(
+            snapshot.path,
+            join(directory, 'bundle.js'),
+          )).toString('utf8'),
+          sourceMap: (await this.readMetadataFile(
+            snapshot.path,
+            join(directory, 'bundle.js.map'),
+          )).toString('utf8'),
         }
       }
       if (cached?.status === 'failed') return cached
@@ -733,18 +798,22 @@ export class WorkspaceStore {
         }),
       ))
       const result = await buildWorkspace(input)
-      const directory = this.metadataPath(snapshot.path, 'builds', result.buildId)
       let metadata: StoredBuild
       if (result.status === 'ready') {
         const { bundle, sourceMap, ...stored } = result
         metadata = stored
-        await this.writeAtomic(join(directory, 'bundle.js'), bundle)
-        await this.writeAtomic(join(directory, 'bundle.js.map'), sourceMap)
+        await this.writeAtomic(snapshot.path, join(directory, 'bundle.js'), bundle)
+        await this.writeAtomic(snapshot.path, join(directory, 'bundle.js.map'), sourceMap)
       } else {
         metadata = result
       }
-      await this.writeAtomic(join(directory, 'build.json'), canonicalBytes(metadata))
       await this.writeAtomic(
+        snapshot.path,
+        join(directory, 'build.json'),
+        canonicalBytes(metadata),
+      )
+      await this.writeAtomic(
+        snapshot.path,
         this.metadataPath(snapshot.path, 'diagnostics', `${result.buildId}.json`),
         canonicalBytes({
           projectId,
@@ -767,55 +836,217 @@ export class WorkspaceStore {
     await this.ready
     const registration = this.workspaces.get(projectId)
     if (registration === undefined) throw new Error(`unknown workspace ${projectId}`)
+    await this.ensureSafeDirectory(
+      registration.path,
+      this.metadataPath(registration.path, 'builds', buildId),
+    )
     const metadata = await this.readStoredBuild(registration.path, buildId)
     if (metadata?.status !== 'ready'
       || metadata.projectId !== projectId
       || metadata.buildId !== buildId) {
       throw new Error('ready build artifact is unavailable')
     }
-    return readFile(
+    return (await this.readMetadataFile(
+      registration.path,
       this.metadataPath(registration.path, 'builds', buildId, artifact),
-      'utf8',
-    )
+    )).toString('utf8')
   }
 
   async reportEditorScene(
     projectId: string,
     revision: string,
     document: unknown,
+    runId: string,
   ): Promise<void> {
     validateProjectId(projectId)
     if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid editor scene revision')
     await this.withLock(projectId, async () => {
+      const workspace = this.workspaces.get(projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
       const snapshot = await this.loadUnlocked(projectId)
       if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
+      const activeRuntime = await this.readActiveRuntime(snapshot.path)
+      if (activeRuntime?.revision !== revision || activeRuntime.runId !== runId) {
+        throw new Error('runtime run changed before editor scene was reported')
+      }
       await this.writeAtomic(
+        snapshot.path,
         this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
         canonicalBytes(document),
       )
     })
   }
 
-  async readEditorScene(projectId: string, revision: string): Promise<unknown | undefined> {
+  async registerRuntimeRun(
+    projectId: string,
+    revision: string,
+    runId: string,
+    previousRevision?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    validateProjectId(projectId)
+    await this.withLock(projectId, async () => {
+      signal?.throwIfAborted()
+      const workspace = this.workspaces.get(projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
+      const snapshot = await this.loadUnlocked(projectId)
+      if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
+      const activePath = this.metadataPath(
+        snapshot.path,
+        'diagnostics',
+        'active-run.json',
+      )
+      const previousRuntime = await this.readActiveRuntimeRecord(snapshot.path)
+      if (previousRevision !== undefined) {
+        const activeRuntime = await this.readActiveRuntime(snapshot.path)
+        if (activeRuntime?.revision !== previousRevision || activeRuntime.runId !== runId) {
+          throw new Error('runtime run changed before its revision was advanced')
+        }
+      }
+      await this.writeAtomic(
+        snapshot.path,
+        activePath,
+        canonicalBytes(activeRuntimeSchema.parse({
+          revision,
+          runId,
+          ownerId: this.runtimeOwnerId,
+          ownerPid: process.pid,
+        })),
+      )
+      if (signal?.aborted) {
+        const current = await this.readActiveRuntimeRecord(snapshot.path)
+        if (current?.revision === revision
+          && current.runId === runId
+          && current.ownerId === this.runtimeOwnerId
+          && current.ownerPid === process.pid) {
+          if (previousRuntime === undefined) {
+            await this.clearActiveRuntime(snapshot.path, revision, runId)
+          } else {
+            await this.writeAtomic(
+              snapshot.path,
+              activePath,
+              canonicalBytes(previousRuntime),
+            )
+          }
+        }
+        signal.throwIfAborted()
+      }
+    })
+  }
+
+  async releaseRuntimeRun(
+    projectId: string,
+    revision: string,
+    runId: string,
+  ): Promise<boolean> {
+    validateProjectId(projectId)
+    if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid Runtime revision')
+    return this.withLock(projectId, async () => {
+      const workspace = this.workspaces.get(projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
+      return this.clearActiveRuntime(workspace.path, revision, runId)
+    })
+  }
+
+  async readEditorScene(
+    projectId: string,
+    revision: string,
+    expectedRunId?: string,
+  ): Promise<unknown | undefined> {
     validateProjectId(projectId)
     if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid editor scene revision')
-    const snapshot = await this.load(projectId)
-    if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
-    try {
-      return JSON.parse(await readFile(
-        this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
-        'utf8',
-      ))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-      throw error
-    }
+    return this.withLock(projectId, async () => {
+      const snapshot = await this.loadUnlocked(projectId)
+      if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
+      try {
+        const document = JSON.parse((await this.readMetadataFile(
+          snapshot.path,
+          this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
+        )).toString('utf8'))
+        const runId = typeof document === 'object' && document !== null
+          && 'runId' in document && typeof document.runId === 'string'
+          ? document.runId
+          : undefined
+        const activeRuntime = await this.readActiveRuntime(snapshot.path)
+        return runId !== undefined
+          && activeRuntime?.revision === revision
+          && activeRuntime.runId === runId
+          && (expectedRunId === undefined || runId === expectedRunId)
+          ? document
+          : undefined
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+        throw error
+      }
+    })
+  }
+
+  async reportDiagnostics(
+    projectId: string,
+    testedRevision: string,
+    errors: string[],
+    warnings: string[],
+    runId?: string,
+  ): Promise<Diagnostics> {
+    validateProjectId(projectId)
+    return this.withLock(projectId, async () => {
+      const workspace = this.workspaces.get(projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
+      const snapshot = await this.loadUnlocked(projectId)
+      if (snapshot.revision !== testedRevision) {
+        throw new RevisionConflictError(snapshot.revision)
+      }
+      if (runId === undefined) {
+        throw new Error('Workspace diagnostics require a Runtime runId')
+      }
+      const activeRuntime = await this.readActiveRuntime(snapshot.path)
+      if (activeRuntime?.revision !== testedRevision || activeRuntime.runId !== runId) {
+        throw new Error('runtime run changed before diagnostics were reported')
+      }
+      const diagnostics = diagnosticsSchema.parse({
+        testedRevision,
+        runId,
+        updatedAt: new Date().toISOString(),
+        errors,
+        warnings,
+      })
+      await this.writeAtomic(
+        snapshot.path,
+        this.metadataPath(snapshot.path, 'diagnostics', 'runtime.json'),
+        canonicalBytes(diagnostics),
+      )
+      return diagnostics
+    })
+  }
+
+  async readDiagnostics(projectId: string): Promise<Diagnostics | undefined> {
+    validateProjectId(projectId)
+    return this.withLock(projectId, async () => {
+      const snapshot = await this.loadUnlocked(projectId)
+      try {
+        const diagnostics = diagnosticsSchema.parse(JSON.parse((await this.readMetadataFile(
+          snapshot.path,
+          this.metadataPath(snapshot.path, 'diagnostics', 'runtime.json'),
+        )).toString('utf8')))
+        const activeRuntime = await this.readActiveRuntime(snapshot.path)
+        return activeRuntime?.revision === snapshot.revision
+          && diagnostics.testedRevision === snapshot.revision
+          && diagnostics.runId === activeRuntime.runId
+          ? diagnostics
+          : undefined
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+        throw error
+      }
+    })
   }
 
   async apply(
     projectId: string,
     baseRevision: string,
     candidates: unknown[],
+    expectedRunId?: string,
+    signal?: AbortSignal,
   ): Promise<WorkspaceSnapshot> {
     validateProjectId(projectId)
     const changes = candidates.map(candidate => workspaceChangeSchema.parse(candidate))
@@ -823,12 +1054,21 @@ export class WorkspaceStore {
       throw new Error('workspace change batch must contain 1 to 100 operations')
     }
     return this.withLock(projectId, async () => {
+      signal?.throwIfAborted()
+      const registration = this.workspaces.get(projectId)
+      if (registration === undefined) throw new Error(`unknown workspace ${projectId}`)
+      const commit = async (): Promise<WorkspaceSnapshot> => {
       const current = await this.loadUnlocked(projectId)
       if (current.revision !== baseRevision) {
         throw new RevisionConflictError(current.revision)
       }
-      const registration = this.workspaces.get(projectId)
-      if (registration === undefined) throw new Error(`unknown workspace ${projectId}`)
+      if (expectedRunId !== undefined) {
+        const activeRuntime = await this.readActiveRuntime(current.path)
+        if (activeRuntime?.revision !== baseRevision
+          || activeRuntime.runId !== expectedRunId) {
+          throw new Error('runtime run changed before editor commands were applied')
+        }
+      }
       const normalized = await this.normalizeChanges(current, changes)
       if (normalized.length === 0) throw new Error('workspace change batch has no effect')
       const targetManifest = structuredClone(current.manifest)
@@ -845,6 +1085,7 @@ export class WorkspaceStore {
         }
       }
       this.validateManifestLimits(targetManifest)
+      signal?.throwIfAborted()
       const targetRevision = manifestRevision(targetManifest)
       const transaction: Transaction = {
         schemaVersion: 1,
@@ -859,7 +1100,11 @@ export class WorkspaceStore {
         'transactions',
         `${transaction.id}.json`,
       )
-      await this.writeAtomic(transactionPath, canonicalBytes(transaction))
+      await this.writeAtomic(
+        registration.path,
+        transactionPath,
+        canonicalBytes(transaction),
+      )
       const applied: TransactionChange[] = []
       try {
         const verified = await this.scanManifest(projectId, registration)
@@ -872,7 +1117,10 @@ export class WorkspaceStore {
             throw new Error(`workspace file changed while committing: ${change.path}`)
           }
           if (change.after === null) {
-            await unlink(join(registration.path, ...change.path.split('/')))
+            await removeFileBound(
+              registration.path,
+              join(registration.path, ...change.path.split('/')),
+            )
           } else {
             await this.writeWorkspaceFile(
               registration.path,
@@ -887,17 +1135,35 @@ export class WorkspaceStore {
           throw new Error('workspace changed while committing')
         }
         await this.persistRevision(registration.path, targetRevision, targetManifest)
-        await this.writeAtomic(this.metadataPath(registration.path, 'HEAD'), `${targetRevision}\n`)
+        await this.writeAtomic(
+          registration.path,
+          this.metadataPath(registration.path, 'HEAD'),
+          `${targetRevision}\n`,
+        )
         transaction.status = 'committed'
-        await this.writeAtomic(transactionPath, canonicalBytes(transaction))
+        await this.writeAtomic(
+          registration.path,
+          transactionPath,
+          canonicalBytes(transaction),
+        )
       } catch (error) {
         await this.restoreChanges(registration.path, applied)
-        await this.writeAtomic(this.metadataPath(registration.path, 'HEAD'), `${baseRevision}\n`)
+        await this.writeAtomic(
+          registration.path,
+          this.metadataPath(registration.path, 'HEAD'),
+          `${baseRevision}\n`,
+        )
         transaction.status = 'rolled-back'
-        await this.writeAtomic(transactionPath, canonicalBytes(transaction))
+        await this.writeAtomic(
+          registration.path,
+          transactionPath,
+          canonicalBytes(transaction),
+        )
         throw error
       }
       return this.loadUnlocked(projectId)
+      }
+      return commit()
     })
   }
 
@@ -982,10 +1248,50 @@ export class WorkspaceStore {
   private async restoreChanges(path: string, changes: TransactionChange[]): Promise<void> {
     for (const change of [...changes].reverse()) {
       if (change.before === null) {
-        await unlink(join(path, ...change.path.split('/'))).catch(() => {})
+        await removeFileBound(
+          path,
+          join(path, ...change.path.split('/')),
+        ).catch(() => {})
       } else {
         await this.writeWorkspaceFile(path, change.path, await this.readObject(path, change.before))
       }
+    }
+  }
+
+  private async readActiveRuntime(
+    workspace: string,
+  ): Promise<z.infer<typeof activeRuntimeSchema> | undefined> {
+    const activeRuntime = await this.readActiveRuntimeRecord(workspace)
+    return activeRuntime !== undefined && this.ownsActiveRuntime(activeRuntime)
+      ? activeRuntime
+      : undefined
+  }
+
+  private ownsActiveRuntime(activeRuntime: z.infer<typeof activeRuntimeSchema>): boolean {
+    if (activeRuntime.ownerId !== this.runtimeOwnerId
+      || activeRuntime.ownerPid === undefined) return false
+    try {
+      process.kill(activeRuntime.ownerPid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+    }
+    return true
+  }
+
+  private async readActiveRuntimeRecord(
+    workspace: string,
+  ): Promise<z.infer<typeof activeRuntimeSchema> | undefined> {
+    try {
+      const bytes = await this.readMetadataFile(
+        workspace,
+        this.metadataPath(workspace, 'diagnostics', 'active-run.json'),
+      )
+      if (bytes.length === 0) return undefined
+      return activeRuntimeSchema.parse(JSON.parse(bytes.toString('utf8')))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
     }
   }
 
@@ -1032,12 +1338,15 @@ export class WorkspaceStore {
     let config: Omit<WorkspaceManifest, 'files'>
     try {
       const stored = workspaceManifestSchema.omit({ files: true })
-        .parse(JSON.parse(await readFile(configPath, 'utf8')))
+          .parse(JSON.parse((await this.readMetadataFile(
+            registration.path,
+            configPath,
+          )).toString('utf8')))
       config = stored
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       config = defaultWorkspaceConfig(registration.kind, projectId, packageDocument)
-      await this.writeAtomic(configPath, canonicalBytes(config))
+      await this.writeAtomic(registration.path, configPath, canonicalBytes(config))
     }
     return workspaceManifestSchema.parse({ ...config, kind: registration.kind, files })
   }
@@ -1142,7 +1451,9 @@ export class WorkspaceStore {
         throw error
       }
       if (!mediaType(filePath, bytes).text) continue
-      for (const specifier of moduleSpecifiers(bytes.toString('utf8'))) {
+      const sourceText = await dependencySource(filePath, bytes.toString('utf8'))
+      if (sourceText === undefined) continue
+      for (const specifier of moduleSpecifiers(sourceText, filePath)) {
         if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
           if (!isThreeSpecifier(specifier)) {
             return `Project dependency is outside the pinned runtime profile: ${specifier}.`
@@ -1154,6 +1465,13 @@ export class WorkspaceStore {
           return specifier.startsWith('/')
             ? `Project import ${specifier} is outside the selected DSH workspace.`
             : `Project module cannot be resolved inside the selected DSH workspace: ${specifier}.`
+        }
+        queue.push(resolved)
+      }
+      for (const specifier of assetSpecifiers(filePath, sourceText)) {
+        const resolved = await this.resolveModule(source, specifier, filePath)
+        if (resolved === undefined) {
+          return `Project asset is outside the selected DSH workspace: ${specifier}.`
         }
         queue.push(resolved)
       }
@@ -1178,7 +1496,9 @@ export class WorkspaceStore {
       files.set(filePath, bytes)
       if (files.size > MAX_FILES) throw new Error('selected project exceeds 512 files')
       if (!mediaType(filePath, bytes).text) continue
-      for (const specifier of moduleSpecifiers(bytes.toString('utf8'))) {
+      const sourceText = await dependencySource(filePath, bytes.toString('utf8'))
+      if (sourceText === undefined) continue
+      for (const specifier of moduleSpecifiers(sourceText, filePath)) {
         if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
           if (!isThreeSpecifier(specifier)) {
             throw new Error(`dependency ${JSON.stringify(specifier)} is not in the pinned M7 profile`)
@@ -1188,6 +1508,13 @@ export class WorkspaceStore {
         const resolved = await this.resolveModule(source, specifier, filePath)
         if (resolved === undefined) {
           throw new Error(`workspace module not found: ${specifier}`)
+        }
+        queue.push(resolved)
+      }
+      for (const specifier of assetSpecifiers(filePath, sourceText)) {
+        const resolved = await this.resolveModule(source, specifier, filePath)
+        if (resolved === undefined) {
+          throw new Error(`workspace asset not found: ${specifier}`)
         }
         queue.push(resolved)
       }
@@ -1277,14 +1604,18 @@ export class WorkspaceStore {
   }
 
   private async ensureMetadata(path: string): Promise<void> {
+    await this.ensureSafeDirectory(path, this.metadataPath(path))
     await Promise.all([
-      mkdir(this.metadataPath(path, 'revisions'), { recursive: true }),
-      mkdir(this.metadataPath(path, 'objects'), { recursive: true }),
-      mkdir(this.metadataPath(path, 'transactions'), { recursive: true }),
-      mkdir(this.metadataPath(path, 'builds'), { recursive: true }),
-      mkdir(this.metadataPath(path, 'diagnostics'), { recursive: true }),
-      mkdir(this.metadataPath(path, 'editor-scenes'), { recursive: true }),
-    ])
+      'revisions',
+      'objects',
+      'transactions',
+      'builds',
+      'diagnostics',
+      'editor-scenes',
+    ].map(directory => this.ensureSafeDirectory(
+      path,
+      this.metadataPath(path, directory),
+    )))
   }
 
   private async recover(path: string): Promise<void> {
@@ -1292,7 +1623,10 @@ export class WorkspaceStore {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue
       const transactionPath = join(directory, entry.name)
-      const transaction = JSON.parse(await readFile(transactionPath, 'utf8')) as Transaction
+      const transaction = JSON.parse((await this.readMetadataFile(
+        path,
+        transactionPath,
+      )).toString('utf8')) as Transaction
       if (transaction.status !== 'prepared') continue
       const head = await this.readHead(path)
       if (head === transaction.targetRevision) {
@@ -1307,10 +1641,14 @@ export class WorkspaceStore {
           }
         }
         await this.restoreChanges(path, applied)
-        await this.writeAtomic(this.metadataPath(path, 'HEAD'), `${transaction.baseRevision}\n`)
+        await this.writeAtomic(
+          path,
+          this.metadataPath(path, 'HEAD'),
+          `${transaction.baseRevision}\n`,
+        )
         transaction.status = 'rolled-back'
       }
-      await this.writeAtomic(transactionPath, canonicalBytes(transaction))
+      await this.writeAtomic(path, transactionPath, canonicalBytes(transaction))
     }
   }
 
@@ -1320,19 +1658,26 @@ export class WorkspaceStore {
     manifest: WorkspaceManifest,
   ): Promise<void> {
     const target = this.metadataPath(path, 'revisions', `${revision}.json`)
+    const bytes = canonicalBytes(manifest)
     try {
-      await writeFile(target, canonicalBytes(manifest), { flag: 'wx', mode: 0o600 })
+      const stored = await this.readMetadataFile(path, target)
+      if (!stored.equals(bytes)) throw new Error('stored Workspace revision is corrupt')
+      return
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    if (!await createFileBound(path, target, bytes)) {
+      const stored = await this.readMetadataFile(path, target)
+      if (!stored.equals(bytes)) throw new Error('stored Workspace revision is corrupt')
     }
   }
 
   private async readStoredBuild(path: string, buildId: string): Promise<StoredBuild | undefined> {
     try {
-      return storedBuild(JSON.parse(await readFile(
+      return storedBuild(JSON.parse((await this.readMetadataFile(
+        path,
         this.metadataPath(path, 'builds', buildId, 'build.json'),
-        'utf8',
-      )))
+      )).toString('utf8')))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
@@ -1341,7 +1686,10 @@ export class WorkspaceStore {
 
   private async readHead(path: string): Promise<string | undefined> {
     try {
-      const value = (await readFile(this.metadataPath(path, 'HEAD'), 'utf8')).trim()
+      const value = (await this.readMetadataFile(
+        path,
+        this.metadataPath(path, 'HEAD'),
+      )).toString('utf8').trim()
       return /^[a-f0-9]{64}$/.test(value) ? value : undefined
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
@@ -1353,16 +1701,22 @@ export class WorkspaceStore {
     const hash = digest(bytes)
     const target = this.metadataPath(path, 'objects', hash)
     try {
-      await writeFile(target, bytes, { flag: 'wx', mode: 0o600 })
+      const stored = await this.readMetadataFile(path, target)
+      if (digest(stored) !== hash) throw new Error('stored Workspace object is corrupt')
+      return hash
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    if (!await createFileBound(path, target, bytes)) {
+      const stored = await this.readMetadataFile(path, target)
+      if (digest(stored) !== hash) throw new Error('stored Workspace object is corrupt')
     }
     return hash
   }
 
   private readObject(path: string, hash: string): Promise<Buffer> {
     if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error('invalid object hash')
-    return readFile(this.metadataPath(path, 'objects', hash))
+    return this.readMetadataFile(path, this.metadataPath(path, 'objects', hash))
   }
 
   private async readWorkspaceFile(root: string, path: string): Promise<Buffer> {
@@ -1398,7 +1752,7 @@ export class WorkspaceStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
-    await this.writeAtomic(target, bytes)
+    await this.writeAtomic(root, target, bytes)
   }
 
   private async ensureSafeDirectory(root: string, directory: string): Promise<void> {
@@ -1421,16 +1775,93 @@ export class WorkspaceStore {
     }
   }
 
-  private async writeAtomic(path: string, bytes: Uint8Array | string): Promise<void> {
-    await mkdir(dirname(path), { recursive: true })
-    const temporary = `${path}.${String(process.pid)}.${randomUUID()}.tmp`
+  private async readMetadataFile(root: string, path: string): Promise<Buffer> {
+    const file = await this.openMetadataFile(root, path, constants.O_RDONLY)
     try {
-      await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 })
-      await rename(temporary, path)
+      return await file.readFile()
+    } finally {
+      await file.close()
+    }
+  }
+
+  private async openMetadataFile(
+    root: string,
+    path: string,
+    flags: number,
+  ): Promise<FileHandle> {
+    if (!isWithin(root, path)) throw new Error('workspace metadata escapes root')
+    const name = relative(root, path)
+    const invalid = (): Error => new Error(`workspace metadata is not a regular file: ${name}`)
+    const info = await lstat(path)
+    if (!info.isFile() || info.isSymbolicLink()) throw invalid()
+    let file
+    try {
+      file = await open(path, flags | constants.O_NOFOLLOW)
     } catch (error) {
-      await unlink(temporary).catch(() => {})
+      if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw invalid()
       throw error
     }
+    try {
+      const [opened, current, resolved] = await Promise.all([
+        file.stat(),
+        lstat(path),
+        realpath(path),
+      ])
+      if (!opened.isFile()
+        || !current.isFile()
+        || current.isSymbolicLink()
+        || opened.dev !== current.dev
+        || opened.ino !== current.ino
+        || resolved !== path
+        || !isWithin(root, resolved)) {
+        throw invalid()
+      }
+      return file
+    } catch (error) {
+      await file.close()
+      throw error
+    }
+  }
+
+  private async clearActiveRuntime(
+    workspace: string,
+    revision: string,
+    runId: string,
+  ): Promise<boolean> {
+    const path = this.metadataPath(workspace, 'diagnostics', 'active-run.json')
+    let file: FileHandle
+    try {
+      file = await this.openMetadataFile(
+        workspace,
+        path,
+        constants.O_RDONLY,
+      )
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+    try {
+      const bytes = await file.readFile()
+      if (bytes.length === 0) return false
+      const activeRuntime = activeRuntimeSchema.parse(JSON.parse(bytes.toString('utf8')))
+      if (!this.ownsActiveRuntime(activeRuntime)
+        || activeRuntime.revision !== revision
+        || activeRuntime.runId !== runId) return false
+    } finally {
+      await file.close()
+    }
+    await this.ensureSafeDirectory(workspace, dirname(path))
+    await this.writeAtomic(workspace, path, Buffer.alloc(0))
+    return true
+  }
+
+  private async writeAtomic(
+    root: string,
+    path: string,
+    bytes: Uint8Array | string,
+  ): Promise<void> {
+    await this.ensureSafeDirectory(root, dirname(path))
+    await replaceFileBound(root, path, bytes)
   }
 
   private metadataPath(path: string, ...parts: string[]): string {
@@ -1438,14 +1869,12 @@ export class WorkspaceStore {
   }
 
   private async withLock<T>(projectId: string, action: () => Promise<T>): Promise<T> {
-    const previous = this.locks.get(projectId) ?? Promise.resolve()
-    const run = previous.then(action, action)
-    const tail = run.then(() => {}, () => {})
-    this.locks.set(projectId, tail)
-    try {
-      return await run
-    } finally {
-      if (this.locks.get(projectId) === tail) this.locks.delete(projectId)
-    }
+    await this.ready
+    const workspace = this.workspaces.get(projectId)
+    if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
+    return withCrossProcessRuntimeLock(
+      runtimeLockPathForWorkspace(workspace.path),
+      action,
+    )
   }
 }

@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises'
+import { SourceMap } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -40,7 +44,10 @@ async function fixture() {
       qualityTiers: ['default'],
     },
   }, null, 2))
-  await writeFile(join(workspace, 'src', 'shader.glsl'), 'void main() { gl_Position = vec4(0.0); }\n')
+  await writeFile(
+    join(workspace, 'src', 'shader.glsl'),
+    '// "./missing-shader.png"\nvoid main() { gl_Position = vec4(0.0); }\n',
+  )
   await writeFile(join(workspace, 'src', 'value.ts'), 'export const emittedParts: number = 62\n')
   await writeFile(join(workspace, 'src', 'main.ts'), `
 import * as THREE from 'three/webgpu'
@@ -48,6 +55,8 @@ import { color } from 'three/tsl'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import shader from './shader.glsl?raw'
 import { emittedParts } from './value'
+const shaderComment = \`// "./missing-template.png"
+void main() {}\`
 
 export default {
   backend: 'webgpu',
@@ -57,6 +66,7 @@ export default {
       metrics: () => ({
         emittedParts,
         shaderBytes: shader.length,
+        templateBytes: shaderComment.length,
         tslColor: String(color(0xff0000)),
         controls: OrbitControls.name,
       }),
@@ -65,26 +75,37 @@ export default {
 }
 `.trimStart())
 
-  const client = new Client({
-    name: 'threejs-editor-mcp-m7-builder-test',
-    version: '0.0.0',
-  })
-  await client.connect(new StdioClientTransport({
-    command: process.execPath,
-    args: [
-      serverPath,
-      '--root',
-      root,
-      '--workspace-root',
-      parent,
-      '--workspace',
-      `m7-builder=${workspace}`,
-    ],
-  }))
+  const connect = async () => {
+    const next = new Client({
+      name: 'threejs-editor-mcp-m7-builder-test',
+      version: '0.0.0',
+    })
+    await next.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [
+        serverPath,
+        '--root',
+        root,
+        '--workspace-root',
+        parent,
+        '--workspace',
+        `m7-builder=${workspace}`,
+      ],
+    }))
+    return next
+  }
+  let client = await connect()
   return {
-    client,
+    get client() {
+      return client
+    },
     root,
     workspace,
+    connect,
+    async restart() {
+      await client.close()
+      client = await connect()
+    },
     async close() {
       await client.close()
       await rm(root, { recursive: true, force: true })
@@ -149,6 +170,154 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
     assert.equal(cached.structuredContent.buildId, built.structuredContent.buildId)
     assert.equal(after.mtimeMs, before.mtimeMs)
 
+    const runId = '11111111-2222-4333-8444-555555555555'
+    await game.client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId,
+      },
+    })
+    const staleObject = {
+      uuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      path: 'scene/Stale#0',
+      name: 'Stale Runtime object',
+      type: 'Mesh',
+      visible: true,
+      position: [0, 0, 0],
+      rotationDegrees: [0, 0, 0],
+      scale: [1, 1, 1],
+      commands: ['set_position'],
+    }
+    await game.client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId,
+        objects: [staleObject],
+      },
+    })
+    const reported = await game.client.callTool({
+      name: 'report_diagnostics',
+      arguments: {
+        projectId: 'm7-builder',
+        testedRevision: revision,
+        runId,
+        errors: [],
+        warnings: [],
+      },
+    })
+    assert.equal(reported.structuredContent.testedRevision, revision)
+    assert.equal(reported.structuredContent.runId, runId)
+    const checkedReady = await game.client.callTool({
+      name: 'check_project',
+      arguments: { projectId: 'm7-builder' },
+    })
+    assert.equal(checkedReady.structuredContent.testedRevision, revision)
+    assert.equal(checkedReady.structuredContent.runId, runId)
+    assert.match(
+      checkedReady.content[0].text,
+      new RegExp(`Diagnostics tested revision ${revision} with run ${runId}\\.$`),
+    )
+
+    const newerRunId = '22222222-3333-4444-8555-666666666666'
+    await game.client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId: newerRunId,
+      },
+    })
+    const staleRelease = await game.client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId,
+      },
+    })
+    assert.equal(staleRelease.structuredContent.released, false)
+    const inspectedAfterNewRun = await game.client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    assert.equal(inspectedAfterNewRun.structuredContent.objects.some(
+      object => object.uuid === staleObject.uuid,
+    ), false)
+    const staleScene = await game.client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId,
+        objects: [],
+      },
+    })
+    assert.equal(staleScene.isError, true)
+    assert.match(staleScene.content[0].text, /runtime run changed/)
+    await game.client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId: newerRunId,
+        objects: [],
+      },
+    })
+    const staleSave = await game.client.callTool({
+      name: 'apply_editor_commands',
+      arguments: {
+        projectId: 'm7-builder',
+        baseRevision: revision,
+        runId,
+        source: 'human',
+        operations: [{
+          type: 'set_position',
+          objectUuid: staleObject.uuid,
+          value: [1, 0, 0],
+        }],
+      },
+    })
+    assert.equal(staleSave.isError, true)
+    assert.match(staleSave.content[0].text, /unavailable for this run/)
+    const missingRun = await game.client.callTool({
+      name: 'report_diagnostics',
+      arguments: {
+        projectId: 'm7-builder',
+        testedRevision: revision,
+        errors: [],
+        warnings: [],
+      },
+    })
+    assert.equal(missingRun.isError, true)
+    assert.match(missingRun.content[0].text, /require a Runtime runId/)
+    const staleRun = await game.client.callTool({
+      name: 'report_diagnostics',
+      arguments: {
+        projectId: 'm7-builder',
+        testedRevision: revision,
+        runId,
+        errors: ['stale run'],
+        warnings: [],
+      },
+    })
+    assert.equal(staleRun.isError, true)
+    assert.match(staleRun.content[0].text, /runtime run changed/)
+    const currentRun = await game.client.callTool({
+      name: 'report_diagnostics',
+      arguments: {
+        projectId: 'm7-builder',
+        testedRevision: revision,
+        runId: newerRunId,
+        errors: [],
+        warnings: [],
+      },
+    })
+    assert.equal(currentRun.structuredContent.runId, newerRunId)
+
     const changed = await game.client.callTool({
       name: 'apply_project_files',
       arguments: {
@@ -162,6 +331,24 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
       },
     })
     const brokenRevision = changed.structuredContent.revision
+    const released = await game.client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId: newerRunId,
+      },
+    })
+    assert.equal(released.structuredContent.released, true)
+    const releasedAgain = await game.client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId: newerRunId,
+      },
+    })
+    assert.equal(releasedAgain.structuredContent.released, false)
     const failed = await game.client.callTool({
       name: 'build_project',
       arguments: {
@@ -185,6 +372,10 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
       arguments: { projectId: 'm7-builder' },
     })
     assert.ok(checked.structuredContent.errors.some(message => message.includes('src/main.ts:')))
+    assert.equal(checked.structuredContent.runId, undefined)
+    assert.equal(checked.structuredContent.warnings.includes(
+      `Play diagnostics apply to older revision ${revision}`,
+    ), false)
     await assert.rejects(readFile(join(
       game.workspace,
       '.threejs-editor',
@@ -197,6 +388,437 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
   }
 })
 
+test('M8 stores repeated asset aliases and CSS payloads once', async () => {
+  const game = await fixture()
+  try {
+    const asset = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEAQH/7yMKGQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    await mkdir(join(game.workspace, 'src', 'assets'), { recursive: true })
+    await writeFile(join(game.workspace, 'src', 'assets', 'shared.png'), asset)
+    await writeFile(
+      join(game.workspace, 'src', 'style.css'),
+      Array.from(
+        { length: 64 },
+        (_, index) => `.asset-${String(index)}{background:url("./assets/shared.png?v=${String(index)}")}`,
+      ).join('\n'),
+    )
+    await writeFile(
+      join(game.workspace, 'src', 'assets.json'),
+      JSON.stringify({
+        './assets/shared.png?v=key': 'metadata',
+        texture: './assets/shared.png?v=json',
+      }),
+    )
+    await writeFile(
+      join(game.workspace, 'src', 'main.ts'),
+      `import config from './assets.json'
+import styles from './style.css'
+const configKeyValue = config['./assets/shared.png?v=key']
+const computed = { ['./assets/shared.png?v=computed']: 'metadata' }
+const computedKeyValue = computed['./assets/shared.png?v=computed']
+const assets = [
+${Array.from(
+    { length: 64 },
+    (_, index) => `  './assets/shared.png?v=${String(index)}',`,
+  ).join('\n')}
+]
+export default {
+  setup() {
+    return { metrics: () => ({ assets, computedKeyValue, config, configKeyValue, styles }) }
+  },
+}
+`,
+    )
+
+    const opened = await game.client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    const built = await game.client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: 'm7-builder',
+        revision: opened.structuredContent.revision,
+      },
+    })
+    assert.equal(built.structuredContent.status, 'ready')
+    const bundle = await game.client.readResource({
+      uri: built.structuredContent.bundleUri,
+    })
+    assert.equal(
+      bundle.contents[0].text.split(asset.toString('base64')).length - 1,
+      2,
+    )
+    assert.doesNotMatch(bundle.contents[0].text, /\.\/assets\/shared\.png\?v=json/)
+    const jsonAssetHash = createHash('sha256')
+      .update('src/assets.json\0./assets/shared.png?v=json')
+      .digest('base64url')
+    const jsonAssetAlias =
+      `~${jsonAssetHash.slice(0, './assets/shared.png?v=json'.length - 1)}`
+    assert.equal(
+      bundle.contents[0].text.match(new RegExp(jsonAssetAlias, 'g'))?.length,
+      2,
+    )
+    assert.match(bundle.contents[0].text, /\.\/assets\/shared\.png\?v=key/)
+    assert.match(bundle.contents[0].text, /\.\/assets\/shared\.png\?v=computed/)
+    assert.match(bundle.contents[0].text, /:is\(:root,:host\)\{--threejs-editor-asset-/)
+  } finally {
+    await game.close()
+  }
+})
+
+test('M8 rejects generated build input above the bounded expansion limit', async () => {
+  const game = await fixture()
+  try {
+    await mkdir(join(game.workspace, 'src', 'assets'), { recursive: true })
+    await mkdir(join(game.workspace, 'src', 'styles'), { recursive: true })
+    await writeFile(
+      join(game.workspace, 'src', 'assets', 'heavy.png'),
+      Buffer.alloc(1024 * 1024, 7),
+    )
+    const imports = []
+    const styles = []
+    for (let index = 0; index < 50; index += 1) {
+      const name = `style${String(index)}`
+      imports.push(`import ${name} from './styles/${name}.css'`)
+      styles.push(name)
+      await writeFile(
+        join(game.workspace, 'src', 'styles', `${name}.css`),
+        `.asset{background:url("../assets/heavy.png?v=${String(index)}")}\n`,
+      )
+    }
+    await writeFile(
+      join(game.workspace, 'src', 'main.ts'),
+      `${imports.join('\n')}
+const styles = [${styles.join(',')}]
+export default {
+  setup() {
+    return { metrics: () => ({ styles }) }
+  },
+}
+`,
+    )
+
+    const opened = await game.client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    const built = await game.client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: 'm7-builder',
+        revision: opened.structuredContent.revision,
+      },
+    })
+    assert.equal(built.structuredContent.status, 'failed')
+    assert.match(
+      built.structuredContent.diagnostics[0].message,
+      /generated build input exceeds 64 MiB/,
+    )
+  } finally {
+    await game.close()
+  }
+})
+
+test('M8 invalidates a Runtime run when its server process exits', async () => {
+  const game = await fixture()
+  try {
+    const opened = await game.client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    const revision = opened.structuredContent.revision
+    const runId = '55555555-6666-4777-8888-999999999999'
+    const registered = await game.client.callTool({
+      name: 'register_runtime_run',
+      arguments: { projectId: 'm7-builder', revision, runId },
+    })
+    assert.equal(registered.isError, undefined)
+    const reportedScene = await game.client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId,
+        objects: [{
+          uuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          path: 'scene/Stale#0',
+          name: 'Stale Runtime object',
+          type: 'Mesh',
+          visible: true,
+          position: [0, 0, 0],
+          rotationDegrees: [0, 0, 0],
+          scale: [1, 1, 1],
+          commands: ['set_position'],
+        }],
+      },
+    })
+    assert.equal(reportedScene.isError, undefined)
+    const reportedDiagnostics = await game.client.callTool({
+      name: 'report_diagnostics',
+      arguments: {
+        projectId: 'm7-builder',
+        testedRevision: revision,
+        runId,
+        errors: ['dead runtime error'],
+        warnings: [],
+      },
+    })
+    assert.equal(reportedDiagnostics.isError, undefined)
+    const activeScene = await game.client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    assert.equal(activeScene.structuredContent.objects.some(
+      object => object.name === 'Stale Runtime object',
+    ), true)
+    const activeDiagnostics = await game.client.callTool({
+      name: 'check_project',
+      arguments: { projectId: 'm7-builder' },
+    })
+    assert.equal(activeDiagnostics.structuredContent.runId, runId)
+    assert.equal(activeDiagnostics.structuredContent.errors.includes('dead runtime error'), true)
+
+    const replacement = await game.connect()
+    try {
+      const overlapping = await replacement.callTool({
+        name: 'inspect_editor',
+        arguments: { projectId: 'm7-builder' },
+      })
+      assert.equal(overlapping.structuredContent.objects.some(
+        object => object.name === 'Stale Runtime object',
+      ), false)
+      const overlappingCheck = await replacement.callTool({
+        name: 'check_project',
+        arguments: { projectId: 'm7-builder' },
+      })
+      assert.equal(overlappingCheck.structuredContent.runId, undefined)
+      assert.equal(overlappingCheck.structuredContent.errors.includes('dead runtime error'), false)
+      const replacementRunId = '66666666-7777-4888-8999-aaaaaaaaaaaa'
+      await replacement.callTool({
+        name: 'register_runtime_run',
+        arguments: { projectId: 'm7-builder', revision, runId: replacementRunId },
+      })
+      const staleSave = await game.client.callTool({
+        name: 'apply_editor_commands',
+        arguments: {
+          projectId: 'm7-builder',
+          baseRevision: revision,
+          runId,
+          source: 'human',
+          operations: [{
+            type: 'set_position',
+            objectUuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+            value: [1, 0, 0],
+          }],
+        },
+      })
+      assert.equal(staleSave.isError, true)
+      assert.match(staleSave.content[0].text, /unavailable for this run/)
+    } finally {
+      await replacement.close()
+    }
+
+    await game.restart()
+
+    const inspected = await game.client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    assert.equal(inspected.structuredContent.objects.some(
+      object => object.name === 'Stale Runtime object',
+    ), false)
+    const checked = await game.client.callTool({
+      name: 'check_project',
+      arguments: { projectId: 'm7-builder' },
+    })
+    assert.equal(checked.structuredContent.runId, undefined)
+    assert.equal(checked.structuredContent.errors.includes('dead runtime error'), false)
+  } finally {
+    await game.close()
+  }
+})
+
+test('M8 rejects symlinked build cache directories', async () => {
+  const game = await fixture()
+  const outside = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-build-outside-'))
+  try {
+    const opened = await game.client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    const built = await game.client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: 'm7-builder',
+        revision: opened.structuredContent.revision,
+      },
+    })
+    assert.equal(built.structuredContent.status, 'ready')
+    const directory = join(
+      game.workspace,
+      '.threejs-editor',
+      'builds',
+      built.structuredContent.buildId,
+    )
+    await rm(directory, { recursive: true })
+    await symlink(outside, directory)
+    const rebuilt = await game.client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: 'm7-builder',
+        revision: opened.structuredContent.revision,
+      },
+    })
+    assert.equal(rebuilt.isError, true)
+    assert.match(rebuilt.content[0].text, /workspace parent is not a real directory/)
+    assert.deepEqual(await readdir(outside), [])
+  } finally {
+    await game.close()
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('M8 rejects symlinked build cache files', async () => {
+  const game = await fixture()
+  const outside = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-build-files-outside-'))
+  try {
+    const opened = await game.client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    const built = await game.client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: 'm7-builder',
+        revision: opened.structuredContent.revision,
+      },
+    })
+    assert.equal(built.structuredContent.status, 'ready')
+    const directory = join(
+      game.workspace,
+      '.threejs-editor',
+      'builds',
+      built.structuredContent.buildId,
+    )
+    const files = [
+      { name: 'build.json' },
+      { name: 'bundle.js', uri: built.structuredContent.bundleUri },
+      { name: 'bundle.js.map', uri: built.structuredContent.sourceMapUri },
+    ]
+    for (const file of files) {
+      const target = join(directory, file.name)
+      const original = await readFile(target)
+      const external = join(outside, file.name)
+      await writeFile(external, original)
+      await rm(target)
+      await symlink(external, target)
+
+      const cached = await game.client.callTool({
+        name: 'build_project',
+        arguments: {
+          projectId: 'm7-builder',
+          revision: opened.structuredContent.revision,
+        },
+      })
+      assert.equal(cached.isError, true)
+      assert.match(cached.content[0].text, /workspace metadata is not a regular file/)
+      if (file.uri !== undefined) {
+        await assert.rejects(
+          game.client.readResource({ uri: file.uri }),
+          /workspace metadata is not a regular file/,
+        )
+      }
+
+      await rm(target)
+      await writeFile(target, original)
+    }
+  } finally {
+    await game.close()
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('M8 rejects symlinked Runtime metadata files', async () => {
+  const game = await fixture()
+  const outside = await mkdtemp(join(tmpdir(), 'threejs-editor-m8-runtime-files-outside-'))
+  try {
+    const opened = await game.client.callTool({
+      name: 'open_editor',
+      arguments: { projectId: 'm7-builder' },
+    })
+    const revision = opened.structuredContent.revision
+    const runId = '77777777-8888-4999-8aaa-bbbbbbbbbbbb'
+    await game.client.callTool({
+      name: 'register_runtime_run',
+      arguments: { projectId: 'm7-builder', revision, runId },
+    })
+    await game.client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        runId,
+        objects: [],
+      },
+    })
+    await game.client.callTool({
+      name: 'report_diagnostics',
+      arguments: {
+        projectId: 'm7-builder',
+        testedRevision: revision,
+        runId,
+        errors: [],
+        warnings: [],
+      },
+    })
+
+    const metadata = join(game.workspace, '.threejs-editor')
+    const files = [
+      {
+        path: join(metadata, 'diagnostics', 'active-run.json'),
+        check: () => game.client.callTool({
+          name: 'check_project',
+          arguments: { projectId: 'm7-builder' },
+        }),
+      },
+      {
+        path: join(metadata, 'editor-scenes', `${revision}.json`),
+        check: () => game.client.callTool({
+          name: 'inspect_editor',
+          arguments: { projectId: 'm7-builder' },
+        }),
+      },
+      {
+        path: join(metadata, 'diagnostics', 'runtime.json'),
+        check: () => game.client.callTool({
+          name: 'check_project',
+          arguments: { projectId: 'm7-builder' },
+        }),
+      },
+    ]
+    for (const [index, file] of files.entries()) {
+      const original = await readFile(file.path)
+      const external = join(outside, `${String(index)}.json`)
+      await writeFile(external, original)
+      await rm(file.path)
+      await symlink(external, file.path)
+
+      const result = await file.check()
+      assert.equal(result.isError, true)
+      assert.match(result.content[0].text, /workspace metadata is not a regular file/)
+
+      await rm(file.path)
+      await writeFile(file.path, original)
+    }
+  } finally {
+    await game.close()
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
 test('M7 discovers gallery projects and opens one through the MCP App contract', async () => {
   const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m7-gallery-projects-'))
   const repository = await mkdtemp(join(tmpdir(), 'threejs-editor-m7-gallery-repository-'))
@@ -205,25 +827,113 @@ test('M7 discovers gallery projects and opens one through the MCP App contract',
   const sourceProjectPath = `dev/example-gallery/examples/${projectPath}`
   const project = join(examples, projectPath)
   await mkdir(project, { recursive: true })
+  await mkdir(join(project, 'assets'), { recursive: true })
   await mkdir(join(repository, 'dev', 'example-gallery', 'support'), { recursive: true })
   await mkdir(join(repository, 'skills', 'threejs-procedural-geometry'), { recursive: true })
   await mkdir(join(examples, 'unrelated-large-example'), { recursive: true })
   await mkdir(join(examples, 'second-example'), { recursive: true })
+  await mkdir(join(examples, 'syntax-error-example'), { recursive: true })
   await writeFile(join(project, 'example.json'), JSON.stringify({
     title: 'Formula One Race Car',
     backend: 'WebGPU / TSL node materials',
     debugModes: [{ value: 'final' }, { value: 'topology' }],
   }))
+  const pixel = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEAQH/7yMKGQAAAABJRU5ErkJggg==',
+    'base64',
+  )
   await writeFile(join(project, 'scene.js'), `
 import { createCar } from './race-car-scene.js'
+import { importEqualsPoster, importEqualsValue } from './asset-import.ts'
+import posterData from './assets/poster.png'
+import styles from './style.css'
+const posterModule = import(/* runtime asset */ './assets/poster.png')
+const requiredPoster = require('./assets/poster.png')
+const requiredHelper = require('./common-helper.cjs')
+const topLevelTexture = new THREE.TextureLoader().load('./assets/poster.png')
+const model = './assets/model.glb'
+const poster = \`/${sourceProjectPath}/assets/poster.png?v=1#hero\`
+const relativePoster = './assets/poster.png?v=2'
+const slashEscapedPoster = '.\\/assets/poster.png'
+const hexEscapedPoster = './assets/poster\\x2epng'
+const unicodeEscapedPoster = './assets/poster\\u002epng'
+const spacedPoster = './assets/spaced image.png'
+const conditionalPoster = \`\${true ? './assets/template-a.png' : './assets/template-b.png'}\`
+const regexPoster = \`\${/[}]/.test('}') ? 'assets/regex-a.png' : './assets/regex-b.png'}\`
+const assetPattern = /"\\.\\/assets\\/poster\\.png"/
+const rawPoster = String.raw\`./assets/poster.png\`
+const escapedPoster = './assets/poster\\
+.png'
+const sourceMapMarker = 37
+const markup = '<img src="./assets/missing.png">'
+// Documentation example only: "./assets/missing.png"
 export default {
   backend: 'webgpu',
   setup({ scene }) {
     scene.add(createCar())
-    return { metrics: () => ({ emittedParts: 62 }) }
+    return {
+      metrics: () => ({
+        emittedParts: 62,
+        poster,
+        posterData,
+        posterModule,
+        requiredPoster,
+        importEqualsPoster,
+        importEqualsValue,
+        requiredValue: requiredHelper.value,
+        topLevelTextureName: topLevelTexture.name,
+        model,
+        relativePoster,
+        slashEscapedPoster,
+        hexEscapedPoster,
+        unicodeEscapedPoster,
+        spacedPoster,
+        conditionalPoster,
+        regexPoster,
+        assetPattern: assetPattern.source,
+        rawPoster,
+        escapedPoster,
+        sourceMapMarker,
+        markup,
+        styles,
+      }),
+    }
   },
 }
 `.trimStart())
+  await writeFile(
+    join(project, 'asset-import.ts'),
+    "import helper = require('./import-equals-helper.js')\n"
+      + "import poster = require('./assets/poster.png')\n"
+      + 'export const importEqualsValue = helper.importEqualsValue\n'
+      + 'export { poster as importEqualsPoster }\n',
+  )
+  await writeFile(
+    join(project, 'import-equals-helper.js'),
+    'export const importEqualsValue = 11\n',
+  )
+  await writeFile(
+    join(project, 'common-helper.cjs'),
+    'module.exports = { value: 13 }\n',
+  )
+  await writeFile(join(project, 'style.css'), `
+/* Documentation only: url("./assets/missing.png") */
+.hero { background: url(./assets/css.png?v=1#hero); }
+.thumb { background: url("./assets/css image.png"); }
+.pressed { background: url("./assets/button)pressed.png"); }
+.escaped { background: url(./assets/button\\)pressed.png); }
+.commented { background: url/* before */(/* value */ "./assets/css.png" /* after */); }
+`.trimStart())
+  await writeFile(join(project, 'assets', 'button)pressed.png'), pixel)
+  await writeFile(join(project, 'assets', 'css image.png'), pixel)
+  await writeFile(join(project, 'assets', 'css.png'), pixel)
+  await writeFile(join(project, 'assets', 'model.glb'), Buffer.from('glTF'))
+  await writeFile(join(project, 'assets', 'poster.png'), pixel)
+  await writeFile(join(project, 'assets', 'regex-a.png'), pixel)
+  await writeFile(join(project, 'assets', 'regex-b.png'), pixel)
+  await writeFile(join(project, 'assets', 'spaced image.png'), pixel)
+  await writeFile(join(project, 'assets', 'template-a.png'), pixel)
+  await writeFile(join(project, 'assets', 'template-b.png'), pixel)
   await writeFile(join(project, 'race-car-scene.js'), `
 import { createStage } from '/dev/example-gallery/support/studio-stage.js'
 import { createModel } from '/skills/threejs-procedural-geometry/race-car-model.js'
@@ -252,9 +962,31 @@ export function createCar() {
     join(examples, 'second-example', 'scene.js'),
     "import '/private.js'\nexport default { setup() { return {} } }\n",
   )
+  await writeFile(
+    join(examples, 'syntax-error-example', 'example.json'),
+    JSON.stringify({ title: 'Syntax Error Example', backend: 'WebGL' }),
+  )
+  await writeFile(
+    join(examples, 'syntax-error-example', 'scene.js'),
+    '// Documentation only: "./missing.png"\nexport default { setup( }\n',
+  )
   await writeFile(join(repository, 'private.js'), 'export const privateValue = true\n')
   const sourceFiles = [
     join(project, 'scene.js'),
+    join(project, 'asset-import.ts'),
+    join(project, 'common-helper.cjs'),
+    join(project, 'import-equals-helper.js'),
+    join(project, 'style.css'),
+    join(project, 'assets', 'button)pressed.png'),
+    join(project, 'assets', 'css image.png'),
+    join(project, 'assets', 'css.png'),
+    join(project, 'assets', 'model.glb'),
+    join(project, 'assets', 'poster.png'),
+    join(project, 'assets', 'regex-a.png'),
+    join(project, 'assets', 'regex-b.png'),
+    join(project, 'assets', 'spaced image.png'),
+    join(project, 'assets', 'template-a.png'),
+    join(project, 'assets', 'template-b.png'),
     join(project, 'race-car-scene.js'),
     join(repository, 'dev', 'example-gallery', 'support', 'studio-stage.js'),
     join(repository, 'skills', 'threejs-procedural-geometry', 'race-car-model.js'),
@@ -281,7 +1013,7 @@ export function createCar() {
     const narrowCar = narrowList.structuredContent.workspaceProjects.find(
       candidate => candidate.projectPath.endsWith('formula-one-race-car'),
     )
-    assert.equal(narrowList.structuredContent.workspaceProjects.length, 2)
+    assert.equal(narrowList.structuredContent.workspaceProjects.length, 3)
     assert.equal(narrowCar.projectPath, projectPath)
     assert.equal(narrowCar.available, true)
     assert.equal(narrowCar.issue, undefined)
@@ -292,7 +1024,36 @@ export function createCar() {
     )
     assert.equal(restricted.available, false)
     assert.match(restricted.issue, /outside the selected DSH workspace/)
+    const invalid = narrowList.structuredContent.workspaceProjects.find(
+      candidate => candidate.projectPath === 'syntax-error-example',
+    )
+    assert.equal(invalid.available, true)
+    assert.equal(invalid.issue, undefined)
     assert.equal(JSON.stringify(narrowList.structuredContent).includes(repository), false)
+
+    const invalidOpened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectPath: invalid.projectPath },
+      _meta: narrowMeta,
+    })
+    assert.equal(invalidOpened.isError, undefined)
+    const invalidBuild = await client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: invalidOpened.structuredContent.projectId,
+        revision: invalidOpened.structuredContent.revision,
+      },
+    })
+    assert.equal(invalidBuild.structuredContent.status, 'failed')
+    assert.ok(invalidBuild.structuredContent.diagnostics.some(
+      diagnostic => diagnostic.file?.includes('scene.js'),
+    ))
+    assert.equal(
+      invalidBuild.structuredContent.diagnostics.some(
+        diagnostic => diagnostic.message.includes('missing.png'),
+      ),
+      false,
+    )
 
     const ambiguous = await client.callTool({
       name: 'open_editor',
@@ -300,7 +1061,7 @@ export function createCar() {
       _meta: narrowMeta,
     })
     assert.equal(ambiguous.isError, true)
-    assert.match(ambiguous.content[0].text, /contains 2 Three\.js examples/)
+    assert.match(ambiguous.content[0].text, /contains 3 Three\.js examples/)
     assert.match(ambiguous.content[0].text, /Do not run npm/)
 
     const opened = await client.callTool({
@@ -325,17 +1086,177 @@ export function createCar() {
     assert.equal(built.structuredContent.backend, 'webgpu')
     assert.deepEqual(built.structuredContent.diagnostics, [])
     assert.ok(built.structuredContent.inputs.includes(`${sourceProjectPath}/scene.js`))
+    assert.ok(built.structuredContent.inputs.includes(`${sourceProjectPath}/asset-import.ts`))
+    assert.ok(built.structuredContent.inputs.includes(`${sourceProjectPath}/common-helper.cjs`))
+    assert.ok(built.structuredContent.inputs.includes(
+      `${sourceProjectPath}/import-equals-helper.js`,
+    ))
+    assert.ok(built.structuredContent.inputs.includes(`${sourceProjectPath}/style.css`))
     assert.ok(built.structuredContent.inputs.includes(
       'skills/threejs-procedural-geometry/race-car-model.js',
     ))
     assert.ok(built.structuredContent.inputs.includes('threejs.editor.json'))
+    assert.deepEqual(built.structuredContent.assets, [
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/button)pressed.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/css image.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/css.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'model/gltf-binary',
+        path: `${sourceProjectPath}/assets/model.glb`,
+        sha256: 'c74f919439792582aa4f0b188ec2a928675cdb3ba72797781ceb6dfaa86b313f',
+        size: 4,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/poster.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/regex-a.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/regex-b.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/spaced image.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/template-a.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/template-b.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+    ])
+    const galleryBundle = await client.readResource({
+      uri: built.structuredContent.bundleUri,
+    })
+    assert.match(galleryBundle.contents[0].text, /data:image\/png;base64,/)
+    assert.match(galleryBundle.contents[0].text, /data:model\/gltf-binary;base64,/)
+    assert.match(galleryBundle.contents[0].text, /DefaultLoadingManager\.setURLModifier/)
+    assert.match(galleryBundle.contents[0].text, /\.hero \{ background: var\(/)
+    assert.match(galleryBundle.contents[0].text, /\.commented \{ background: var\(/)
+    const modifierOffset = galleryBundle.contents[0].text.indexOf(
+      'DefaultLoadingManager.setURLModifier',
+    )
+    const topLevelLoadOffset = galleryBundle.contents[0].text.indexOf(
+      'new THREE.TextureLoader().load',
+    )
+    const adapterEvaluationOffset = galleryBundle.contents[0].text.indexOf(
+      'await Promise.resolve().then',
+    )
+    assert.notEqual(topLevelLoadOffset, -1)
+    assert.notEqual(adapterEvaluationOffset, -1)
+    assert.ok(modifierOffset < adapterEvaluationOffset)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /url\(\.\/assets\/css\.png/)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /import\(["']data:image\//)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /\.\/assets\/poster\.png\?v=2/)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /\.\/assets\/spaced image\.png/)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /\.\/assets\/template-[ab]\.png/)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /["'](?:\.\/)?assets\/regex-[ab]\.png/)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /\.\/assets\/button\)pressed\.png/)
+    assert.match(galleryBundle.contents[0].text, /String\.raw`\.\/assets\/poster\.png`/)
+    assert.match(galleryBundle.contents[0].text, /assets\\\/poster\\\.png/)
+    assert.match(galleryBundle.contents[0].text, /\.\/assets\/missing\.png/)
+    assert.match(galleryBundle.contents[0].text, /["']~[A-Za-z0-9_-]+["']/)
+    const assetHash = createHash('sha256')
+      .update(`${sourceProjectPath}/scene.js\0./assets/poster.png`)
+      .digest('base64url')
+    for (const length of [20, 22, 24]) {
+      const alias = `~${assetHash.repeat(Math.ceil(length / assetHash.length)).slice(0, length - 1)}`
+      assert.equal(
+        galleryBundle.contents[0].text.match(new RegExp(`["']${alias}["']`, 'g'))?.length,
+        2,
+      )
+    }
+    const gallerySourceMapResource = await client.readResource({
+      uri: built.structuredContent.sourceMapUri,
+    })
+    const gallerySourceMap = JSON.parse(gallerySourceMapResource.contents[0].text)
+    const sceneSourceIndex = gallerySourceMap.sources.indexOf(
+      `workspace:///${sourceProjectPath}/scene.js`,
+    )
+    assert.notEqual(sceneSourceIndex, -1)
+    assert.equal(
+      gallerySourceMap.sourcesContent[sceneSourceIndex],
+      originalSources[0].toString('utf8'),
+    )
+    assert.doesNotMatch(gallerySourceMap.sourcesContent[sceneSourceIndex], /data:image/)
+    const sourceMap = new SourceMap(gallerySourceMap)
+    const originalScene = originalSources[0].toString('utf8')
+    const originalOffset = originalScene.indexOf("'./assets/poster.png?v=2'")
+    const originalPosition = originalScene.slice(0, originalOffset).split('\n')
+    const aliasEntry = [...galleryBundle.contents[0].text.matchAll(/(["'])(~[A-Za-z0-9_-]+)\1/g)]
+      .map(match => {
+        const generated = galleryBundle.contents[0].text.slice(0, match.index + 1).split('\n')
+        return sourceMap.findEntry(generated.length - 1, generated.at(-1).length)
+      })
+      .find(entry => (
+        entry.originalSource === `workspace:///${sourceProjectPath}/scene.js`
+          && entry.originalLine === originalPosition.length - 1
+      ))
+    assert.notEqual(aliasEntry, undefined)
+    assert.equal(aliasEntry.originalLine, originalPosition.length - 1)
+    assert.equal(aliasEntry.originalColumn, originalPosition.at(-1).length)
+    const markerOffset = galleryBundle.contents[0].text.indexOf('sourceMapMarker = 37')
+    assert.notEqual(markerOffset, -1)
+    const markerPosition = galleryBundle.contents[0].text.slice(0, markerOffset).split('\n')
+    const markerEntry = sourceMap.findEntry(
+      markerPosition.length - 1,
+      markerPosition.at(-1).length,
+    )
+    const originalMarkerOffset = originalScene.indexOf('sourceMapMarker = 37')
+    const originalMarkerPosition = originalScene.slice(0, originalMarkerOffset).split('\n')
+    assert.equal(markerEntry.originalSource, `workspace:///${sourceProjectPath}/scene.js`)
+    assert.equal(markerEntry.originalLine, originalMarkerPosition.length - 1)
+    assert.equal(markerEntry.originalColumn, originalMarkerPosition.at(-1).length)
 
     const carUuid = '11111111-1111-4111-8111-111111111111'
+    const galleryRunId = '33333333-4444-4555-8666-777777777777'
+    await client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: opened.structuredContent.revision,
+        runId: galleryRunId,
+      },
+    })
     const reported = await client.callTool({
       name: 'report_editor_scene',
       arguments: {
         projectId: opened.structuredContent.projectId,
         revision: opened.structuredContent.revision,
+        runId: galleryRunId,
         objects: [{
           uuid: carUuid,
           path: 'scene/VF-26#0',
@@ -369,6 +1290,7 @@ export function createCar() {
       arguments: {
         projectId: opened.structuredContent.projectId,
         baseRevision: opened.structuredContent.revision,
+        runId: galleryRunId,
         source: 'human',
         operations: [{
           type: 'set_position',
@@ -425,25 +1347,172 @@ export function createCar() {
       arguments: { projectId: opened.structuredContent.projectId },
     })
     assert.equal(inspectedAfterEdit.structuredContent.revision, edited.structuredContent.revision)
-    assert.deepEqual(inspectedAfterEdit.structuredContent.objects[0].position, [0.25, 0, 0])
+    assert.equal(inspectedAfterEdit.structuredContent.objects.some(
+      object => object.uuid === carUuid,
+    ), false)
+    const reloadedRunId = '44444444-5555-4666-8777-888888888888'
+    await client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: edited.structuredContent.revision,
+        runId: reloadedRunId,
+      },
+    })
+    await client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: edited.structuredContent.revision,
+        runId: reloadedRunId,
+        objects: [{
+          uuid: carUuid,
+          path: 'scene/VF-26#0',
+          name: 'VF-26',
+          type: 'Group',
+          visible: true,
+          position: [0.25, 0, 0],
+          rotationDegrees: [0, 0, 0],
+          scale: [1, 1, 1],
+          commands: [
+            'set_position',
+            'set_rotation',
+            'set_scale',
+            'set_name',
+            'set_visible',
+          ],
+        }],
+      },
+    })
+    const inspectedAfterReload = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: opened.structuredContent.projectId },
+    })
+    assert.deepEqual(inspectedAfterReload.structuredContent.objects[0].position, [0.25, 0, 0])
+    const oldDiagnostics = await client.callTool({
+      name: 'report_diagnostics',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        testedRevision: edited.structuredContent.revision,
+        runId: reloadedRunId,
+        errors: ['old revision error'],
+        warnings: [],
+      },
+    })
+    assert.equal(oldDiagnostics.isError, undefined)
+    const aiEdited = await client.callTool({
+      name: 'apply_editor_commands',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        baseRevision: edited.structuredContent.revision,
+        source: 'ai',
+        operations: [{
+          type: 'set_position',
+          objectUuid: carUuid,
+          value: [0.5, 0, 0],
+        }],
+      },
+    })
+    assert.equal(aiEdited.isError, undefined)
+    const advanced = await client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: aiEdited.structuredContent.revision,
+        runId: reloadedRunId,
+        previousRevision: edited.structuredContent.revision,
+      },
+    })
+    assert.equal(advanced.isError, undefined)
+    const staleRelease = await client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: edited.structuredContent.revision,
+        runId: reloadedRunId,
+      },
+    })
+    assert.equal(staleRelease.structuredContent.released, false)
+    const diagnosticsAfterAdvance = await client.callTool({
+      name: 'check_project',
+      arguments: { projectId: opened.structuredContent.projectId },
+    })
+    assert.equal(diagnosticsAfterAdvance.structuredContent.testedRevision, undefined)
+    assert.equal(diagnosticsAfterAdvance.structuredContent.runId, undefined)
+    assert.equal(
+      diagnosticsAfterAdvance.structuredContent.errors.includes('old revision error'),
+      false,
+    )
+    const staleAdvance = await client.callTool({
+      name: 'register_runtime_run',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: aiEdited.structuredContent.revision,
+        runId: reloadedRunId,
+        previousRevision: edited.structuredContent.revision,
+      },
+    })
+    assert.equal(staleAdvance.isError, true)
+    assert.match(staleAdvance.content[0].text, /revision was advanced/)
+    const advancedScene = await client.callTool({
+      name: 'report_editor_scene',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        revision: aiEdited.structuredContent.revision,
+        runId: reloadedRunId,
+        objects: [{
+          uuid: carUuid,
+          path: 'scene/VF-26#0',
+          name: 'VF-26',
+          type: 'Group',
+          visible: true,
+          position: [0.5, 0, 0],
+          rotationDegrees: [0, 0, 0],
+          scale: [1, 1, 1],
+          commands: [
+            'set_position',
+            'set_rotation',
+            'set_scale',
+            'set_name',
+            'set_visible',
+          ],
+        }],
+      },
+    })
+    assert.equal(advancedScene.isError, undefined)
+    const inspectedAfterAdvance = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: opened.structuredContent.projectId },
+    })
+    assert.deepEqual(inspectedAfterAdvance.structuredContent.objects[0].position, [0.5, 0, 0])
     const projectAfterEdit = await client.callTool({
       name: 'inspect_project',
       arguments: { projectId: opened.structuredContent.projectId },
     })
     assert.equal(projectAfterEdit.structuredContent.objects[0].name, 'VF-26')
-    assert.deepEqual(projectAfterEdit.structuredContent.editorChanges, [{
-      source: 'human',
-      type: 'set_position',
-      objectUuid: carUuid,
-      objectName: 'VF-26',
-      objectPath: 'scene/VF-26#0',
-      value: [0.25, 0, 0],
-    }])
+    assert.deepEqual(projectAfterEdit.structuredContent.editorChanges, [
+      {
+        source: 'human',
+        type: 'set_position',
+        objectUuid: carUuid,
+        objectName: 'VF-26',
+        objectPath: 'scene/VF-26#0',
+        value: [0.25, 0, 0],
+      },
+      {
+        source: 'ai',
+        type: 'set_position',
+        objectUuid: carUuid,
+        objectName: 'VF-26',
+        objectPath: 'scene/VF-26#0',
+        value: [0.5, 0, 0],
+      },
+    ])
     const rebuilt = await client.callTool({
       name: 'build_project',
       arguments: {
         projectId: opened.structuredContent.projectId,
-        revision: edited.structuredContent.revision,
+        revision: aiEdited.structuredContent.revision,
       },
     })
     assert.equal(rebuilt.structuredContent.status, 'ready')
