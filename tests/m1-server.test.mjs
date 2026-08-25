@@ -95,6 +95,12 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       'inspect_project',
       'register_runtime_run',
       'release_runtime_run',
+      'grant_active_runtime_control',
+      'pull_runtime_command',
+      'report_runtime_evidence',
+      'capture_runtime_frame',
+      'read_runtime_logs',
+      'simulate_player_actions',
       'report_editor_scene',
       'inspect_editor',
       'apply_editor_commands',
@@ -128,7 +134,7 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     })
     assert.match(
       byName.get('open_editor')?.description ?? '',
-      /apply_project_files does not create an MCP App card.*open_editor\(\{ projectId \}\)/,
+      /project mutations update the same project-bound Editor automatically.*do not call open_editor again/,
     )
     assert.deepEqual(byName.get('inspect_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('build_project')?._meta?.ui?.visibility, ['model', 'app'])
@@ -148,7 +154,7 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.deepEqual(byName.get('apply_project_files')?._meta?.ui?.visibility, ['model', 'app'])
     assert.match(
       byName.get('apply_project_files')?.description ?? '',
-      /does not create an MCP App card.*open_editor\(\{ projectId \}\)/,
+      /project-bound Editor is created or updated automatically.*do not call open_editor again/,
     )
     assert.deepEqual(byName.get('apply_scene_changes')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('check_project')?._meta?.ui?.visibility, ['model'])
@@ -689,6 +695,8 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.equal(content?.text?.includes('Properties'), true)
     assert.equal(content?.text?.includes('data-fullscreen'), true)
     assert.equal(content?.text?.includes('requestDisplayMode'), true)
+    assert.equal(content?.text?.includes('updateModelContext'), true)
+    assert.equal(content?.text?.includes('supersedes every earlier Runtime identity'), true)
     assert.equal(content?.text?.includes('data-runtime-sandbox'), true)
     assert.equal(content?.text?.includes('sandbox="allow-scripts"'), true)
     assert.equal(content?.text?.includes('allow-same-origin'), false)
@@ -696,11 +704,6 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.equal(content?.text?.includes('<script src='), false)
     assert.equal(content?.text?.includes('<link '), false)
     assert.deepEqual(content?._meta?.ui?.csp, {
-      connectDomains: [
-        // #region debug-point H1,H2,H4:debug-server-csp
-        'http://127.0.0.1:7778',
-        // #endregion
-      ],
       resourceDomains: [],
       frameDomains: [],
       baseUriDomains: [],

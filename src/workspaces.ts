@@ -44,7 +44,15 @@ import {
   type Project,
   type ProjectTemplate,
 } from './projects.js'
-import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
+import {
+  applyOfficialEditorCommands,
+  type EditorCommandOperation,
+} from './official-editor.js'
+import {
+  WORKSPACE_EDITOR_STATE_PATH,
+  runtimeCommandSettlementDeadline,
+  type WorkspaceEditorState,
+} from './m7-runtime.js'
 import {
   runtimeLockPathForWorkspace,
   withRuntimeLock as withCrossProcessRuntimeLock,
@@ -68,6 +76,9 @@ const EXCLUDED_DIRECTORIES = new Set([
   'dist',
   'node_modules',
 ])
+
+
+
 const MODULE_EXTENSIONS = [
   '.ts',
   '.tsx',
@@ -109,6 +120,35 @@ export const workspaceParameterSchema = z.discriminatedUnion('type', [
     message: 'parameter min must be less than max',
   }),
 ])
+export const workspaceCapabilitiesSchema = z.object({
+  parameterPanel: z.object({
+    id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+    label: z.string().min(1).max(80),
+    parameters: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)).max(64),
+  }).strict(),
+  command: z.object({
+    id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+    label: z.string().min(1).max(80),
+    type: z.enum([
+      'set_position',
+      'set_rotation',
+      'set_scale',
+      'set_name',
+      'set_visible',
+      'set_material_color',
+    ]),
+    undoable: z.literal(true),
+  }).strict(),
+  debugSurface: z.object({
+    id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+    label: z.string().min(1).max(80),
+    mode: z.string().min(1).max(80),
+  }).strict(),
+  extension: z.object({
+    path: workspacePathSchema,
+    permissions: z.tuple([z.literal('runtime')]),
+  }).strict(),
+}).strict()
 export const workspaceManifestSchema = z.object({
   schemaVersion: z.literal(2),
   kind: z.enum(['linked-workspace', 'managed-workspace']),
@@ -121,6 +161,7 @@ export const workspaceManifestSchema = z.object({
     debugModes: z.array(z.string()),
     qualityTiers: z.array(z.string()),
     parameters: z.array(workspaceParameterSchema).default([]),
+    capabilities: workspaceCapabilitiesSchema.optional(),
   }),
 })
 export const workspaceChangeSchema = z.discriminatedUnion('type', [
@@ -145,8 +186,67 @@ export const workspaceChangeSchema = z.discriminatedUnion('type', [
 const activeRuntimeSchema = z.object({
   revision: z.string().regex(/^[a-f0-9]{64}$/),
   runId: z.string().uuid(),
+  nonce: z.string().uuid().optional(),
+  evidenceToken: z.string().uuid().optional(),
+  sessionId: z.string().min(1).max(128).optional(),
+  connectionGeneration: z.string().uuid().optional(),
   ownerId: z.string().uuid().optional(),
   ownerPid: z.number().int().positive().optional(),
+})
+type ActiveRuntime = z.infer<typeof activeRuntimeSchema>
+const importedSourceSchema = z.object({
+  schemaVersion: z.literal(1),
+  root: z.string().min(1),
+  projectPath: z.string(),
+  entry: workspacePathSchema,
+  revision: z.string().regex(/^[a-f0-9]{64}$/),
+  files: z.record(workspacePathSchema, z.string().regex(/^[a-f0-9]{64}$/)),
+})
+const editorCommandSchema: z.ZodType<EditorCommandOperation> = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('set_position'),
+    objectUuid: z.string().uuid(),
+    value: z.tuple([z.number(), z.number(), z.number()]),
+  }),
+  z.object({
+    type: z.literal('set_rotation'),
+    objectUuid: z.string().uuid(),
+    value: z.tuple([z.number(), z.number(), z.number()]),
+  }),
+  z.object({
+    type: z.literal('set_scale'),
+    objectUuid: z.string().uuid(),
+    value: z.tuple([z.number(), z.number(), z.number()]),
+  }),
+  z.object({
+    type: z.literal('set_name'),
+    objectUuid: z.string().uuid(),
+    value: z.string().max(120),
+  }),
+  z.object({
+    type: z.literal('set_visible'),
+    objectUuid: z.string().uuid(),
+    value: z.boolean(),
+  }),
+  z.object({
+    type: z.literal('set_material_color'),
+    objectUuid: z.string().uuid(),
+    value: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  }),
+  z.object({
+    type: z.literal('set_material_value'),
+    objectUuid: z.string().uuid(),
+    property: z.literal('roughness'),
+    value: z.number().min(0).max(1),
+  }),
+])
+const workspaceEditorStateSchema: z.ZodType<WorkspaceEditorState> = z.object({
+  schemaVersion: z.literal(1),
+  operations: z.array(editorCommandSchema).max(4_096),
+  recentChanges: z.array(z.object({
+    source: z.enum(['human', 'ai', 'unknown']),
+    operation: editorCommandSchema,
+  })).max(200).optional(),
 })
 
 export type WorkspaceManifest = z.infer<typeof workspaceManifestSchema>
@@ -175,11 +275,40 @@ export interface WorkspaceProjectCandidate {
   issue?: string
 }
 
+export interface RuntimeIdentity {
+  projectId: string
+  revision: string
+  runId: string
+  nonce: string
+}
+
+export interface RuntimeOwner {
+  sessionId: string
+  connectionGeneration: string
+}
+
+export interface RuntimeHarnessCommand {
+  commandId: string
+  kind: 'capture-frame' | 'read-logs' | 'simulate-actions'
+  target: 'active' | 'validation'
+  runtime: RuntimeIdentity
+  payload: Record<string, unknown>
+  expiresAt: string
+}
+
+const RUNTIME_EVIDENCE_KIND = {
+  'capture-frame': 'capture-frame',
+  'read-logs': 'runtime-logs',
+  'simulate-actions': 'action-trace',
+} as const satisfies Record<RuntimeHarnessCommand['kind'], string>
+
 interface ExampleSource {
   root: string
   projectPath: string
   galleryCorpus: boolean
 }
+
+type ImportedSource = z.infer<typeof importedSourceSchema>
 
 export interface WorkspaceSnapshot extends WorkspaceSummary {
   path: string
@@ -205,6 +334,21 @@ interface Transaction {
   baseRevision: string
   targetRevision: string
   changes: TransactionChange[]
+}
+
+interface PendingRuntimeCommand {
+  command: RuntimeHarnessCommand
+  owner: RuntimeOwner
+  resolve(value: unknown): void
+  reject(error: Error): void
+  settlementDeadline: number
+  timer: ReturnType<typeof setTimeout>
+  abort?: () => void
+}
+
+interface ActiveRuntimeGrant {
+  runtime: RuntimeIdentity
+  expiresAt: number
 }
 
 type StoredReadyBuild = Omit<ReadyBuild, 'bundle' | 'sourceMap'>
@@ -356,6 +500,18 @@ function manifestRevision(manifest: WorkspaceManifest): string {
   return digest(canonicalBytes(manifest))
 }
 
+function sameRuntimeIdentity(left: RuntimeIdentity, right: RuntimeIdentity): boolean {
+  return left.projectId === right.projectId
+    && left.revision === right.revision
+    && left.runId === right.runId
+    && left.nonce === right.nonce
+}
+
+function sameRuntimeOwner(left: RuntimeOwner, right: RuntimeOwner): boolean {
+  return left.sessionId === right.sessionId
+    && left.connectionGeneration === right.connectionGeneration
+}
+
 function defaultWorkspaceConfig(
   kind: WorkspaceKind,
   projectId: string,
@@ -383,6 +539,28 @@ function defaultWorkspaceConfig(
       debugModes: ['final'],
       qualityTiers: ['default'],
       parameters: [],
+      capabilities: {
+        parameterPanel: {
+          id: 'runtime-parameters',
+          label: 'Runtime parameters',
+          parameters: [],
+        },
+        command: {
+          id: 'move-object',
+          label: 'Move selected object',
+          type: 'set_position',
+          undoable: true,
+        },
+        debugSurface: {
+          id: 'runtime-diagnostics',
+          label: 'Runtime diagnostics',
+          mode: 'final',
+        },
+        extension: {
+          path: 'src/main.js',
+          permissions: ['runtime'],
+        },
+      },
     },
   }
 }
@@ -393,6 +571,9 @@ export class WorkspaceStore {
   private readonly ready: Promise<void>
   private readonly workspaces = new Map<string, RegisteredWorkspace>()
   private readonly sessionWorkspaceIds = new Set<string>()
+  private readonly activeRuntimes = new Map<string, ActiveRuntime>()
+  private readonly activeRuntimeGrants = new Map<string, ActiveRuntimeGrant>()
+  private readonly runtimeCommands = new Map<string, PendingRuntimeCommand>()
 
   constructor(
     root: string,
@@ -538,11 +719,13 @@ export class WorkspaceStore {
     const sourceRevision = digest(canonicalBytes([...files]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([filePath, bytes]) => [filePath, digest(bytes)])))
-    const projectId = `example-${
+    const stableProjectId = `example-${
       digest(new TextEncoder().encode(
-        `${source.root}\0${source.projectPath}\0${sourceRevision}`,
+        `${source.root}\0${source.projectPath}`,
       )).slice(0, 56)
     }`
+    await this.migrateImportedProject(stableProjectId, source)
+    const projectId = stableProjectId
     const current = this.workspaces.get(projectId)
     if (current !== undefined) {
       this.sessionWorkspaceIds.add(projectId)
@@ -566,6 +749,20 @@ export class WorkspaceStore {
       }), { flag: 'wx', mode: 0o600 })
       await mkdir(join(temporary, '.threejs-editor'), { recursive: true })
       await writeFile(
+        join(temporary, '.threejs-editor', 'source.json'),
+        canonicalBytes({
+          schemaVersion: 1,
+          root: source.root,
+          projectPath: source.projectPath,
+          entry: candidate.entry,
+          revision: sourceRevision,
+          files: Object.fromEntries([...files]
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([filePath, bytes]) => [filePath, digest(bytes)])),
+        } satisfies ImportedSource),
+        { flag: 'wx', mode: 0o600 },
+      )
+      await writeFile(
         join(temporary, '.threejs-editor', 'project.json'),
         canonicalBytes({
           schemaVersion: 2,
@@ -578,6 +775,28 @@ export class WorkspaceStore {
             debugModes: await this.exampleDebugModes(root, projectPath),
             qualityTiers: ['default'],
             parameters: [],
+            capabilities: {
+              parameterPanel: {
+                id: 'runtime-parameters',
+                label: 'Runtime parameters',
+                parameters: [],
+              },
+              command: {
+                id: 'move-object',
+                label: 'Move selected object',
+                type: 'set_position',
+                undoable: true,
+              },
+              debugSurface: {
+                id: 'runtime-diagnostics',
+                label: 'Runtime diagnostics',
+                mode: 'final',
+              },
+              extension: {
+                path: candidate.entry,
+                permissions: ['runtime'],
+              },
+            },
           },
         }),
         { flag: 'wx', mode: 0o600 },
@@ -660,7 +879,123 @@ export class WorkspaceStore {
 
   async load(projectId: string): Promise<WorkspaceSnapshot> {
     validateProjectId(projectId)
+    await this.reconcileImportedSource(projectId)
     return this.withLock(projectId, () => this.loadUnlocked(projectId))
+  }
+
+  private async reconcileImportedSource(projectId: string): Promise<void> {
+    await this.ready
+    const registration = this.workspaces.get(projectId)
+    if (registration?.kind !== 'managed-workspace') return
+    let imported: ImportedSource
+    try {
+      imported = importedSourceSchema.parse(JSON.parse((await this.readMetadataFile(
+        registration.path,
+        this.metadataPath(registration.path, 'source.json'),
+      )).toString('utf8')))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    const source = await this.exampleSource(imported.root, imported.projectPath)
+    if (source.root !== imported.root || source.projectPath !== imported.projectPath) {
+      throw new Error('managed import source identity changed')
+    }
+    const files = await this.collectExampleFiles(source, imported.entry)
+    const examplePath = projectFilePath(source.projectPath, 'example.json')
+    files.set(examplePath, await readFile(await this.realFile(source.root, examplePath)))
+    const nextFiles = Object.fromEntries([...files]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([path, bytes]) => [path, digest(bytes)]))
+    const nextRevision = digest(canonicalBytes(Object.entries(nextFiles)))
+    if (nextRevision === imported.revision) return
+
+    const current = await this.withLock(projectId, () => this.loadUnlocked(projectId))
+    const changedPaths = new Set([
+      ...Object.keys(imported.files),
+      ...Object.keys(nextFiles),
+    ])
+    const changes: WorkspaceChange[] = []
+    for (const path of [...changedPaths].sort()) {
+      const previousHash = imported.files[path]
+      const nextHash = nextFiles[path]
+      if (previousHash === nextHash) continue
+      const managedHash = current.manifest.files[path]?.sha256
+      if (managedHash === nextHash) continue
+      if (managedHash !== previousHash) {
+        throw new Error(
+          `Managed import ${projectId} has local changes at ${path}; edit the managed copy or discard those changes before synchronizing its source.`,
+        )
+      }
+      if (nextHash === undefined) {
+        changes.push({ type: 'delete', path })
+        continue
+      }
+      const bytes = files.get(path)
+      if (bytes === undefined) throw new Error(`managed import source is missing ${path}`)
+      const type = mediaType(path, bytes)
+      changes.push(type.text
+        ? { type: 'write', path, text: bytes.toString('utf8') }
+        : { type: 'write', path, base64: bytes.toString('base64') })
+    }
+    if (changes.length > 100) {
+      throw new Error('managed import source update exceeds 100 changed files')
+    }
+    if (changes.length > 0) {
+      await this.apply(projectId, current.revision, changes)
+    }
+    await this.writeAtomic(
+      registration.path,
+      this.metadataPath(registration.path, 'source.json'),
+      canonicalBytes({
+        ...imported,
+        revision: nextRevision,
+        files: nextFiles,
+      } satisfies ImportedSource),
+    )
+  }
+
+  private async migrateImportedProject(
+    stableProjectId: string,
+    source: ExampleSource,
+  ): Promise<void> {
+    const matches: Array<[string, RegisteredWorkspace]> = []
+    for (const entry of this.workspaces) {
+      const [projectId, registration] = entry
+      if (registration.kind !== 'managed-workspace') continue
+      let imported: ImportedSource
+      try {
+        imported = importedSourceSchema.parse(JSON.parse((await this.readMetadataFile(
+          registration.path,
+          this.metadataPath(registration.path, 'source.json'),
+        )).toString('utf8')))
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      if (imported.root === source.root && imported.projectPath === source.projectPath) {
+        matches.push([projectId, registration])
+      }
+    }
+    if (matches.length === 0) return
+    if (matches.length > 1
+      || (this.workspaces.has(stableProjectId) && matches[0]?.[0] !== stableProjectId)) {
+      throw new Error(
+        `managed import source ${source.root}:${source.projectPath} has conflicting project identities`,
+      )
+    }
+    const [legacyProjectId, registration] = matches[0]!
+    if (legacyProjectId === stableProjectId) return
+    const target = join(await this.managedRoot, stableProjectId)
+    await rename(registration.path, target)
+    this.workspaces.delete(legacyProjectId)
+    this.workspaces.set(stableProjectId, {
+      path: target,
+      kind: 'managed-workspace',
+    })
+    if (this.sessionWorkspaceIds.delete(legacyProjectId)) {
+      this.sessionWorkspaceIds.add(stableProjectId)
+    }
   }
 
   private async loadUnlocked(projectId: string): Promise<WorkspaceSnapshot> {
@@ -857,15 +1192,18 @@ export class WorkspaceStore {
     revision: string,
     document: unknown,
     runId: string,
+    owner?: RuntimeOwner,
   ): Promise<void> {
     validateProjectId(projectId)
     if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid editor scene revision')
-    await this.withLock(projectId, async () => {
+    return this.withLock(projectId, async () => {
       const workspace = this.workspaces.get(projectId)
       if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
       const snapshot = await this.loadUnlocked(projectId)
       if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
-      const activeRuntime = await this.readActiveRuntime(snapshot.path)
+      const activeRuntime = owner === undefined
+        ? await this.readActiveRuntime(snapshot.path)
+        : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
       if (activeRuntime?.revision !== revision || activeRuntime.runId !== runId) {
         throw new Error('runtime run changed before editor scene was reported')
       }
@@ -881,11 +1219,16 @@ export class WorkspaceStore {
     projectId: string,
     revision: string,
     runId: string,
+    nonce?: string,
+    owner?: RuntimeOwner,
     previousRevision?: string,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<string> {
     validateProjectId(projectId)
-    await this.withLock(projectId, async () => {
+    if ((nonce === undefined) !== (owner === undefined)) {
+      throw new Error('Runtime nonce and owner identity must be provided together')
+    }
+    return this.withLock(projectId, async () => {
       signal?.throwIfAborted()
       const workspace = this.workspaces.get(projectId)
       if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
@@ -896,41 +1239,87 @@ export class WorkspaceStore {
         'diagnostics',
         'active-run.json',
       )
-      const previousRuntime = await this.readActiveRuntimeRecord(snapshot.path)
-      if (previousRevision !== undefined) {
-        const activeRuntime = await this.readActiveRuntime(snapshot.path)
-        if (activeRuntime?.revision !== previousRevision || activeRuntime.runId !== runId) {
-          throw new Error('runtime run changed before its revision was advanced')
+      const ownerKey = owner === undefined ? undefined : this.runtimeKey(projectId, owner)
+      if (ownerKey !== undefined && owner !== undefined) {
+        for (const [key, active] of this.activeRuntimes) {
+          if (key === ownerKey
+            || !key.startsWith(`${projectId}\0`)
+            || active.sessionId !== owner.sessionId) continue
+          this.activeRuntimes.delete(key)
+          this.activeRuntimeGrants.delete(key)
+          this.rejectRuntimeCommand(key, 'MCP connection generation changed')
         }
       }
+      const previousStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
+      const previousRuntime = ownerKey === undefined
+        ? previousStoredRuntime
+        : this.activeRuntimes.get(ownerKey)
+      const evidenceToken = previousRevision === undefined
+        ? randomUUID()
+        : previousRuntime?.evidenceToken
+      if (evidenceToken === undefined) {
+        throw new Error('runtime evidence token is unavailable for revision rollover')
+      }
+      if (previousRevision !== undefined) {
+        const activeRuntime = previousRuntime
+        if (activeRuntime?.revision !== previousRevision
+          || activeRuntime.runId !== runId) {
+          throw new Error('runtime run changed before its revision was advanced')
+        }
+        if (nonce !== undefined && owner !== undefined) {
+          if (activeRuntime.nonce !== nonce
+            || activeRuntime.sessionId !== owner.sessionId
+            || activeRuntime.connectionGeneration !== owner.connectionGeneration) {
+            throw new Error('runtime run changed before its revision was advanced')
+          }
+        } else if (activeRuntime.nonce !== undefined
+          || activeRuntime.sessionId !== undefined
+          || activeRuntime.connectionGeneration !== undefined) {
+          throw new Error('Runtime revision rollover requires exact owner identity')
+        }
+      }
+      const runtimeKey = ownerKey ?? projectId
+      this.rejectRuntimeCommand(runtimeKey, 'Runtime revision changed')
+      this.activeRuntimeGrants.delete(runtimeKey)
+      const activeRuntime = activeRuntimeSchema.parse({
+        revision,
+        runId,
+        nonce,
+        evidenceToken,
+        sessionId: owner?.sessionId,
+        connectionGeneration: owner?.connectionGeneration,
+        ownerId: this.runtimeOwnerId,
+        ownerPid: process.pid,
+      })
+      if (ownerKey !== undefined) this.activeRuntimes.set(ownerKey, activeRuntime)
       await this.writeAtomic(
         snapshot.path,
         activePath,
-        canonicalBytes(activeRuntimeSchema.parse({
-          revision,
-          runId,
-          ownerId: this.runtimeOwnerId,
-          ownerPid: process.pid,
-        })),
+        canonicalBytes(activeRuntime),
       )
       if (signal?.aborted) {
-        const current = await this.readActiveRuntimeRecord(snapshot.path)
-        if (current?.revision === revision
-          && current.runId === runId
-          && current.ownerId === this.runtimeOwnerId
-          && current.ownerPid === process.pid) {
-          if (previousRuntime === undefined) {
+        if (ownerKey !== undefined) {
+          if (previousRuntime === undefined) this.activeRuntimes.delete(ownerKey)
+          else this.activeRuntimes.set(ownerKey, previousRuntime)
+        }
+        const currentStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
+        if (currentStoredRuntime?.revision === revision
+          && currentStoredRuntime.runId === runId
+          && currentStoredRuntime.ownerId === this.runtimeOwnerId
+          && currentStoredRuntime.ownerPid === process.pid) {
+          if (previousStoredRuntime === undefined) {
             await this.clearActiveRuntime(snapshot.path, revision, runId)
           } else {
             await this.writeAtomic(
               snapshot.path,
               activePath,
-              canonicalBytes(previousRuntime),
+              canonicalBytes(previousStoredRuntime),
             )
           }
         }
         signal.throwIfAborted()
       }
+      return evidenceToken
     })
   }
 
@@ -938,13 +1327,257 @@ export class WorkspaceStore {
     projectId: string,
     revision: string,
     runId: string,
+    nonce?: string,
+    owner?: RuntimeOwner,
   ): Promise<boolean> {
     validateProjectId(projectId)
     if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid Runtime revision')
     return this.withLock(projectId, async () => {
       const workspace = this.workspaces.get(projectId)
       if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
-      return this.clearActiveRuntime(workspace.path, revision, runId)
+      if ((nonce === undefined) !== (owner === undefined)) {
+        throw new Error('Runtime nonce and owner identity must be provided together')
+      }
+      if (nonce !== undefined && owner !== undefined) {
+        await this.assertRuntimeIdentity({
+          projectId,
+          revision,
+          runId,
+          nonce,
+        }, owner)
+      } else {
+        const active = await this.readActiveRuntime(workspace.path, true)
+        if (active?.nonce !== undefined
+          || active?.sessionId !== undefined
+          || active?.connectionGeneration !== undefined) {
+          throw new Error('Exact Runtime owner identity is required')
+        }
+      }
+      const key = owner === undefined ? projectId : this.runtimeKey(projectId, owner)
+      const released = owner === undefined
+        ? await this.clearActiveRuntime(workspace.path, revision, runId)
+        : this.activeRuntimes.delete(key)
+      if (owner !== undefined) {
+        this.activeRuntimeGrants.delete(key)
+        await this.clearActiveRuntime(workspace.path, revision, runId)
+      }
+      if (released) this.rejectRuntimeCommand(key, 'Runtime was disposed')
+      return released
+    })
+  }
+
+  async runtimeIdentity(
+    projectId: string,
+    owner: RuntimeOwner,
+  ): Promise<RuntimeIdentity | undefined> {
+    validateProjectId(projectId)
+    return this.withLock(projectId, async () => {
+      const workspace = this.workspaces.get(projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
+      const active = this.activeRuntimes.get(this.runtimeKey(projectId, owner))
+      if (active === undefined
+        || active.nonce === undefined
+        || active.sessionId !== owner.sessionId
+        || active.connectionGeneration !== owner.connectionGeneration) return undefined
+      return {
+        projectId,
+        revision: active.revision,
+        runId: active.runId,
+        nonce: active.nonce,
+      }
+    })
+  }
+
+  async grantActiveRuntimeControl(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+  ): Promise<string> {
+    validateProjectId(runtime.projectId)
+    return this.withLock(runtime.projectId, async () => {
+      await this.assertRuntimeIdentity(runtime, owner)
+      const expiresAt = Date.now() + 60_000
+      this.activeRuntimeGrants.set(this.runtimeKey(runtime.projectId, owner), {
+        runtime,
+        expiresAt,
+      })
+      return new Date(expiresAt).toISOString()
+    })
+  }
+
+  async requestRuntimeCommand(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+    kind: RuntimeHarnessCommand['kind'],
+    target: RuntimeHarnessCommand['target'],
+    payload: Record<string, unknown>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    validateProjectId(runtime.projectId)
+    signal?.throwIfAborted()
+    let resolvePending!: (value: unknown) => void
+    let rejectPending!: (error: Error) => void
+    const promise = new Promise<unknown>((resolve, reject) => {
+      resolvePending = resolve
+      rejectPending = reject
+    })
+    let pending: PendingRuntimeCommand | undefined
+    await this.withLock(runtime.projectId, async () => {
+      signal?.throwIfAborted()
+      const workspace = this.workspaces.get(runtime.projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
+      await this.assertRuntimeIdentity(runtime, owner)
+      const key = this.runtimeKey(runtime.projectId, owner)
+      if (this.runtimeCommands.has(key)) {
+        throw new Error('Runtime control lease is busy')
+      }
+      if (target === 'active') {
+        const grant = this.activeRuntimeGrants.get(key)
+        this.activeRuntimeGrants.delete(key)
+        if (grant === undefined
+          || grant.expiresAt <= Date.now()
+          || !sameRuntimeIdentity(grant.runtime, runtime)) {
+          throw new Error('Active Runtime access requires a current user grant from the Editor')
+        }
+      }
+      const expiresAt = Date.now() + timeoutMs
+      const command: RuntimeHarnessCommand = {
+        commandId: randomUUID(),
+        kind,
+        target,
+        runtime,
+        payload,
+        expiresAt: new Date(expiresAt).toISOString(),
+      }
+      const settlementDeadline = runtimeCommandSettlementDeadline(command.expiresAt)
+      const expireSettlement = () => {
+        if (this.runtimeCommands.get(key) !== pending) return
+        this.runtimeCommands.delete(key)
+        rejectPending(new Error('Runtime Harness command timed out'))
+      }
+      const timer = setTimeout(() => {
+        if (this.runtimeCommands.get(key) !== pending) return
+        const remainingGraceMs = settlementDeadline - Date.now()
+        if (remainingGraceMs <= 0) expireSettlement()
+        else pending!.timer = setTimeout(expireSettlement, remainingGraceMs)
+      }, timeoutMs)
+      pending = {
+        command,
+        owner,
+        resolve: resolvePending,
+        reject: rejectPending,
+        settlementDeadline,
+        timer,
+      }
+      this.runtimeCommands.set(key, pending)
+      if (signal !== undefined) {
+        const activePending = pending
+        activePending.abort = () => {
+          if (this.runtimeCommands.get(key) !== activePending) return
+          this.runtimeCommands.delete(key)
+          clearTimeout(activePending.timer)
+          activePending.reject(new Error('Runtime Harness command cancelled'))
+        }
+        signal.addEventListener('abort', activePending.abort, { once: true })
+        if (signal.aborted) activePending.abort()
+      }
+    })
+    return promise.finally(() => {
+      if (pending === undefined) return
+      clearTimeout(pending.timer)
+      if (pending.abort !== undefined) signal?.removeEventListener('abort', pending.abort)
+    })
+  }
+
+  async pullRuntimeCommand(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+  ): Promise<RuntimeHarnessCommand | undefined> {
+    validateProjectId(runtime.projectId)
+    return this.withLock(runtime.projectId, async () => {
+      const workspace = this.workspaces.get(runtime.projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
+      await this.assertRuntimeIdentity(runtime, owner)
+      const pending = this.runtimeCommands.get(this.runtimeKey(runtime.projectId, owner))
+      if (pending === undefined) return undefined
+      if (!sameRuntimeOwner(pending.owner, owner)
+        || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
+        throw new Error('Runtime control lease belongs to another owner or run')
+      }
+      return pending.command
+    })
+  }
+
+  async reportRuntimeEvidence(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+    commandId: string,
+    result: unknown,
+  ): Promise<void> {
+    validateProjectId(runtime.projectId)
+    await this.withLock(runtime.projectId, async () => {
+      const workspace = this.workspaces.get(runtime.projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
+      const active = await this.assertRuntimeIdentity(runtime, owner)
+      const key = this.runtimeKey(runtime.projectId, owner)
+      const pending = this.runtimeCommands.get(key)
+      if (pending === undefined
+        || pending.command.commandId !== commandId
+        || !sameRuntimeOwner(pending.owner, owner)
+        || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
+        throw new Error('Runtime Harness result is stale or foreign')
+      }
+      const evidenceRuntime = result !== null
+        && typeof result === 'object'
+        && 'runtime' in result
+        && result.runtime !== null
+        && typeof result.runtime === 'object'
+        ? result.runtime as Partial<RuntimeIdentity> & { target?: string }
+        : undefined
+      const evidenceToken = result !== null
+        && typeof result === 'object'
+        && 'evidenceToken' in result
+        ? result.evidenceToken
+        : undefined
+      const evidenceKind = result !== null
+        && typeof result === 'object'
+        && 'kind' in result
+        ? result.kind
+        : undefined
+      if (evidenceToken !== active.evidenceToken
+        || evidenceRuntime === undefined
+        || typeof evidenceRuntime.projectId !== 'string'
+        || typeof evidenceRuntime.revision !== 'string'
+        || typeof evidenceRuntime.runId !== 'string'
+        || typeof evidenceRuntime.nonce !== 'string'
+        || !sameRuntimeIdentity(evidenceRuntime as RuntimeIdentity, pending.command.runtime)
+        || evidenceRuntime.target !== pending.command.target) {
+        throw new Error('Runtime Harness evidence identity is stale or foreign')
+      }
+      if (evidenceKind !== RUNTIME_EVIDENCE_KIND[pending.command.kind]
+        && evidenceKind !== 'runtime-harness-error') {
+        throw new Error('Runtime Harness evidence kind does not match the pending command')
+      }
+      const evidenceStatus = result !== null
+        && typeof result === 'object'
+        && 'status' in result
+        ? result.status
+        : undefined
+      if (Date.now() > pending.settlementDeadline) {
+        this.runtimeCommands.delete(key)
+        clearTimeout(pending.timer)
+        pending.reject(new Error('Runtime Harness command timed out'))
+        throw new Error('Runtime Harness result missed its settlement deadline')
+      }
+      // Settlement grace preserves terminal diagnostics, not successful evidence.
+      if (Date.now() > Date.parse(pending.command.expiresAt)
+        && !(evidenceKind === 'runtime-harness-error'
+          || (evidenceKind === 'action-trace'
+            && (evidenceStatus === 'failed' || evidenceStatus === 'cancelled')))) {
+        throw new Error('Runtime Harness result missed its execution deadline')
+      }
+      this.runtimeCommands.delete(key)
+      pending.resolve(result)
     })
   }
 
@@ -952,6 +1585,7 @@ export class WorkspaceStore {
     projectId: string,
     revision: string,
     expectedRunId?: string,
+    owner?: RuntimeOwner,
   ): Promise<unknown | undefined> {
     validateProjectId(projectId)
     if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid editor scene revision')
@@ -967,7 +1601,9 @@ export class WorkspaceStore {
           && 'runId' in document && typeof document.runId === 'string'
           ? document.runId
           : undefined
-        const activeRuntime = await this.readActiveRuntime(snapshot.path)
+        const activeRuntime = owner === undefined
+          ? await this.readActiveRuntime(snapshot.path)
+          : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
         return runId !== undefined
           && activeRuntime?.revision === revision
           && activeRuntime.runId === runId
@@ -987,6 +1623,7 @@ export class WorkspaceStore {
     errors: string[],
     warnings: string[],
     runId?: string,
+    owner?: RuntimeOwner,
   ): Promise<Diagnostics> {
     validateProjectId(projectId)
     return this.withLock(projectId, async () => {
@@ -999,7 +1636,9 @@ export class WorkspaceStore {
       if (runId === undefined) {
         throw new Error('Workspace diagnostics require a Runtime runId')
       }
-      const activeRuntime = await this.readActiveRuntime(snapshot.path)
+      const activeRuntime = owner === undefined
+        ? await this.readActiveRuntime(snapshot.path)
+        : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
       if (activeRuntime?.revision !== testedRevision || activeRuntime.runId !== runId) {
         throw new Error('runtime run changed before diagnostics were reported')
       }
@@ -1019,7 +1658,10 @@ export class WorkspaceStore {
     })
   }
 
-  async readDiagnostics(projectId: string): Promise<Diagnostics | undefined> {
+  async readDiagnostics(
+    projectId: string,
+    owner?: RuntimeOwner,
+  ): Promise<Diagnostics | undefined> {
     validateProjectId(projectId)
     return this.withLock(projectId, async () => {
       const snapshot = await this.loadUnlocked(projectId)
@@ -1028,7 +1670,9 @@ export class WorkspaceStore {
           snapshot.path,
           this.metadataPath(snapshot.path, 'diagnostics', 'runtime.json'),
         )).toString('utf8')))
-        const activeRuntime = await this.readActiveRuntime(snapshot.path)
+        const activeRuntime = owner === undefined
+          ? await this.readActiveRuntime(snapshot.path)
+          : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
         return activeRuntime?.revision === snapshot.revision
           && diagnostics.testedRevision === snapshot.revision
           && diagnostics.runId === activeRuntime.runId
@@ -1047,6 +1691,7 @@ export class WorkspaceStore {
     candidates: unknown[],
     expectedRunId?: string,
     signal?: AbortSignal,
+    owner?: RuntimeOwner,
   ): Promise<WorkspaceSnapshot> {
     validateProjectId(projectId)
     const changes = candidates.map(candidate => workspaceChangeSchema.parse(candidate))
@@ -1063,7 +1708,9 @@ export class WorkspaceStore {
         throw new RevisionConflictError(current.revision)
       }
       if (expectedRunId !== undefined) {
-        const activeRuntime = await this.readActiveRuntime(current.path)
+        const activeRuntime = owner === undefined
+          ? await this.readActiveRuntime(current.path)
+          : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
         if (activeRuntime?.revision !== baseRevision
           || activeRuntime.runId !== expectedRunId) {
           throw new Error('runtime run changed before editor commands were applied')
@@ -1071,6 +1718,15 @@ export class WorkspaceStore {
       }
       const normalized = await this.normalizeChanges(current, changes)
       if (normalized.length === 0) throw new Error('workspace change batch has no effect')
+      const editorState = expectedRunId === undefined
+        ? normalized.find(change => change.path === WORKSPACE_EDITOR_STATE_PATH)
+        : undefined
+      if (editorState?.after !== null && editorState?.after !== undefined) {
+        const state = workspaceEditorStateSchema.parse(JSON.parse(
+          (await this.readObject(registration.path, editorState.after)).toString('utf8'),
+        ))
+        applyOfficialEditorCommands(structuredClone(current.project), state.operations)
+      }
       const targetManifest = structuredClone(current.manifest)
       for (const change of normalized) {
         if (change.after === null) delete targetManifest.files[change.path]
@@ -1260,11 +1916,53 @@ export class WorkspaceStore {
 
   private async readActiveRuntime(
     workspace: string,
+    allowHardlinks = false,
   ): Promise<z.infer<typeof activeRuntimeSchema> | undefined> {
-    const activeRuntime = await this.readActiveRuntimeRecord(workspace)
+    const activeRuntime = await this.readActiveRuntimeRecord(workspace, allowHardlinks)
     return activeRuntime !== undefined && this.ownsActiveRuntime(activeRuntime)
       ? activeRuntime
       : undefined
+  }
+
+  private async assertRuntimeIdentity(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+  ): Promise<ActiveRuntime> {
+    const active = this.activeRuntimes.get(this.runtimeKey(runtime.projectId, owner))
+    if (active === undefined) {
+      const foreign = [...this.activeRuntimes.entries()].some(([key, candidate]) => (
+        key.startsWith(`${runtime.projectId}\0`)
+        && candidate.revision === runtime.revision
+        && candidate.runId === runtime.runId
+        && candidate.nonce === runtime.nonce
+      ))
+      if (foreign) {
+        throw new Error('Runtime belongs to another Harness Session or connection generation')
+      }
+    }
+    if (active === undefined
+      || active.revision !== runtime.revision
+      || active.runId !== runtime.runId
+      || active.nonce !== runtime.nonce) {
+      throw new Error('Runtime identity is stale or incomplete')
+    }
+    if (active.sessionId !== owner.sessionId
+      || active.connectionGeneration !== owner.connectionGeneration) {
+      throw new Error('Runtime belongs to another Harness Session or connection generation')
+    }
+    return active
+  }
+
+  private runtimeKey(projectId: string, owner: RuntimeOwner): string {
+    return `${projectId}\0${owner.sessionId}\0${owner.connectionGeneration}`
+  }
+
+  private rejectRuntimeCommand(key: string, reason: string): void {
+    const pending = this.runtimeCommands.get(key)
+    if (pending === undefined) return
+    this.runtimeCommands.delete(key)
+    clearTimeout(pending.timer)
+    pending.reject(new Error(reason))
   }
 
   private ownsActiveRuntime(activeRuntime: z.infer<typeof activeRuntimeSchema>): boolean {
@@ -1281,11 +1979,13 @@ export class WorkspaceStore {
 
   private async readActiveRuntimeRecord(
     workspace: string,
+    allowHardlinks = false,
   ): Promise<z.infer<typeof activeRuntimeSchema> | undefined> {
     try {
       const bytes = await this.readMetadataFile(
         workspace,
         this.metadataPath(workspace, 'diagnostics', 'active-run.json'),
+        allowHardlinks,
       )
       if (bytes.length === 0) return undefined
       return activeRuntimeSchema.parse(JSON.parse(bytes.toString('utf8')))
@@ -1314,8 +2014,9 @@ export class WorkspaceStore {
           continue
         }
         if (!info.isFile()) throw new Error(`workspace path is not a regular file: ${relativePath}`)
+        if (info.nlink !== 1) throw new Error(`workspace path is hardlinked: ${relativePath}`)
         if (info.size > MAX_FILE_BYTES) throw new Error(`file ${relativePath} exceeds 1 MiB`)
-        const bytes = await readFile(fullPath)
+        const bytes = await this.readWorkspaceFile(registration.path, relativePath)
         total += bytes.length
         const type = mediaType(relativePath, bytes)
         files[relativePath] = {
@@ -1348,7 +2049,25 @@ export class WorkspaceStore {
       config = defaultWorkspaceConfig(registration.kind, projectId, packageDocument)
       await this.writeAtomic(registration.path, configPath, canonicalBytes(config))
     }
-    return workspaceManifestSchema.parse({ ...config, kind: registration.kind, files })
+    const manifest = workspaceManifestSchema.parse({ ...config, kind: registration.kind, files })
+    const capabilities = manifest.runtime.capabilities
+    if (capabilities !== undefined) {
+      const parameterIds = new Set(manifest.runtime.parameters.map(parameter => parameter.id))
+      if (capabilities.parameterPanel.parameters.some(id => !parameterIds.has(id))) {
+        throw new Error('capability parameter panel references an unknown parameter')
+      }
+      if (!manifest.runtime.debugModes.includes(capabilities.debugSurface.mode)) {
+        throw new Error('capability debug surface references an unknown debug mode')
+      }
+      if (capabilities.extension.path !== manifest.entry) {
+        throw new Error('capability extension must use the revision entry module')
+      }
+      const extension = manifest.files[capabilities.extension.path]
+      if (extension === undefined || !extension.text || extension.size > 256 * 1024) {
+        throw new Error('capability extension must be a bounded text module in the revision')
+      }
+    }
+    return manifest
   }
 
   private async sessionRoot(path: string): Promise<string> {
@@ -1568,6 +2287,7 @@ export class WorkspaceStore {
     if (directory ? !info.isDirectory() : !info.isFile()) {
       throw new Error(`workspace path has the wrong type: ${path}`)
     }
+    if (!directory && info.nlink !== 1) throw new Error(`workspace path is hardlinked: ${path}`)
     const resolved = await realpath(candidate)
     if (resolved !== candidate || !isWithin(root, resolved)) {
       throw new Error(`workspace path contains a symlink: ${path}`)
@@ -1590,13 +2310,15 @@ export class WorkspaceStore {
   private async projectProjection(path: string, title: string): Promise<Project> {
     let project: Project
     try {
-      project = projectSchema.parse(JSON.parse(await readFile(join(path, 'src', 'scene.json'), 'utf8')))
+      project = projectSchema.parse(JSON.parse(
+        (await this.readWorkspaceFile(path, 'src/scene.json')).toString('utf8'),
+      ))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       project = createProject(title, 'empty')
     }
     try {
-      project.script.source = await readFile(join(path, 'src', 'main.js'), 'utf8')
+      project.script.source = (await this.readWorkspaceFile(path, 'src/main.js')).toString('utf8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
@@ -1722,7 +2444,7 @@ export class WorkspaceStore {
   private async readWorkspaceFile(root: string, path: string): Promise<Buffer> {
     const file = join(root, ...safePath(path).split('/'))
     const info = await lstat(file)
-    if (!info.isFile() || info.isSymbolicLink()) {
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
       throw new Error(`workspace file is not regular: ${path}`)
     }
     const resolved = await realpath(file)
@@ -1775,8 +2497,12 @@ export class WorkspaceStore {
     }
   }
 
-  private async readMetadataFile(root: string, path: string): Promise<Buffer> {
-    const file = await this.openMetadataFile(root, path, constants.O_RDONLY)
+  private async readMetadataFile(
+    root: string,
+    path: string,
+    allowHardlinks = false,
+  ): Promise<Buffer> {
+    const file = await this.openMetadataFile(root, path, constants.O_RDONLY, allowHardlinks)
     try {
       return await file.readFile()
     } finally {
@@ -1788,12 +2514,15 @@ export class WorkspaceStore {
     root: string,
     path: string,
     flags: number,
+    allowHardlinks = false,
   ): Promise<FileHandle> {
     if (!isWithin(root, path)) throw new Error('workspace metadata escapes root')
     const name = relative(root, path)
     const invalid = (): Error => new Error(`workspace metadata is not a regular file: ${name}`)
     const info = await lstat(path)
-    if (!info.isFile() || info.isSymbolicLink()) throw invalid()
+    if (!info.isFile()
+      || info.isSymbolicLink()
+      || (!allowHardlinks && info.nlink !== 1)) throw invalid()
     let file
     try {
       file = await open(path, flags | constants.O_NOFOLLOW)
@@ -1808,8 +2537,10 @@ export class WorkspaceStore {
         realpath(path),
       ])
       if (!opened.isFile()
+        || (!allowHardlinks && opened.nlink !== 1)
         || !current.isFile()
         || current.isSymbolicLink()
+        || (!allowHardlinks && current.nlink !== 1)
         || opened.dev !== current.dev
         || opened.ino !== current.ino
         || resolved !== path
@@ -1835,6 +2566,7 @@ export class WorkspaceStore {
         workspace,
         path,
         constants.O_RDONLY,
+        true,
       )
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false

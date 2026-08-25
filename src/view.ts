@@ -25,8 +25,10 @@ import {
 } from './m5-runtime.js'
 import {
   M7_RUNTIME_CHANNEL,
+  RUNTIME_COMMAND_SETTLEMENT_GRACE_MS,
   WORKSPACE_EDITOR_STATE_PATH,
   m7BootstrapHtml,
+  rolloverCleanupRevisions,
   type M7RuntimeEvent,
   type PointerPickGesture,
   shouldPickAfterPointerGesture,
@@ -72,6 +74,17 @@ interface WorkspaceView {
   backend: 'webgl' | 'webgpu' | 'raw-webgpu'
   debugModes: string[]
   parameters: WorkspaceParameter[]
+  capabilities?: {
+    parameterPanel: { id: string; label: string; parameters: string[] }
+    command: {
+      id: string
+      label: string
+      type: EditorCommandOperation['type']
+      undoable: true
+    }
+    debugSurface: { id: string; label: string; mode: string }
+    extension: { path: string; permissions: ['runtime'] }
+  }
   files: WorkspaceFile[]
 }
 
@@ -145,6 +158,37 @@ interface M7Run {
   revision: string
   runId: string
   nonce: string
+}
+
+interface RuntimeHarnessCommand {
+  commandId: string
+  kind: 'capture-frame' | 'read-logs' | 'simulate-actions'
+  target: 'active' | 'validation'
+  runtime: M7Run
+  payload: Record<string, unknown>
+  expiresAt: string
+}
+
+interface WorkspaceDraft {
+  schemaVersion: 1
+  baseRevision: string
+  title: string
+  scriptSource: string
+  navigationTab: NavigationTab
+  activeFile?: string
+  fileText?: string
+  pendingOperations: string[]
+  editorOperations: EditorCommandOperation[]
+  selectedUuid?: string
+  layout: LayoutPreset
+  cameraView: CameraView
+  camera: {
+    position: [number, number, number]
+    quaternion: [number, number, number, number]
+    up: [number, number, number]
+    zoom?: number
+    target?: [number, number, number]
+  }
 }
 
 interface M7StartingRun {
@@ -324,6 +368,7 @@ const root = required<HTMLElement>('[data-three-editor]')
 const viewport = required<HTMLElement>('[data-viewport]')
 const canvas = required<HTMLCanvasElement>('[data-three-canvas]')
 const runtimeFrame = required<HTMLIFrameElement>('[data-runtime-sandbox]')
+const validationFrame = required<HTMLIFrameElement>('[data-validation-runtime]')
 const title = required<HTMLInputElement>('[data-title]')
 const revisionOutput = required<HTMLOutputElement>('[data-revision]')
 const undo = required<HTMLButtonElement>('[data-undo]')
@@ -333,6 +378,7 @@ const assetInput = required<HTMLInputElement>('[data-asset-input]')
 const exportProjectButton = required<HTMLButtonElement>('[data-export]')
 const play = required<HTMLButtonElement>('[data-play]')
 const stop = required<HTMLButtonElement>('[data-stop]')
+const activeGrant = required<HTMLButtonElement>('[data-active-grant]')
 const runtimeDebug = required<HTMLSelectElement>('[data-runtime-debug]')
 const fullscreen = required<HTMLButtonElement>('[data-fullscreen]')
 const save = required<HTMLButtonElement>('[data-save]')
@@ -347,6 +393,7 @@ const status = required<HTMLElement>('[data-status]')
 const conflict = required<HTMLElement>('[data-conflict]')
 const loadExternal = required<HTMLButtonElement>('[data-load-external]')
 const saveCopy = required<HTMLButtonElement>('[data-save-copy]')
+const deferExternal = required<HTMLButtonElement>('[data-defer-external]')
 const layout = required<HTMLSelectElement>('[data-layout]')
 const cameraViewSelect = required<HTMLSelectElement>('[data-camera-view]')
 const inspectorEmpty = required<HTMLElement>('[data-inspector-empty]')
@@ -382,6 +429,7 @@ let orbit: OrbitControls | undefined
 let transform: TransformControls | undefined
 let transformHelper: THREE.Object3D | undefined
 let selected: THREE.Object3D | undefined
+let selectionAnchor: { projectId: string | undefined; uuid: string } | undefined
 let projectId: string | undefined
 let project: Project | undefined
 let revision: string | undefined
@@ -445,12 +493,26 @@ const m7LifecycleTasks = new Set<Promise<unknown>>()
 const m7CleanupFailures: unknown[] = []
 let m7EditorSceneAccepted = false
 let m7EditorSceneReport: M7EditorSceneReport | undefined
+let m7ValidationRun: M7Run | undefined
+let m7EvidenceToken: string | undefined
+let m7Bundle: {
+  revision: string
+  bundle: string
+  backend: 'webgl' | 'webgpu' | 'raw-webgpu'
+} | undefined
+let runtimeHarnessPulling = false
+const runtimeHarnessCommands = new Set<string>()
+let restoredDraftOperations: EditorCommandOperation[] = []
+let appInstanceStorageIdentity: { sessionId: string; serverName: string } | undefined
+let draftSaveTimer: number | undefined
 let runtimeDebugMode = 'final'
 let parameterDocuments = new Map<string, Record<string, unknown>>()
 let parameterLoadToken = 0
 const expandedObjects = new Set<string>()
 const M7_REQUEST_TIMEOUT = 120_000
 const M7_LIFECYCLE_TIMEOUT = 10_000
+
+
 
 const loader = new THREE.ObjectLoader()
 const raycaster = new THREE.Raycaster()
@@ -553,6 +615,7 @@ function refreshPlayButtons(): void {
     || navigationTab !== 'scene'
     || root.dataset.sync !== 'clean'
   stop.disabled = playState !== 'starting' && playState !== 'playing'
+  activeGrant.disabled = playState !== 'playing' || m7ActiveRun === undefined
   runtimeDebug.disabled = workspace === undefined
     || playState === 'starting'
     || playState === 'stopping'
@@ -869,6 +932,255 @@ function setClean(nextRevision: string): void {
   refreshPlayButtons()
 }
 
+function rememberAppInstance(result: CallToolResult): void {
+  const meta = record(result._meta)
+  const identity = record(meta?.['ai.deepseek.dsh/app-instance'])
+  if (identity === undefined
+    || typeof identity.sessionId !== 'string'
+    || identity.sessionId.length === 0
+    || identity.sessionId.length > 256
+    || typeof identity.serverName !== 'string'
+    || !/^[A-Za-z0-9_-]{1,32}$/.test(identity.serverName)) return
+  appInstanceStorageIdentity = {
+    sessionId: identity.sessionId,
+    serverName: identity.serverName,
+  }
+}
+
+function workspaceDraftKey(targetProjectId = projectId): string | undefined {
+  if (appInstanceStorageIdentity === undefined || targetProjectId === undefined) return undefined
+  return `threejs-editor-draft:v1:${JSON.stringify([
+    appInstanceStorageIdentity.sessionId,
+    appInstanceStorageIdentity.serverName,
+    targetProjectId,
+  ])}`
+}
+
+function workspaceDraft(value: unknown): WorkspaceDraft | undefined {
+  const candidate = record(value)
+  const cameraState = record(candidate?.camera)
+  const position = vector3(cameraState?.position)
+  const up = vector3(cameraState?.up)
+  const target = cameraState?.target === undefined ? undefined : vector3(cameraState.target)
+  const quaternion = cameraState?.quaternion
+  const operations = Array.isArray(candidate?.editorOperations)
+    ? candidate.editorOperations.map(editorCommandOperation)
+    : undefined
+  if (candidate?.schemaVersion !== 1
+    || typeof candidate.baseRevision !== 'string'
+    || !/^[a-f0-9]{64}$/.test(candidate.baseRevision)
+    || typeof candidate.title !== 'string'
+    || candidate.title.length === 0
+    || candidate.title.length > 120
+    || typeof candidate.scriptSource !== 'string'
+    || candidate.scriptSource.length > 1024 * 1024
+    || (candidate.navigationTab !== 'scene'
+      && candidate.navigationTab !== 'files')
+    || !Array.isArray(candidate.pendingOperations)
+    || candidate.pendingOperations.length > 50
+    || !candidate.pendingOperations.every(item => typeof item === 'string' && item.length <= 200)
+    || operations === undefined
+    || operations.length > 50
+    || operations.some(operation => operation === undefined)
+    || (candidate.selectedUuid !== undefined && typeof candidate.selectedUuid !== 'string')
+    || (candidate.layout !== 'classic'
+      && candidate.layout !== 'wide'
+      && candidate.layout !== 'compact')
+    || (candidate.cameraView !== 'broadcast'
+      && candidate.cameraView !== 'overhead'
+      && candidate.cameraView !== 'courtside')
+    || position === undefined
+    || up === undefined
+    || (cameraState?.target !== undefined && target === undefined)
+    || !Array.isArray(quaternion)
+    || quaternion.length !== 4
+    || !quaternion.every(item => typeof item === 'number' && Number.isFinite(item))
+    || (cameraState?.zoom !== undefined
+      && (typeof cameraState.zoom !== 'number' || !Number.isFinite(cameraState.zoom)))
+    || (candidate.activeFile !== undefined && typeof candidate.activeFile !== 'string')
+    || (candidate.fileText !== undefined
+      && (typeof candidate.fileText !== 'string' || candidate.fileText.length > 1024 * 1024))) {
+    return undefined
+  }
+  return {
+    schemaVersion: 1,
+    baseRevision: candidate.baseRevision,
+    title: candidate.title,
+    scriptSource: candidate.scriptSource,
+    navigationTab: candidate.navigationTab,
+    ...candidate.activeFile === undefined ? {} : { activeFile: candidate.activeFile },
+    ...candidate.fileText === undefined ? {} : { fileText: candidate.fileText },
+    pendingOperations: candidate.pendingOperations as string[],
+    editorOperations: operations as EditorCommandOperation[],
+    ...candidate.selectedUuid === undefined ? {} : { selectedUuid: candidate.selectedUuid },
+    layout: candidate.layout,
+    cameraView: candidate.cameraView,
+    camera: {
+      position,
+      quaternion: quaternion as [number, number, number, number],
+      up,
+      ...cameraState?.zoom === undefined ? {} : { zoom: cameraState.zoom as number },
+      ...target === undefined ? {} : { target },
+    },
+  }
+}
+
+function persistWorkspaceDraft(): void {
+  if (draftSaveTimer !== undefined) {
+    window.clearTimeout(draftSaveTimer)
+    draftSaveTimer = undefined
+  }
+  const key = workspaceDraftKey()
+  if (key === undefined
+    || workspace === undefined
+    || projectId === undefined
+    || revision === undefined
+    || project === undefined
+    || (root.dataset.sync !== 'dirty' && root.dataset.sync !== 'conflict')) return
+  const draft: WorkspaceDraft = {
+    schemaVersion: 1,
+    baseRevision: revision,
+    title: title.value,
+    scriptSource: scriptSource.value,
+    navigationTab,
+    ...navigationTab === 'files' && activeFile !== undefined
+      ? { activeFile, fileText: fileSource.value }
+      : {},
+    pendingOperations: pendingOperations.slice(-50),
+    editorOperations: pendingEditorOperations.slice(-50),
+    ...selected === undefined ? {} : { selectedUuid: selected.uuid },
+    layout: layoutPreset,
+    cameraView,
+    camera: {
+      position: camera.position.toArray() as [number, number, number],
+      quaternion: camera.quaternion.toArray() as [number, number, number, number],
+      up: camera.up.toArray() as [number, number, number],
+      ...camera instanceof THREE.PerspectiveCamera ? { zoom: camera.zoom } : {},
+      ...orbit === undefined
+        ? {}
+        : { target: orbit.target.toArray() as [number, number, number] },
+    },
+  }
+  try {
+    const encoded = JSON.stringify(draft)
+    if (encoded.length > 1024 * 1024) throw new Error('Workspace draft exceeds 1 MiB')
+    localStorage.setItem(key, encoded)
+    root.dataset.draft = 'stored'
+  } catch {
+    root.dataset.draft = 'unavailable'
+  }
+}
+
+function scheduleWorkspaceDraft(): void {
+  if (workspace === undefined || workspaceDraftKey() === undefined) return
+  if (draftSaveTimer !== undefined) window.clearTimeout(draftSaveTimer)
+  draftSaveTimer = window.setTimeout(persistWorkspaceDraft, 150)
+}
+
+function clearWorkspaceDraft(targetProjectId = projectId): void {
+  if (draftSaveTimer !== undefined) {
+    window.clearTimeout(draftSaveTimer)
+    draftSaveTimer = undefined
+  }
+  const key = workspaceDraftKey(targetProjectId)
+  if (key !== undefined) {
+    try {
+      localStorage.removeItem(key)
+    } catch {
+      // Browser storage is optional; the persisted project remains authoritative.
+    }
+  }
+  restoredDraftOperations = []
+  delete root.dataset.draft
+}
+
+async function restoreWorkspaceDraft(snapshot: RemoteSnapshot): Promise<void> {
+  const key = workspaceDraftKey()
+  if (key === undefined || workspace === undefined || project === undefined) return
+  let draft: WorkspaceDraft | undefined
+  try {
+    const encoded = localStorage.getItem(key)
+    if (encoded === null || encoded.length > 1024 * 1024) return
+    draft = workspaceDraft(JSON.parse(encoded))
+  } catch {
+    return
+  }
+  if (draft === undefined) {
+    clearWorkspaceDraft()
+    return
+  }
+
+  restoredDraftOperations = [...draft.editorOperations]
+  await m7StartCompletion
+  if (tearingDown || workspace === undefined || project === undefined) return
+  const baseline = cloneProject(history[0]?.project ?? project)
+  const restored = applyOfficialEditorCommands(
+    cloneProject(baseline),
+    draft.editorOperations,
+  ).project as Project
+  restored.title = draft.title
+  restored.script.source = draft.scriptSource
+  replaceRuntime(restored, true)
+  layoutPreset = draft.layout
+  cameraView = draft.cameraView
+  layout.value = layoutPreset
+  cameraViewSelect.value = cameraView
+  applyLayout(layoutPreset)
+  camera.position.fromArray(draft.camera.position)
+  camera.quaternion.fromArray(draft.camera.quaternion)
+  camera.up.fromArray(draft.camera.up)
+  if (camera instanceof THREE.PerspectiveCamera && draft.camera.zoom !== undefined) {
+    camera.zoom = draft.camera.zoom
+    camera.updateProjectionMatrix()
+  }
+  if (draft.camera.target !== undefined) orbit?.target.fromArray(draft.camera.target)
+  camera.updateMatrixWorld(true)
+  orbit?.update()
+  pendingOperations = [...draft.pendingOperations]
+  pendingEditorOperations = [...draft.editorOperations]
+  if (draft.selectedUuid !== undefined) {
+    selectObject(scene.getObjectByProperty('uuid', draft.selectedUuid), false)
+  }
+  history = [
+    {
+      project: baseline,
+      pendingOperations: [],
+      editorOperations: [],
+    },
+    {
+      project: cloneProject(serializeProject()),
+      pendingOperations: [...pendingOperations],
+      editorOperations: [...pendingEditorOperations],
+    },
+  ]
+  historyIndex = 1
+  refreshHistoryButtons()
+
+  if (draft.navigationTab === 'files'
+    && draft.activeFile !== undefined
+    && draft.fileText !== undefined
+    && workspace.files.some(file => file.path === draft.activeFile && file.text)) {
+    setNavigationTab('files', true)
+    await selectWorkspaceFile(draft.activeFile)
+    const baselineText = fileSource.value
+    fileSource.value = draft.fileText
+    fileHistory = [baselineText, draft.fileText]
+    fileHistoryIndex = 1
+    refreshHistoryButtons()
+  }
+
+  if (draft.baseRevision === snapshot.revision) {
+    root.dataset.sync = 'dirty'
+    save.disabled = false
+    refreshPlayButtons()
+    status.textContent = 'Restored unsaved draft'
+  } else {
+    showConflict(snapshot)
+    status.textContent = 'Restored unsaved draft with an external revision conflict'
+  }
+  root.dataset.draft = 'restored'
+}
+
 function markDirty(message = 'Unsaved changes'): void {
   if (root.dataset.sync !== 'conflict') root.dataset.sync = 'dirty'
   save.disabled = navigationTab === 'files'
@@ -876,6 +1188,7 @@ function markDirty(message = 'Unsaved changes'): void {
     : title.value.trim() === ''
   refreshPlayButtons()
   status.textContent = message
+  scheduleWorkspaceDraft()
 }
 
 function serializeProject(): Project {
@@ -1036,6 +1349,7 @@ function refreshInspector(): void {
 
 function selectObject(object: THREE.Object3D | undefined, notifyRuntime = true): void {
   selected = object
+  selectionAnchor = object === undefined ? undefined : { projectId, uuid: object.uuid }
   for (
     let parent = object?.parent;
     parent != null && parent !== scene;
@@ -1099,7 +1413,19 @@ function setupControls(): void {
   })
 }
 
-function replaceRuntime(nextProject: Project): void {
+function replaceRuntime(nextProject: Project, preserveUnmappedSelection = false): void {
+  const selectedUuid = selectionAnchor !== undefined && selectionAnchor.projectId === projectId
+    ? selectionAnchor.uuid
+    : undefined
+  const preservedCamera = preserveUnmappedSelection
+    ? {
+        position: camera.position.clone(),
+        quaternion: camera.quaternion.clone(),
+        up: camera.up.clone(),
+        zoom: camera instanceof THREE.PerspectiveCamera ? camera.zoom : undefined,
+        target: orbit?.target.clone(),
+      }
+    : undefined
   disposeControls()
   disposeScene(scene)
 
@@ -1121,8 +1447,26 @@ function replaceRuntime(nextProject: Project): void {
   renderer.shadowMap.enabled = nextProject.renderer.shadows
   applyLayout(layoutPreset)
   applyCameraView(cameraView)
+  if (preservedCamera !== undefined) {
+    camera.position.copy(preservedCamera.position)
+    camera.quaternion.copy(preservedCamera.quaternion)
+    camera.up.copy(preservedCamera.up)
+    if (camera instanceof THREE.PerspectiveCamera && preservedCamera.zoom !== undefined) {
+      camera.zoom = preservedCamera.zoom
+      camera.updateProjectionMatrix()
+    }
+    if (preservedCamera.target !== undefined) orbit?.target.copy(preservedCamera.target)
+    camera.updateMatrixWorld(true)
+    orbit?.update()
+  }
   setupControls()
-  selectObject(undefined)
+  const nextSelected = selectedUuid === undefined
+    ? undefined
+    : scene.getObjectByProperty('uuid', selectedUuid)
+  selectObject(nextSelected, false)
+  if (preserveUnmappedSelection && selectedUuid !== undefined && nextSelected === undefined) {
+    selectionAnchor = { projectId, uuid: selectedUuid }
+  }
   resizeRenderer()
 }
 
@@ -1275,6 +1619,7 @@ function acceptSnapshot(
   nextRevision: string,
   message: string,
   nextWorkspace?: WorkspaceView,
+  workspaceMode: 'edit' | 'run' = 'edit',
 ): void {
   if (tearingDown) return
   fileLoadToken += 1
@@ -1307,6 +1652,20 @@ function acceptSnapshot(
   }
   const previousFile = activeFile
   workspace = nextWorkspace
+  const capabilities = workspace?.capabilities
+  if (capabilities === undefined) {
+    delete root.dataset.capabilityCommand
+    delete root.dataset.capabilityExtension
+    delete root.dataset.capabilityPanel
+    delete root.dataset.capabilityDebug
+  } else {
+    root.dataset.capabilityPanel = capabilities.parameterPanel.id
+    root.dataset.capabilityCommand = capabilities.command.id
+    root.dataset.capabilityDebug = capabilities.debugSurface.id
+    root.dataset.capabilityExtension = capabilities.extension.path
+    undo.title = `${capabilities.command.label} (undoable)`
+    runtimeDebug.title = capabilities.debugSurface.label
+  }
   refreshRuntimeDebugModes()
   const filesTab = navigationTabs.find(button => button.dataset.navigationTab === 'files')
   if (filesTab !== undefined) filesTab.hidden = workspace === undefined
@@ -1325,7 +1684,7 @@ function acceptSnapshot(
   baseOperations = [...editor.operations]
   pendingOperations = []
   pendingEditorOperations = []
-  replaceRuntime(nextProject)
+  replaceRuntime(nextProject, nextWorkspace !== undefined)
   const baseline = serializeProject()
   history = [{
     project: cloneProject(baseline),
@@ -1351,7 +1710,8 @@ function acceptSnapshot(
     cancelM7Start()
     refreshPlayButtons()
     status.textContent = 'Preparing editable Workspace'
-    void queueM7RuntimeStart(token, 'edit').catch(error => {
+    void queueM7RuntimeStart(token, workspaceMode).then(() => {
+    }).catch(error => {
       if (token !== m7StartToken) return
       recordRuntimeError(error)
       root.dataset.playState = 'error'
@@ -1367,7 +1727,10 @@ function showConflict(snapshot: RemoteSnapshot): void {
   root.dataset.sync = 'conflict'
   conflict.hidden = false
   save.disabled = false
-  saveCopy.hidden = snapshot.workspace !== undefined
+  saveCopy.hidden = false
+  saveCopy.textContent = snapshot.workspace === undefined
+    ? 'Save local copy'
+    : 'Save local revision'
   refreshPlayButtons()
   status.textContent = 'External revision conflicts with local edits'
 }
@@ -1409,6 +1772,34 @@ function workspaceFromResult(value: unknown): WorkspaceView | undefined {
     || typeof file.text !== 'boolean')) {
     throw new Error('pull_project returned an invalid workspace')
   }
+  const capabilities = record(candidate.capabilities)
+  if (capabilities !== undefined) {
+    const parameterPanel = record(capabilities.parameterPanel)
+    const command = record(capabilities.command)
+    const debugSurface = record(capabilities.debugSurface)
+    const extension = record(capabilities.extension)
+    if (parameterPanel === undefined
+      || command === undefined
+      || debugSurface === undefined
+      || extension === undefined
+      || typeof parameterPanel.id !== 'string'
+      || typeof parameterPanel.label !== 'string'
+      || !Array.isArray(parameterPanel.parameters)
+      || !parameterPanel.parameters.every(id => typeof id === 'string')
+      || typeof command.id !== 'string'
+      || typeof command.label !== 'string'
+      || typeof command.type !== 'string'
+      || command.undoable !== true
+      || typeof debugSurface.id !== 'string'
+      || typeof debugSurface.label !== 'string'
+      || typeof debugSurface.mode !== 'string'
+      || typeof extension.path !== 'string'
+      || !Array.isArray(extension.permissions)
+      || extension.permissions.length !== 1
+      || extension.permissions[0] !== 'runtime') {
+      throw new Error('pull_project returned invalid Workspace capabilities')
+    }
+  }
   return {
     kind: candidate.kind,
     entry: candidate.entry,
@@ -1434,6 +1825,9 @@ function workspaceFromResult(value: unknown): WorkspaceView | undefined {
             key: parameter?.key as string,
           }
     )),
+    ...capabilities === undefined
+      ? {}
+      : { capabilities: capabilities as unknown as NonNullable<WorkspaceView['capabilities']> },
     files: files.map(file => ({
       path: file?.path as string,
       sha256: file?.sha256 as string,
@@ -1474,6 +1868,23 @@ const app = new App(
   { availableDisplayModes: ['inline', 'fullscreen'] },
   { autoResize: true, strict: true },
 )
+
+async function publishRuntimeModelContext(run: M7Run): Promise<void> {
+  if (app.getHostCapabilities()?.updateModelContext === undefined) return
+  await app.updateModelContext({
+    content: [{
+      type: 'text',
+      text: `The active Three.js Runtime identity is ${JSON.stringify(run)}. This is the latest identity and supersedes every earlier Runtime identity for this project. Use these exact projectId, revision, runId, and nonce values for subsequent Runtime Harness tool calls.`,
+    }],
+    structuredContent: {
+      kind: 'threejs-runtime-identity',
+      runtime: run,
+    },
+  }, {
+    timeout: M7_LIFECYCLE_TIMEOUT,
+    maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+  })
+}
 
 function setDisplayMode(mode: 'inline' | 'fullscreen'): void {
   document.documentElement.dataset.displayMode = mode
@@ -1749,6 +2160,7 @@ function waitForM7Event(
   timeout = 120_000,
   signal?: AbortSignal,
   accept?: (event: M7RuntimeEvent) => boolean,
+  frameElement: HTMLIFrameElement = runtimeFrame,
 ): Promise<M7RuntimeEvent> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
@@ -1765,8 +2177,8 @@ function waitForM7Event(
       reject(new Error(`timed out waiting for M7 ${types.join(' or ')}`))
     }, timeout)
     const listener = (event: MessageEvent<unknown>) => {
-      if (event.source !== runtimeFrame.contentWindow) return
       const candidate = record(event.data)
+      if (event.source !== frameElement.contentWindow) return
       if (candidate?.channel !== M7_RUNTIME_CHANNEL
         || candidate.projectId !== run.projectId
         || candidate.runId !== run.runId
@@ -1829,11 +2241,12 @@ function postM7Run(
   run: M7Run,
   action: string,
   payload: Record<string, unknown> = {},
+  frameElement: HTMLIFrameElement = runtimeFrame,
 ): void {
-  if (runtimeFrame.contentWindow === null) {
+  if (frameElement.contentWindow === null) {
     throw new Error('M7 runtime is not active')
   }
-  runtimeFrame.contentWindow.postMessage({
+  frameElement.contentWindow.postMessage({
     channel: M7_RUNTIME_CHANNEL,
     action,
     ...run,
@@ -1846,11 +2259,14 @@ function postM7(action: string, payload: Record<string, unknown> = {}): void {
   postM7Run(m7ActiveRun, action, payload)
 }
 
-function loadM7Frame(signal: AbortSignal): Promise<void> {
+function loadM7Frame(
+  signal: AbortSignal,
+  frameElement: HTMLIFrameElement = runtimeFrame,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
       window.clearTimeout(timer)
-      runtimeFrame.removeEventListener('load', loaded)
+      frameElement.removeEventListener('load', loaded)
       signal.removeEventListener('abort', aborted)
     }
     const loaded = (): void => {
@@ -1864,12 +2280,264 @@ function loadM7Frame(signal: AbortSignal): Promise<void> {
     const timer = window.setTimeout(() => {
       cleanup()
       reject(new Error('M7 runtime frame load timed out'))
-    }, 5_000)
-    runtimeFrame.addEventListener('load', loaded, { once: true })
+    }, 30_000)
+    frameElement.addEventListener('load', loaded, { once: true })
     signal.addEventListener('abort', aborted, { once: true })
-    runtimeFrame.hidden = false
-    runtimeFrame.srcdoc = m7BootstrapHtml()
+    frameElement.hidden = false
+    frameElement.srcdoc = m7BootstrapHtml()
   })
+}
+
+async function runtimeBundleFor(run: M7Run): Promise<NonNullable<typeof m7Bundle>> {
+  if (m7Bundle?.revision === run.revision) return m7Bundle
+  const buildResult = await app.callServerTool({
+    name: 'build_project',
+    arguments: { projectId: run.projectId, revision: run.revision },
+  }, {
+    timeout: M7_REQUEST_TIMEOUT,
+    maxTotalTimeout: M7_REQUEST_TIMEOUT,
+  })
+  if (buildResult.isError) throw new Error(resultError(buildResult))
+  const build = record(buildResult.structuredContent)
+  if (build?.status !== 'ready'
+    || typeof build.bundleUri !== 'string'
+    || (build.backend !== 'webgl' && build.backend !== 'webgpu' && build.backend !== 'raw-webgpu')) {
+    const diagnostics = Array.isArray(build?.diagnostics) ? build.diagnostics.map(record) : []
+    throw new Error(String(
+      diagnostics.find(item => item?.severity === 'error')?.message
+        ?? 'Workspace validation build failed',
+    ))
+  }
+  const resource = await app.readServerResource({
+    uri: build.bundleUri,
+  }, {
+    timeout: M7_REQUEST_TIMEOUT,
+    maxTotalTimeout: M7_REQUEST_TIMEOUT,
+  })
+  m7Bundle = {
+    revision: run.revision,
+    bundle: resourceText(resource, build.bundleUri),
+    backend: build.backend,
+  }
+  return m7Bundle
+}
+
+async function stopValidationRuntime(): Promise<void> {
+  const run = m7ValidationRun
+  m7ValidationRun = undefined
+  if (run === undefined) return
+  const disposed = waitForM7Event(
+    ['disposed'],
+    run,
+    10_000,
+    undefined,
+    undefined,
+    validationFrame,
+  )
+  postM7Run(run, 'stop', {}, validationFrame)
+  await disposed
+}
+
+async function ensureValidationRuntime(anchor: M7Run): Promise<M7Run> {
+  if (m7ValidationRun !== undefined
+    && m7ValidationRun.projectId === anchor.projectId
+    && m7ValidationRun.revision === anchor.revision
+    && m7ValidationRun.runId === anchor.runId
+    && m7ValidationRun.nonce === anchor.nonce) {
+    return m7ValidationRun
+  }
+  await stopValidationRuntime()
+  const artifact = await runtimeBundleFor(anchor)
+  const run: M7Run = { ...anchor }
+  const evidenceToken = m7ActiveRun !== undefined
+    && sameM7Run(m7ActiveRun, anchor)
+    ? m7EvidenceToken
+    : crypto.randomUUID()
+  if (evidenceToken === undefined) throw new Error('Runtime evidence token is unavailable')
+  const controller = new AbortController()
+  await loadM7Frame(controller.signal, validationFrame)
+  const ready = waitForM7Event(
+    ['ready', 'runtime-error'],
+    run,
+    120_000,
+    controller.signal,
+    undefined,
+    validationFrame,
+  )
+  postM7Run(run, 'run', {
+    bundle: artifact.bundle,
+    backend: artifact.backend,
+    debugMode: runtimeDebugMode,
+    mode: 'run',
+    evidenceToken,
+  }, validationFrame)
+  const event = await ready
+  if (event.type === 'runtime-error') {
+    throw new Error(typeof event.data?.message === 'string'
+      ? event.data.message
+      : 'Validation Runtime failed')
+  }
+  m7ValidationRun = run
+  return run
+}
+
+async function reportRuntimeHarnessResult(
+  command: RuntimeHarnessCommand,
+  result: Record<string, unknown>,
+): Promise<void> {
+  if (m7EvidenceToken === undefined) throw new Error('Runtime evidence token is unavailable')
+  if (result.evidenceToken !== m7EvidenceToken) {
+    throw new Error('Runtime evidence provenance is invalid')
+  }
+  const reported = await app.callServerTool({
+    name: 'report_runtime_evidence',
+    arguments: {
+      ...command.runtime,
+      commandId: command.commandId,
+      result,
+    },
+  }, {
+    timeout: M7_LIFECYCLE_TIMEOUT,
+    maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+  })
+  if (reported.isError) throw new Error(resultError(reported))
+}
+
+async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Promise<void> {
+  if (m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, command.runtime)) {
+    throw new Error('Runtime Harness command targets a stale active run')
+  }
+  const expiresAt = Date.parse(command.expiresAt)
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new Error('Runtime Harness command expired')
+  }
+  const targetRun = command.target === 'validation'
+    ? await ensureValidationRuntime(command.runtime)
+    : command.runtime
+  const frameElement = command.target === 'validation' ? validationFrame : runtimeFrame
+  let cancelSent = false
+  let monitorBusy = false
+  let finished = false
+  const cancel = (): void => {
+    if (cancelSent || finished) return
+    cancelSent = true
+    postM7Run(targetRun, 'harness-cancel', {
+      commandId: command.commandId,
+    }, frameElement)
+  }
+  const monitor = window.setInterval(() => {
+    if (monitorBusy) return
+    if (Date.now() >= expiresAt) {
+      cancel()
+      return
+    }
+    monitorBusy = true
+    void app.callServerTool({
+      name: 'pull_runtime_command',
+      arguments: { ...command.runtime },
+    }, {
+      timeout: M7_LIFECYCLE_TIMEOUT,
+      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    }).then(result => {
+      const pending = record(record(result.structuredContent)?.command)
+      if (result.isError || pending?.commandId !== command.commandId) {
+        cancel()
+      }
+    }).catch(() => {
+      cancel()
+    }).finally(() => {
+      monitorBusy = false
+    })
+  }, 100)
+  const response = waitForM7Event(
+    ['harness-result', 'harness-error'],
+    targetRun,
+    Math.min(
+      20_000 + RUNTIME_COMMAND_SETTLEMENT_GRACE_MS,
+      Math.max(100, expiresAt - Date.now() + RUNTIME_COMMAND_SETTLEMENT_GRACE_MS),
+    ),
+    undefined,
+    event => event.data?.commandId === command.commandId,
+    frameElement,
+  )
+  let event: M7RuntimeEvent
+  try {
+    postM7Run(targetRun, 'harness-command', {
+      commandId: command.commandId,
+      kind: command.kind,
+      target: command.target,
+      expiresAt: command.expiresAt,
+      ...command.payload,
+    }, frameElement)
+    event = await response
+  } catch (error) {
+    cancel()
+    throw error
+  } finally {
+    finished = true
+    window.clearInterval(monitor)
+  }
+  const result = record(event.data?.result)
+  if (event.type === 'harness-error' || result === undefined) {
+    await reportRuntimeHarnessResult(command, {
+      kind: 'runtime-harness-error',
+      runtime: { ...targetRun, target: command.target },
+      evidenceId: crypto.randomUUID(),
+      evidenceToken: m7EvidenceToken,
+      status: 'failed',
+      message: typeof event.data?.message === 'string'
+        ? event.data.message
+        : 'Runtime Harness command failed',
+    })
+    return
+  }
+  await reportRuntimeHarnessResult(command, result)
+}
+
+async function pullRuntimeHarnessCommand(): Promise<void> {
+  if (runtimeHarnessPulling || tearingDown || m7ActiveRun === undefined) return
+  runtimeHarnessPulling = true
+  const run = m7ActiveRun
+  try {
+    const result = await app.callServerTool({
+      name: 'pull_runtime_command',
+      arguments: { ...run },
+    }, {
+      timeout: M7_LIFECYCLE_TIMEOUT,
+      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    })
+    if (result.isError || m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, run)) return
+    const command = record(record(result.structuredContent)?.command)
+    if (command === undefined
+      || typeof command.commandId !== 'string'
+      || runtimeHarnessCommands.has(command.commandId)) return
+    const runtime = record(command.runtime)
+    const payload = record(command.payload)
+    if ((command.kind !== 'capture-frame'
+        && command.kind !== 'read-logs'
+        && command.kind !== 'simulate-actions')
+      || (command.target !== 'active' && command.target !== 'validation')
+      || runtime === undefined
+      || payload === undefined
+      || typeof command.expiresAt !== 'string') {
+      throw new Error('Server returned an invalid Runtime Harness command')
+    }
+    const parsed: RuntimeHarnessCommand = {
+      commandId: command.commandId,
+      kind: command.kind,
+      target: command.target,
+      runtime: runtime as unknown as M7Run,
+      payload,
+      expiresAt: command.expiresAt,
+    }
+    runtimeHarnessCommands.add(parsed.commandId)
+    if (runtimeHarnessCommands.size > 100) {
+      runtimeHarnessCommands.delete(runtimeHarnessCommands.values().next().value!)
+    }
+    await executeRuntimeHarnessCommand(parsed)
+  } finally {
+    runtimeHarnessPulling = false
+  }
 }
 
 function cancelM7Start(): void {
@@ -1889,6 +2557,7 @@ async function releaseM7Run(run: M7Run): Promise<void> {
       projectId: run.projectId,
       revision: run.revision,
       runId: run.runId,
+      nonce: run.nonce,
     },
   }, {
     timeout: M7_LIFECYCLE_TIMEOUT,
@@ -1935,8 +2604,8 @@ async function stopM7Runtime(
     m7DisposedRuns.add(run.runId)
     if (m7ActiveRun === run) {
       m7ActiveRun = undefined
+      m7EvidenceToken = undefined
       runtimeFrame.hidden = true
-      runtimeFrame.srcdoc = '<!doctype html><title>Stopped</title>'
     }
     await releaseM7Run(run)
   }
@@ -1954,10 +2623,9 @@ async function startM7Runtime(
   const startProjectId = projectId
   const startRevision = revision
   const startWorkspace = workspace
-  if (token !== m7StartToken) return
-  if (m7ActiveRun !== undefined && !m7RunIsCurrent(m7ActiveRun)) {
-    await stopM7Runtime(false)
-  }
+  const previousRuntimeView = m7ActiveRun?.projectId === startProjectId
+    ? m7Metrics
+    : undefined
   if (token !== m7StartToken) return
   status.textContent = `Building ${startWorkspace.entry}`
   let buildResult
@@ -2009,6 +2677,25 @@ async function startM7Runtime(
   }
   const bundle = resourceText(bundleResource, build.bundleUri)
   if (tearingDown || token !== m7StartToken) return
+  const previousBundle = m7Bundle
+  m7Bundle = {
+    revision: startRevision,
+    bundle,
+    backend: build.backend,
+  }
+  try {
+    await ensureValidationRuntime({
+      projectId: startProjectId,
+      revision: startRevision,
+      runId: crypto.randomUUID(),
+      nonce: crypto.randomUUID(),
+    })
+    await stopValidationRuntime()
+  } catch (error) {
+    m7Bundle = previousBundle
+    throw error
+  }
+  if (tearingDown || token !== m7StartToken) return
   await stopIsolatedRuntime()
   await stopM7Runtime(false)
   if (tearingDown || token !== m7StartToken) return
@@ -2041,6 +2728,7 @@ async function startM7Runtime(
         projectId: startProjectId,
         revision: startRevision,
         runId: run.runId,
+        nonce: run.nonce,
       },
     }, {
       signal: controller.signal,
@@ -2048,6 +2736,11 @@ async function startM7Runtime(
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
     if (registered.isError) throw new Error(resultError(registered))
+    const registration = record(registered.structuredContent)
+    if (typeof registration?.evidenceToken !== 'string') {
+      throw new Error('register_runtime_run returned no Runtime evidence token')
+    }
+    m7EvidenceToken = registration.evidenceToken
     if (token !== m7StartToken
       || starting.controller.signal.aborted
       || m7StartingRun !== starting) {
@@ -2065,6 +2758,8 @@ async function startM7Runtime(
       backend: build.backend,
       debugMode: runtimeDebugMode,
       mode,
+      evidenceToken: m7EvidenceToken,
+      ...previousRuntimeView === undefined ? {} : { viewState: previousRuntimeView },
     })
     starting.runSent = true
     const event = await started
@@ -2078,13 +2773,38 @@ async function startM7Runtime(
         ? event.data.message
         : 'Workspace Runtime failed')
     }
-    m7StartingRun = undefined
     m7ActiveRun = run
     m7Ready = event.data ?? {}
     m7Metrics = event.data ?? {}
+    if (restoredDraftOperations.length > 0) {
+      const restored = waitForM7Event(
+        ['editor-scene', 'runtime-error'],
+        run,
+        10_000,
+        starting.controller.signal,
+      )
+      postM7Run(run, 'apply-draft-operations', {
+        operations: restoredDraftOperations,
+      })
+      const restoredEvent = await restored
+      if (restoredEvent.type === 'runtime-error') {
+        throw new Error(typeof restoredEvent.data?.message === 'string'
+          ? restoredEvent.data.message
+          : 'Workspace Runtime draft restore failed')
+      }
+    }
+    m7StartingRun = undefined
+    if (mode === 'run') {
+      playingProject = serializeProject()
+      playingRevision = startRevision
+    } else {
+      playingProject = undefined
+      playingRevision = undefined
+    }
     root.dataset.playState = mode === 'run' ? 'playing' : 'editing'
     setEditorDisabled(mode === 'run')
     refreshPlayButtons()
+    await publishRuntimeModelContext(run)
     status.textContent = mode === 'run'
       ? `${String(build.backend).toUpperCase()} Runtime`
       : `${String(build.backend).toUpperCase()} Edit`
@@ -2103,8 +2823,8 @@ async function startM7Runtime(
       }
     }
     m7DisposedRuns.add(run.runId)
+    m7EvidenceToken = undefined
     runtimeFrame.hidden = true
-    runtimeFrame.srcdoc = '<!doctype html><title>Stopped</title>'
     if (registrationStarted) {
       try {
         await releaseM7Run(run)
@@ -2345,6 +3065,7 @@ function startGame(): void {
   save.disabled = true
   disposeControls()
   selected = undefined
+  selectionAnchor = undefined
   renderHierarchy()
   runtimeInput.keys.clear()
   runtimeInput.pointer.buttons.clear()
@@ -2519,6 +3240,7 @@ function handleStopFailure(error: unknown): void {
 
 function canApplyEditorRevision(snapshot: RemoteSnapshot): boolean {
   if (navigationTab !== 'scene'
+    || root.dataset.playState !== 'editing'
     || workspace === undefined
     || snapshot.workspace === undefined
     || snapshot.editorOperations === undefined
@@ -2558,7 +3280,10 @@ function trackM7Lifecycle<T>(task: Promise<T>): Promise<T> {
   return task
 }
 
-async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
+async function applyEditorRevision(
+  snapshot: RemoteSnapshot,
+  expectedSync = 'clean',
+): Promise<boolean> {
   if (!canApplyEditorRevision(snapshot)
     || m7ActiveRun === undefined
     || snapshot.workspace === undefined
@@ -2571,6 +3296,7 @@ async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
   m7LifecycleControllers.add(controller)
   let registrationStarted = false
   let advanced = false
+  let runtimeAdvanced = false
   try {
     status.textContent = 'Applying external Editor changes'
     setEditorDisabled(true)
@@ -2581,6 +3307,7 @@ async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
         projectId: run.projectId,
         revision: nextRun.revision,
         runId: run.runId,
+        nonce: run.nonce,
         previousRevision: run.revision,
       },
     }, {
@@ -2589,13 +3316,17 @@ async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
     if (registered.isError) throw new Error(resultError(registered))
+    const registration = record(registered.structuredContent)
+    if (registration?.evidenceToken !== m7EvidenceToken) {
+      throw new Error('Runtime evidence token changed during revision rollover')
+    }
     advanced = true
     if (m7ActiveRun === undefined
       || !sameM7Run(m7ActiveRun, run)
       || !m7RunIsCurrent(run)
       || token !== m7StartToken
       || root.dataset.playState !== 'editing'
-      || root.dataset.sync !== 'clean') {
+      || root.dataset.sync !== expectedSync) {
       throw new Error('Editor state changed during Runtime revision rollover')
     }
 
@@ -2616,6 +3347,7 @@ async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
         ? event.data.message
         : 'Workspace Runtime Editor update failed')
     }
+    runtimeAdvanced = true
     const objects = Array.isArray(event.data?.objects)
       ? event.data.objects.map(editorObjectSnapshot)
       : []
@@ -2627,13 +3359,15 @@ async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
       || !m7RunIsCurrent(run)
       || token !== m7StartToken
       || root.dataset.playState !== 'editing'
-      || root.dataset.sync !== 'clean') {
+      || root.dataset.sync !== expectedSync) {
       throw new Error('Editor state changed during Runtime revision rollover')
     }
 
     workspace = snapshot.workspace
     renderFileTree()
     m7ActiveRun = nextRun
+    await stopValidationRuntime()
+    m7Bundle = undefined
     m7EditorSceneAccepted = true
     setClean(snapshot.revision)
     acceptRuntimeEditorScene(objects as EditorObjectSnapshot[], nextRun)
@@ -2644,27 +3378,48 @@ async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
       || !m7RunIsCurrent(nextRun)) {
       throw new Error('Runtime lifecycle changed during revision rollover')
     }
+    await publishRuntimeModelContext(nextRun)
     setEditorDisabled(false)
     if (root.dataset.sync === 'clean') {
       status.textContent = 'Updated Editor changes from server'
     }
     return true
   } catch (error) {
-    let cleanupError: unknown
+    const cleanupErrors: unknown[] = []
     if (registrationStarted) {
-      try {
-        if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run)) {
-          if (advanced) {
-            m7ActiveRun = nextRun
-            await stopM7Runtime(false)
-          } else {
-            await releaseM7Run(nextRun)
-          }
-        } else {
-          await releaseM7Run(nextRun)
+      if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run) && advanced) {
+        // The Server advances first. Dispose the revision the iframe acknowledged,
+        // then release the Server's next revision as a separate identity.
+        const cleanupRevisions = rolloverCleanupRevisions(
+          run.revision,
+          nextRun.revision,
+          runtimeAdvanced,
+        )
+        const iframeRun = { ...run, revision: cleanupRevisions.iframeRevision }
+        const serverRun = { ...run, revision: cleanupRevisions.serverRevision }
+        m7ActiveRun = iframeRun
+        try {
+          await disposeM7Runtime(iframeRun)
+        } catch (failure) {
+          cleanupErrors.push(failure)
         }
-      } catch (failure) {
-        cleanupError = failure
+        m7DisposedRuns.add(run.runId)
+        if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run)) {
+          m7ActiveRun = undefined
+          m7EvidenceToken = undefined
+          runtimeFrame.hidden = true
+        }
+        try {
+          await releaseM7Run(serverRun)
+        } catch (failure) {
+          cleanupErrors.push(failure)
+        }
+      } else {
+        try {
+          await releaseM7Run(nextRun)
+        } catch (failure) {
+          cleanupErrors.push(failure)
+        }
       }
     }
     if (token === m7StartToken
@@ -2675,9 +3430,9 @@ async function applyEditorRevision(snapshot: RemoteSnapshot): Promise<boolean> {
     if (projectId === run.projectId && revision === run.revision) {
       setEditorDisabled(false)
     }
-    if (cleanupError !== undefined) {
+    if (cleanupErrors.length > 0) {
       throw new AggregateError(
-        [error, cleanupError],
+        [error, ...cleanupErrors],
         'Runtime revision rollover cleanup failed',
       )
     }
@@ -2691,7 +3446,6 @@ async function pullLatest(timeout = 60_000): Promise<void> {
   if (tearingDown
     || pulling
     || root.dataset.playState === 'starting'
-    || root.dataset.playState === 'playing'
     || root.dataset.playState === 'stopping'
     || projectId === undefined || revision === undefined) return
   pulling = true
@@ -2713,6 +3467,7 @@ async function pullLatest(timeout = 60_000): Promise<void> {
     if (snapshot === undefined) return
     if (root.dataset.sync === 'saving' || snapshot.revision === revision) return
     if (root.dataset.sync === 'clean') {
+      const workspaceMode = root.dataset.playState === 'playing' ? 'run' : 'edit'
       if (!await trackM7Lifecycle(applyEditorRevision(snapshot))) {
         if (tearingDown || projectId !== pullProjectId || revision !== pullRevision) return
         if (root.dataset.sync === 'clean') {
@@ -2721,6 +3476,7 @@ async function pullLatest(timeout = 60_000): Promise<void> {
             snapshot.revision,
             'Updated from server',
             snapshot.workspace,
+            workspaceMode,
           )
         } else {
           showConflict(snapshot)
@@ -2737,10 +3493,14 @@ async function pullLatest(timeout = 60_000): Promise<void> {
 async function loadProject(nextProjectId: string): Promise<void> {
   if (tearingDown || loadingId === nextProjectId) return
   const token = ++loadToken
+  const preserveDirty = projectId === nextProjectId
+    && (root.dataset.sync === 'dirty' || root.dataset.sync === 'conflict')
   loadingId = nextProjectId
-  root.dataset.sync = 'loading'
-  refreshPlayButtons()
-  status.textContent = 'Loading project'
+  if (!preserveDirty) {
+    root.dataset.sync = 'loading'
+    refreshPlayButtons()
+    status.textContent = 'Loading project'
+  }
   try {
     const result = await app.callServerTool({
       name: 'pull_project',
@@ -2749,9 +3509,15 @@ async function loadProject(nextProjectId: string): Promise<void> {
     if (tearingDown || token !== loadToken) return
     const snapshot = snapshotFromResult(result)
     if (snapshot === undefined) throw new Error('project snapshot was not returned')
+    if (preserveDirty) {
+      showConflict(snapshot)
+      persistWorkspaceDraft()
+      return
+    }
     projectId = nextProjectId
     root.dataset.projectId = projectId
     acceptSnapshot(snapshot.project, snapshot.revision, 'Project loaded', snapshot.workspace)
+    await restoreWorkspaceDraft(snapshot)
   } finally {
     if (token === loadToken) loadingId = undefined
   }
@@ -2759,11 +3525,9 @@ async function loadProject(nextProjectId: string): Promise<void> {
 
 app.ontoolresult = result => {
   if (tearingDown) return
+  rememberAppInstance(result)
   const structured = record(result.structuredContent)
   const nextProjectId = structured?.projectId
-  // #region debug-point H4:tool-result
-  void fetch('http://127.0.0.1:7778/event', { method: 'POST', body: JSON.stringify({ sessionId: 'pool-float-ui-refresh', runId: 'post-fix', hypothesisId: 'H4', location: 'threejs-editor-mcp/src/view.ts:ontoolresult', msg: '[DEBUG] Three.js MCP App received tool result', data: { projectId: nextProjectId, revision: structured?.revision, hasStructuredContent: structured !== undefined, isError: result.isError === true }, ts: Date.now() }) }).catch(() => {})
-  // #endregion
   if (typeof nextProjectId !== 'string') {
     status.textContent = 'Tool result did not identify a project'
     return
@@ -2786,6 +3550,7 @@ app.onhostcontextchanged = context => {
 }
 app.onteardown = async () => {
   if (tearingDown) return {}
+  persistWorkspaceDraft()
   tearingDown = true
   loadToken += 1
   parameterLoadToken += 1
@@ -2821,6 +3586,7 @@ app.onteardown = async () => {
   await cleanup(async () => {
     if (m7ActiveRun !== undefined) await stopM7Runtime()
   })
+  await cleanup(() => stopValidationRuntime())
   await cleanup(() => stopIsolatedRuntime())
   await cleanup(() => cancelAnimationFrame(animation))
   await cleanup(() => resizeObserver.disconnect())
@@ -2879,6 +3645,19 @@ fullscreen.addEventListener('click', () => {
 play.addEventListener('click', startGame)
 stop.addEventListener('click', () => {
   void stopGame().catch(handleStopFailure)
+})
+activeGrant.addEventListener('click', () => {
+  if (m7ActiveRun === undefined || root.dataset.playState !== 'playing') return
+  activeGrant.disabled = true
+  void app.callServerTool({
+    name: 'grant_active_runtime_control',
+    arguments: { ...m7ActiveRun },
+  }).then(result => {
+    if (result.isError) throw new Error(resultError(result))
+    status.textContent = 'One live validation is authorized for 60 seconds'
+  }).catch(error => {
+    status.textContent = error instanceof Error ? error.message : String(error)
+  }).finally(refreshPlayButtons)
 })
 runtimeDebug.addEventListener('change', () => {
   runtimeDebugMode = runtimeDebug.value
@@ -3130,6 +3909,7 @@ undo.addEventListener('click', () => {
     if (fileHistoryIndex === 0 && remoteSnapshot === undefined) {
       root.dataset.sync = 'clean'
       save.disabled = true
+      clearWorkspaceDraft()
       refreshPlayButtons()
       status.textContent = 'Reverted file edits'
     } else {
@@ -3149,6 +3929,7 @@ undo.addEventListener('click', () => {
   if (historyIndex === 0 && remoteSnapshot === undefined) {
     root.dataset.sync = 'clean'
     save.disabled = true
+    clearWorkspaceDraft()
     refreshPlayButtons()
     status.textContent = 'Reverted local edits'
   } else {
@@ -3221,6 +4002,7 @@ save.addEventListener('click', () => {
       const snapshot = snapshotFromResult(pulled)
       if (snapshot === undefined) throw new Error('saved workspace snapshot was not returned')
       setEditorDisabled(false)
+      clearWorkspaceDraft(savedProjectId)
       acceptSnapshot(snapshot.project, snapshot.revision, `Saved ${savedPath}`, snapshot.workspace)
     }).catch(error => {
       if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
@@ -3278,13 +4060,19 @@ save.addEventListener('click', () => {
       if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
       const snapshot = snapshotFromResult(pulled)
       if (snapshot === undefined) throw new Error('saved Workspace snapshot was not returned')
-      setEditorDisabled(false)
-      acceptSnapshot(
-        snapshot.project,
-        snapshot.revision,
-        'Saved Runtime scene edits',
-        snapshot.workspace,
-      )
+      clearWorkspaceDraft(savedProjectId)
+      if (await trackM7Lifecycle(applyEditorRevision(snapshot, 'saving'))) {
+        status.textContent = 'Saved Runtime scene edits'
+      } else {
+        if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
+        setEditorDisabled(false)
+        acceptSnapshot(
+          snapshot.project,
+          snapshot.revision,
+          'Saved Runtime scene edits',
+          snapshot.workspace,
+        )
+      }
     }).catch(error => {
       if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
       root.dataset.sync = 'error'
@@ -3357,6 +4145,7 @@ save.addEventListener('click', () => {
 
 loadExternal.addEventListener('click', () => {
   if (remoteSnapshot === undefined) return
+  clearWorkspaceDraft()
   acceptSnapshot(
     remoteSnapshot.project,
     remoteSnapshot.revision,
@@ -3364,8 +4153,82 @@ loadExternal.addEventListener('click', () => {
     remoteSnapshot.workspace,
   )
 })
+deferExternal.addEventListener('click', () => {
+  if (remoteSnapshot === undefined) return
+  status.textContent = 'External revision deferred; local changes remain unsaved'
+})
 saveCopy.addEventListener('click', () => {
-  if (projectId === undefined || project === undefined || workspace !== undefined) return
+  if (projectId === undefined || project === undefined || remoteSnapshot === undefined) return
+  if (workspace !== undefined) {
+    const savedProjectId = projectId
+    const remote = remoteSnapshot
+    let changes: Array<{
+      type: 'write'
+      path: string
+      text: string
+    }>
+    if (navigationTab === 'files' && activeFile !== undefined) {
+      changes = [{ type: 'write', path: activeFile, text: fileSource.value }]
+    } else if (pendingEditorOperations.length > 0) {
+      const operations = [
+        ...(remote.editorOperations ?? []),
+        ...pendingEditorOperations,
+      ]
+      try {
+        applyOfficialEditorCommands(cloneProject(remote.project), operations)
+      } catch (error) {
+        status.textContent = `Local revision is incompatible with the external project: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+        return
+      }
+      changes = [{
+        type: 'write',
+        path: WORKSPACE_EDITOR_STATE_PATH,
+        text: `${JSON.stringify({
+          schemaVersion: 1,
+          operations,
+          recentChanges: pendingEditorOperations.map(operation => ({
+            source: 'human',
+            operation,
+          })),
+        }, null, 2)}\n`,
+      }]
+    } else {
+      status.textContent = 'No Workspace draft can be saved as a new revision'
+      return
+    }
+    saveCopy.disabled = true
+    status.textContent = 'Saving local revision'
+    void app.callServerTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId: savedProjectId,
+        baseRevision: remote.revision,
+        changes,
+      },
+    }).then(async result => {
+      if (result.isError) throw new Error(resultError(result))
+      const pulled = await app.callServerTool({
+        name: 'pull_project',
+        arguments: { projectId: savedProjectId },
+      })
+      const snapshot = snapshotFromResult(pulled)
+      if (snapshot === undefined) throw new Error('saved Workspace revision was not returned')
+      clearWorkspaceDraft(savedProjectId)
+      acceptSnapshot(
+        snapshot.project,
+        snapshot.revision,
+        'Saved local revision',
+        snapshot.workspace,
+      )
+    }).catch(error => {
+      status.textContent = error instanceof Error ? error.message : String(error)
+    }).finally(() => {
+      saveCopy.disabled = false
+    })
+    return
+  }
   const nextProject = serializeProject()
   nextProject.title = `${nextProject.title} (Local copy)`.slice(0, 120)
   const nextProjectId = `${projectId.slice(0, 45)}-copy-${Date.now().toString(36)}`.slice(0, 64)
@@ -3561,7 +4424,11 @@ const diagnostics = {
     historyLength: history.length,
     layout: layoutPreset,
     cameraView,
+    editorCameraPosition: camera.position.toArray(),
+    editorCameraQuaternion: camera.quaternion.toArray(),
+    editorCameraTarget: orbit?.target.toArray(),
     playState: root.dataset.playState,
+    draft: root.dataset.draft,
     runtimeErrors: [...runtimeErrors],
     runtimeWarnings: [...runtimeWarnings],
     playingRevision,
@@ -3581,6 +4448,7 @@ const diagnostics = {
     workspaceKind: workspace?.kind,
     workspaceEntry: workspace?.entry,
     workspaceBackend: workspace?.backend,
+    capabilities: workspace?.capabilities,
     runtimeDebugMode,
     workspaceFiles: workspace?.files.map(file => file.path) ?? [],
     activeFile,
@@ -3607,6 +4475,10 @@ const diagnostics = {
     m7: {
       active: m7ActiveRun !== undefined,
       runId: m7ActiveRun?.runId,
+      nonce: m7ActiveRun?.nonce,
+      validationRunId: m7ValidationRun?.runId,
+      validationNonce: m7ValidationRun?.nonce,
+      harnessCommands: [...runtimeHarnessCommands],
       build: m7Build,
       eventTypes: m7Events.map(event => event.type),
       errors: [...m7Errors],
@@ -3707,6 +4579,10 @@ void app.connect().then(() => {
   setDisplayMode(context?.displayMode === 'fullscreen' ? 'fullscreen' : 'inline')
   pollTimer = window.setInterval(() => {
     void pullLatest().catch(error => {
+      if (tearingDown) return
+      status.textContent = error instanceof Error ? error.message : String(error)
+    })
+    void pullRuntimeHarnessCommand().catch(error => {
       if (tearingDown) return
       status.textContent = error instanceof Error ? error.message : String(error)
     })

@@ -1,6 +1,10 @@
 # Three.js Collaborative Game Studio V2 可执行规划
 
-状态：**M6-M8 已获批准；M8 于 2026-08-23 验收通过并获提交授权；M8.1 `PLANNED`、尚未实施；M9-M11 未开始**
+状态：**M6-M8 已获批准；M8 于 2026-08-23 验收通过并获提交授权；M8.1 白屏、
+parked validation Runtime 长帧命令超时、Save 黑屏、MCP UI 遮挡输入框和重连后
+Runtime identity 失效的恢复均已完成并回到
+`ACCEPTED`；debug cleanup 已完成，双仓提交已获授权；push 与 M9 均未执行；
+M9-M11 未开始**
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
 [`98453747`](https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills/tree/98453747cc0678f6a5d910f38d7483596a5f9a40)
@@ -635,7 +639,38 @@ open exact revision
 
 ### M8.1：Editor Continuity & Capability Protocol
 
-状态：**PLANNED；用户于 2026-08-23 确认范围，尚未开始实施**
+状态：**ACCEPTED；用户于 2026-08-23 反馈“打开后白屏”和后续
+Runtime command timeout 后曾回退 `IMPLEMENTING`，随后又反馈 Save 黑屏、MCP UI
+遮挡输入框和 Runtime identity stale。恢复诊断确认了 Session 入口差异、Runtime
+iframe `load` 竞态、iframe reparent 销毁 browsing context、迟到 App initialized
+处理、offscreen E2E 同步、隐藏 validation Runtime 帧调度、composer clipping 缺失，
+以及 MCP 重连时 replacement View 丢失 Session entitlement。最新 clean
+fresh-profile 完整 suite exit `0`，`threejs-editor-mcp` release gate `43/43`、
+`dsh-uni-editor` gate `22/22`，独立复审 `P0=0`、`P1=0`；用户于 2026-08-25
+确认修复并授权 debug cleanup 与双仓提交；push 和 M9 均未执行**
+
+最终证据和人工验收步骤记录于
+[`reports/M8.1-validation.md`](../reports/M8.1-validation.md)。验收后已删除
+`runtime-command-deadline`、`save-runtime-black-screen`、
+`mcp-ui-chat-overlap` 和 `runtime-identity-refresh` 的 instrumentation、
+pre/post evidence、记录与 env 文件，并停止 `127.0.0.1:7777-7780` Debug
+Server。无关的 `halo-selection-miss` debug session 保持原状。
+
+长帧修复仅主动推进隐藏的 validation Runtime，不改变 active Runtime 调度；成功
+evidence 仍受执行 deadline 约束，失败/取消诊断只可使用绝对
+`expiresAt + 2000 ms` settlement grace。原始 400 帧与后续 180 帧序列分别在
+9.922 秒和 2.067 秒内完成；完整 E2E 的 600 帧操作在 3.197 秒内完成，active
+Runtime 前后 PNG hash 一致，validation Runtime hash 已变化。
+
+最新 fresh-profile E2E 根目录
+`/private/tmp/m81-reconnect-postfx-final.BjnCf8` 进一步验证：MCP connection
+generation 从 `701fefc7-...` 轮换到 `1fba6f15-...` 后，旧 View 的 model context
+被删除，但同一 MCP tool 的已验证 Session entitlement 转移到 replacement View；
+两张历史卡片无需再次执行 `open_editor` 即可注册 Runtime 并发布新上下文。保存时
+revision 从 `84c951...` 更新到 `8acc8e...`，`runId` 与 `nonce` 保持不变，
+`playState` 保持 `editing`，Runtime frame 可见；未来模型轮次只包含新 revision。
+同一运行还通过 composer clipping、600 帧 validation、连续 parked command 和
+active Runtime 像素不变断言。
 
 目标：让 Editor 成为绑定工程的持久协作界面。AI 修改工程或编辑能力后，
 当前 Chat 卡片原位更新；是否出现、恢复或更新 Editor 不再依赖模型记住再次调用

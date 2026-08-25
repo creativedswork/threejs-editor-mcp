@@ -47,6 +47,7 @@
     "test:e2e:m7": "node tests/m7-browser.mjs",
     "test:e2e:m7-gallery": "node tests/m7-gallery-browser.mjs",
     "test:e2e:m8": "node tests/m8-browser.mjs",
+    "test:e2e:m81": "node tests/m81-browser.mjs",
     "test:corpus:m8": "node tests/m8-corpus-build.mjs",
     "check:upstream": "node scripts/sync-three-editor.mjs",
     "test:pack": "pnpm run build && node tests/packed-install.mjs",
