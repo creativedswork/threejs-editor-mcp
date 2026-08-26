@@ -45,6 +45,8 @@ import {
   type ProjectTemplate,
 } from './projects.js'
 import {
+  MATERIAL_BOOLEAN_PROPERTIES,
+  MATERIAL_NUMBER_PROPERTIES,
   applyOfficialEditorCommands,
   type EditorCommandOperation,
 } from './official-editor.js'
@@ -136,6 +138,8 @@ export const workspaceCapabilitiesSchema = z.object({
       'set_name',
       'set_visible',
       'set_material_color',
+      'set_material_value',
+      'set_material_boolean',
     ]),
     undoable: z.literal(true),
   }).strict(),
@@ -236,8 +240,14 @@ const editorCommandSchema: z.ZodType<EditorCommandOperation> = z.discriminatedUn
   z.object({
     type: z.literal('set_material_value'),
     objectUuid: z.string().uuid(),
-    property: z.literal('roughness'),
+    property: z.enum(MATERIAL_NUMBER_PROPERTIES),
     value: z.number().min(0).max(1),
+  }),
+  z.object({
+    type: z.literal('set_material_boolean'),
+    objectUuid: z.string().uuid(),
+    property: z.enum(MATERIAL_BOOLEAN_PROPERTIES),
+    value: z.boolean(),
   }),
 ])
 const workspaceEditorStateSchema: z.ZodType<WorkspaceEditorState> = z.object({

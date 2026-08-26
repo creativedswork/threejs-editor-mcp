@@ -943,6 +943,73 @@ Prompt 注入/重连 trace 以及两轮评分记录。
 
 准入：M8 验收并原子提交后才能实施 M8.1；M8.1 验收并原子提交前不得进入 M9。
 
+### M8.2：Source & Material Editing Guidance
+
+状态：**ACCEPTED（用户于 2026-08-26 验收）；`pnpm run typecheck`、全量单测
+`43/43` 和 `M81_REVISION_COUNT=1` 真实浏览器回归通过**
+
+目标：让 Agent 从 Editor inspection 直接辨别源码与材质的正确编辑路径，不要求
+Agent 先搜索工程，也不为当前工程格式虚构独立脚本或材质资源。
+
+工程模型：
+
+```text
+example.json
+scene.js                 canonical entry
+├── optional imported modules
+└── optional JSON / texture / HDR / GLB assets
+
+Runtime scene
+└── Object3D
+    └── Material         Runtime/Editor object, not a standalone source file
+```
+
+实施：
+
+- `inspect_editor` 对 Workspace 返回 `manifest.entry`，并明确源码读取使用
+  `read_project_files`、源码修改使用 `apply_project_files`；
+- scene-project 保留内嵌 script，继续通过 `inspect_project` 与
+  `apply_scene_changes.replace_script` 修改；
+- 不新增 script/material resource registry，也不新增只包装现有文件工具的 MCP
+  tool；
+- Runtime object snapshot 返回第一可编辑材质的 UUID、类型、当前颜色和可编辑
+  numeric values；
+- `set_material_value` 首期支持适用材质的 `roughness`、`metalness` 和 `opacity`，
+  每个对象只广告当前材质实际支持的属性；
+- shader、texture、uniform、依赖模块和未建模材质属性继续使用现有 project file /
+  asset tools；Three.js Editor 不限制 Harness 提供的 Agent 能力。
+
+验收：
+
+- 37 个 example-gallery 工程均从 inspection 得到正确 canonical entry；
+- 只有 `scene.js` 的工程无需文件搜索即可完成源码读取和 revision-checked 修改；
+- 含 sibling/shared module 的工程把 `scene.js` 保持为入口，依赖修改仍可走文件工具；
+- `MeshBasicMaterial` 不广告 roughness/metalness，`MeshStandardMaterial` 广告并可
+  修改 roughness/metalness/opacity；
+- unsupported property、错误 UUID 和 stale revision 均不产生 revision；
+- Workspace 材质修改继续进入 `.threejs-editor/editor.json` overlay，并通过现有
+  same-project Runtime rollover 生效；
+- 现有 project file tools、scene-project script 流程和 human Editor 操作保持兼容。
+
+产物：MCP contract tests、Runtime material round-trip tests，以及 source/material
+tool routing 的 deterministic Agent regression。
+
+当前自动化证据：
+
+- scene-project inspection 返回内嵌 script 的 `inspect_project` /
+  `apply_scene_changes.replace_script` 路由；
+- imported gallery inspection 返回 exact `manifest.entry` 及
+  `read_project_files` / `apply_project_files` 路由；
+- Runtime ShaderMaterial 上报 `opacity`、`transparent`、`wireframe`，Agent 在同一
+  `MultiCmdsCommand` batch 中修改 `opacity=0.85` 与 `transparent=true` 后读回成功；
+- material command、source revision、owner iframe、`runId` 和 `nonce` 在
+  same-project rollover 后保持一致；
+- 非法 `clearcoat` 输入被拒绝，project revision 不变；
+- real browser 保持 active Runtime canvas digest 不变，validation evidence 更新，
+  reconnect、Session restore 和 parked Runtime command 回归全部通过。
+
+准入：M8.2 验收并原子提交前不得进入 M9。
+
 ### M9：高级 Pipeline 与大型本地资产
 
 目标：覆盖 multipass FFT、post-processing、EXR/3D texture/bin 资产。

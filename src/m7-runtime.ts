@@ -343,13 +343,57 @@ export function m7BootstrapHtml(): string {
       for (const record of [...current.runtimeInputListeners]) record.remove()
       current.runtimeCapturedPointers.clear()
     }
-    const editableMaterial = object => {
+    const objectMaterial = object => {
       if (!object?.isMesh) return
-      const material = Array.isArray(object.material) ? object.material[0] : object.material
+      return Array.isArray(object.material) ? object.material[0] : object.material
+    }
+    const editableMaterial = object => {
+      const material = objectMaterial(object)
       return material && material.color?.isColor ? material : undefined
+    }
+    const materialSnapshot = object => {
+      const material = objectMaterial(object)
+      if (!material) return
+      const properties = []
+      if (material.color?.isColor) {
+        properties.push({
+          name: 'color',
+          kind: 'color',
+          value: '#' + material.color.getHexString(),
+          command: 'set_material_color',
+        })
+      }
+      for (const name of ['roughness', 'metalness', 'opacity']) {
+        if (typeof material[name] !== 'number' || !Number.isFinite(material[name])) continue
+        properties.push({
+          name,
+          kind: 'number',
+          value: material[name],
+          min: 0,
+          max: 1,
+          command: 'set_material_value',
+        })
+      }
+      for (const name of ['transparent', 'wireframe']) {
+        if (typeof material[name] !== 'boolean') continue
+        properties.push({
+          name,
+          kind: 'boolean',
+          value: material[name],
+          command: 'set_material_boolean',
+        })
+      }
+      if (properties.length === 0) return
+      return {
+        uuid: material.uuid,
+        type: material.type,
+        ...(material.name ? { name: material.name } : {}),
+        properties,
+      }
     }
     const snapshotObject = (current, object) => {
       const material = editableMaterial(object)
+      const materialDetail = materialSnapshot(object)
       return {
         uuid: object.uuid,
         ...(current.parents.get(object.uuid)
@@ -367,6 +411,7 @@ export function m7BootstrapHtml(): string {
         ],
         scale: object.scale.toArray(),
         ...(material ? { color: '#' + material.color.getHexString() } : {}),
+        ...(materialDetail ? { material: materialDetail } : {}),
         commands: [
           'set_position',
           'set_rotation',
@@ -374,11 +419,27 @@ export function m7BootstrapHtml(): string {
           'set_name',
           'set_visible',
           ...(material ? ['set_material_color'] : []),
+          ...(materialDetail?.properties.some(property => (
+            property.command === 'set_material_value'
+          )) ? ['set_material_value'] : []),
+          ...(materialDetail?.properties.some(property => (
+            property.command === 'set_material_boolean'
+          )) ? ['set_material_boolean'] : []),
         ],
       }
     }
     const editorScene = current => ({
       objects: current.objectOrder.map(object => snapshotObject(current, object)),
+      selectedUuid: current.selected?.uuid,
+    })
+    const captureEditState = current => ({
+      viewState: {
+        cameraPosition: current.camera.position.toArray(),
+        cameraQuaternion: current.camera.quaternion.toArray(),
+        cameraUp: current.camera.up.toArray(),
+        cameraZoom: current.camera.zoom,
+        controlsTarget: current.controls?.target.toArray(),
+      },
       selectedUuid: current.selected?.uuid,
     })
     const selectedScreenPosition = current => {
@@ -821,13 +882,23 @@ export function m7BootstrapHtml(): string {
         if (!material) throw new Error('Runtime editor object has no editable color')
         material.color.set(operation.value)
         material.needsUpdate = true
-      } else if (operation.type === 'set_material_value'
-        && operation.property === 'roughness') {
-        const material = editableMaterial(object)
-        if (!material || !('roughness' in material)) {
-          throw new Error('Runtime editor object has no editable roughness')
+      } else if (operation.type === 'set_material_value') {
+        const material = objectMaterial(object)
+        if (!material || typeof material[operation.property] !== 'number') {
+          throw new Error(
+            'Runtime editor object has no editable material value ' + operation.property,
+          )
         }
-        material.roughness = operation.value
+        material[operation.property] = operation.value
+        material.needsUpdate = true
+      } else if (operation.type === 'set_material_boolean') {
+        const material = objectMaterial(object)
+        if (!material || typeof material[operation.property] !== 'boolean') {
+          throw new Error(
+            'Runtime editor object has no editable material boolean ' + operation.property,
+          )
+        }
+        material[operation.property] = operation.value
         material.needsUpdate = true
       } else {
         throw new Error('Unsupported Runtime editor operation ' + operation?.type)
@@ -926,6 +997,9 @@ export function m7BootstrapHtml(): string {
     const setMode = (current, mode) => mutateBetweenFrames(current, () => {
       const nextMode = mode === 'run' ? 'run' : 'edit'
       if (current.mode === 'run' && nextMode === 'edit') cancelRuntimeInput(current)
+      if (current.mode === 'edit' && nextMode === 'run') {
+        current.editState = captureEditState(current)
+      }
       current.mode = nextMode
       current.state.paused = current.mode === 'edit'
       current.previous = performance.now()
@@ -937,7 +1011,10 @@ export function m7BootstrapHtml(): string {
         syncTransformPivot(current)
         current.transform.attach(current.transformPivot)
       }
-      emit(current.runId, current.nonce, 'mode', { mode: current.mode })
+      emit(current.runId, current.nonce, 'mode', {
+        mode: current.mode,
+        ...(current.mode === 'run' ? { editState: current.editState } : {}),
+      })
     })
     const disposeCurrent = async current => {
       let evidence = {}
@@ -1163,6 +1240,7 @@ export function m7BootstrapHtml(): string {
           paths: new Map(),
           objectOrder: [],
           example: undefined,
+          editState: undefined,
           mode: request.mode === 'run' ? 'run' : 'edit',
           state: {
             debugMode: request.debugMode ?? 'final',
@@ -1283,6 +1361,10 @@ export function m7BootstrapHtml(): string {
             ),
           })
         })
+        if (typeof request.selectedUuid === 'string') {
+          selectObject(current, request.selectedUuid, false)
+        }
+        current.editState = captureEditState(current)
         emit(runId, nonce, 'editor-scene', editorScene(current))
 
         const render = now => {
@@ -1334,7 +1416,11 @@ export function m7BootstrapHtml(): string {
               }
               const evidence = metrics(current)
               if (current.frame === 1) {
-                emit(runId, nonce, 'ready', { backend, ...evidence })
+                emit(runId, nonce, 'ready', {
+                  backend,
+                  ...evidence,
+                  editState: current.editState,
+                })
               } else if (current.frame % 30 === 0) {
                 emit(runId, nonce, 'frame', evidence)
                 emit(runId, nonce, 'metrics', evidence)

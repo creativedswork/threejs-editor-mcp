@@ -67,6 +67,113 @@
         "index": 0,
         "block": {
           "type": "tool-call",
+          "id": "call_threejs_m81_apply_editor",
+          "name": "mcp__threejs__apply_editor_commands",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"baseRevision\":\"{{fromRequest:baseRevision=([0-9a-f]{64})}}\",\"operations\":[{\"type\":\"set_name\",\"objectUuid\":\"{{fromRequest:objectUuid=([0-9a-f-]{36})}}\",\"value\":\"Runtime Identity Probe\"},{\"type\":\"set_material_value\",\"objectUuid\":\"{{fromRequest:objectUuid=([0-9a-f-]{36})}}\",\"property\":\"opacity\",\"value\":0.85},{\"type\":\"set_material_boolean\",\"objectUuid\":\"{{fromRequest:objectUuid=([0-9a-f-]{36})}}\",\"property\":\"transparent\",\"value\":true}]}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m81_inspect_editor",
+          "name": "mcp__threejs__inspect_editor",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m81_capture_after_editor",
+          "name": "mcp__threejs__capture_runtime_frame",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"revision\":\"{{fromRequest:\\\"revision\\\":\\\"([0-9a-f]{64})\\\"}}\",\"runId\":\"{{fromRequest:runId=([0-9a-f-]{36})}}\",\"nonce\":\"{{fromRequest:nonce=([0-9a-f-]{36})}}\",\"target\":\"validation\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "编辑命令已应用，Runtime 身份已续接，截帧验证完成。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "编辑命令已应用，Runtime 身份已续接，截帧验证完成。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
           "id": "call_threejs_m81_frost",
           "name": "mcp__threejs__open_editor",
           "arguments": "{\"projectPath\":\"threejs-temporal-surfaces/touch-history-frost\"}"

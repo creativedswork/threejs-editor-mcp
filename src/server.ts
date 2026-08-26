@@ -32,6 +32,8 @@ import {
   type ProjectSummary,
 } from './projects.js'
 import {
+  MATERIAL_BOOLEAN_PROPERTIES,
+  MATERIAL_NUMBER_PROPERTIES,
   applyOfficialEditorCommands,
   editorProjectFromSnapshots,
   inspectOfficialEditor,
@@ -277,12 +279,54 @@ const workspaceViewSchema = z.object({
   capabilities: workspaceCapabilitiesSchema.optional(),
   files: z.array(workspaceFileSchema),
 })
+const editorSourceSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('workspace-entry'),
+    entry: workspacePathSchema,
+    readTool: z.literal('read_project_files'),
+    editTool: z.literal('apply_project_files'),
+  }),
+  z.object({
+    kind: z.literal('scene-script'),
+    readTool: z.literal('inspect_project'),
+    editTool: z.literal('apply_scene_changes'),
+    operation: z.literal('replace_script'),
+  }),
+])
 const sceneObjectSchema = z.object({
   name: z.string(),
   type: z.string(),
   visible: z.boolean(),
   position: z.tuple([z.number(), z.number(), z.number()]),
   color: z.string().optional(),
+})
+const editorMaterialPropertySchema = z.discriminatedUnion('kind', [
+  z.object({
+    name: z.literal('color'),
+    kind: z.literal('color'),
+    value: z.string().regex(/^#[a-fA-F0-9]{6}$/),
+    command: z.literal('set_material_color'),
+  }),
+  z.object({
+    name: z.enum(MATERIAL_NUMBER_PROPERTIES),
+    kind: z.literal('number'),
+    value: z.number(),
+    min: z.literal(0),
+    max: z.literal(1),
+    command: z.literal('set_material_value'),
+  }),
+  z.object({
+    name: z.enum(MATERIAL_BOOLEAN_PROPERTIES),
+    kind: z.literal('boolean'),
+    value: z.boolean(),
+    command: z.literal('set_material_boolean'),
+  }),
+])
+const editorMaterialSchema = z.object({
+  uuid: z.string().uuid(),
+  type: z.string().min(1),
+  name: z.string().min(1).optional(),
+  properties: z.array(editorMaterialPropertySchema),
 })
 const editorObjectSchema = z.object({
   uuid: z.string().uuid(),
@@ -295,6 +339,7 @@ const editorObjectSchema = z.object({
   rotationDegrees: z.array(z.number()).length(3),
   scale: z.array(z.number()).length(3),
   color: z.string().optional(),
+  material: editorMaterialSchema.optional(),
   commands: z.array(z.string()),
 })
 const vector3Schema = z.tuple([z.number(), z.number(), z.number()])
@@ -366,8 +411,14 @@ const editorCommandSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('set_material_value'),
     objectUuid: z.string().uuid(),
-    property: z.literal('roughness'),
+    property: z.enum(MATERIAL_NUMBER_PROPERTIES),
     value: z.number().min(0).max(1),
+  }),
+  z.object({
+    type: z.literal('set_material_boolean'),
+    objectUuid: z.string().uuid(),
+    property: z.enum(MATERIAL_BOOLEAN_PROPERTIES),
+    value: z.boolean(),
   }),
 ])
 const runtimeEditorObjectSchema = editorObjectSchema.extend({
@@ -391,6 +442,7 @@ const editorChangeSchema = z.object({
     'set_visible',
     'set_material_color',
     'set_material_value',
+    'set_material_boolean',
   ]),
   objectUuid: z.string().uuid(),
   objectName: z.string(),
@@ -579,7 +631,9 @@ function applyEditorCommands(
 
 function editorOperationKey(operation: EditorCommandOperation): string {
   return `${operation.objectUuid}\0${operation.type}${
-    operation.type === 'set_material_value' ? `\0${operation.property}` : ''
+    operation.type === 'set_material_value' || operation.type === 'set_material_boolean'
+      ? `\0${operation.property}`
+      : ''
   }`
 }
 
@@ -596,9 +650,44 @@ function compactEditorOperations(
 }
 
 function editorOperationValue(operation: EditorCommandOperation): unknown {
-  return operation.type === 'set_material_value'
+  return operation.type === 'set_material_value' || operation.type === 'set_material_boolean'
     ? { property: operation.property, value: operation.value }
     : operation.value
+}
+
+function assertEditorOperationsAdvertised(
+  objects: EditorObjectSnapshot[],
+  operations: EditorCommandOperation[],
+): void {
+  const byUuid = new Map(objects.map(object => [object.uuid, object]))
+  for (const operation of operations) {
+    const object = byUuid.get(operation.objectUuid)
+    if (object === undefined) throw new Error(`unknown object ${operation.objectUuid}`)
+    if (!object.commands.includes(operation.type)) {
+      throw new Error(
+        `object ${operation.objectUuid} does not advertise ${operation.type}`,
+      )
+    }
+    if (operation.type === 'set_material_color') {
+      if (!object.material?.properties.some(property => (
+        property.name === 'color' && property.command === operation.type
+      ))) {
+        throw new Error(
+          `material does not advertise color: ${operation.objectUuid}`,
+        )
+      }
+      continue
+    }
+    if (operation.type !== 'set_material_value'
+      && operation.type !== 'set_material_boolean') continue
+    if (!object.material?.properties.some(property => (
+      property.name === operation.property && property.command === operation.type
+    ))) {
+      throw new Error(
+        `material does not advertise ${operation.property}: ${operation.objectUuid}`,
+      )
+    }
+  }
 }
 
 function editorChanges(
@@ -1862,12 +1951,14 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'inspect_editor', {
     title: 'Inspect Three.js editor objects',
-    description: 'Lists object UUIDs and the official Three.js Editor commands available for each object.',
+    description:
+      'Inspect this first for the canonical scene source route, object UUIDs, current material values, and the official Three.js Editor commands advertised for each object.',
     inputSchema: { projectId: projectIdSchema },
     outputSchema: z.object({
       projectId: projectIdSchema,
       title: z.string(),
       revision: revisionSchema,
+      source: editorSourceSchema,
       objects: z.array(editorObjectSchema),
       editorChanges: z.array(editorChangeSchema),
     }),
@@ -1902,6 +1993,19 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       projectId,
       title: snapshot.title,
       revision: snapshot.revision,
+      source: workspace === undefined
+        ? {
+            kind: 'scene-script' as const,
+            readTool: 'inspect_project' as const,
+            editTool: 'apply_scene_changes' as const,
+            operation: 'replace_script' as const,
+          }
+        : {
+            kind: 'workspace-entry' as const,
+            entry: workspace.manifest.entry,
+            readTool: 'read_project_files' as const,
+            editTool: 'apply_project_files' as const,
+          },
       objects,
       editorChanges: changes,
     }
@@ -1986,6 +2090,10 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         if (runId !== undefined && runId !== reported.runId) {
           throw new Error('Runtime editor scene is unavailable for this run')
         }
+        assertEditorOperationsAdvertised(
+          reported.objects as EditorObjectSnapshot[],
+          operations,
+        )
         applied = applyEditorCommands(
           editorProjectFromSnapshots(
             snapshot.project,
@@ -2043,7 +2151,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'read_project_files', {
     title: 'Read Three.js workspace files',
-    description: 'Reads bounded files from an explicitly registered workspace by projectId.',
+    description:
+      'Reads bounded files from an explicitly registered workspace by projectId. For scene source, use the canonical entry returned by inspect_editor instead of searching first.',
     inputSchema: {
       projectId: projectIdSchema,
       files: z.array(z.object({
@@ -2099,7 +2208,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'apply_project_files', {
     title: 'Apply Three.js workspace file changes',
     description:
-      'Atomically writes, moves, or deletes workspace files at one exact revision. The project-bound Editor is created or updated automatically; do not call open_editor again.',
+      'Atomically writes, moves, or deletes workspace files at one exact revision. Use the canonical entry returned by inspect_editor for scene source changes not represented by apply_editor_commands. The project-bound Editor is created or updated automatically; do not call open_editor again.',
     inputSchema: {
       projectId: projectIdSchema,
       baseRevision: revisionSchema,

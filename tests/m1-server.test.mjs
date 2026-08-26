@@ -405,6 +405,23 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     ])
     assert.match(inspected.content[0]?.text, /"layout":"wide","cameraView":"overhead"/)
     assert.match(inspected.content[0]?.text, /Changed table layout from classic to wide/)
+    const editorInspection = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: 'm1-pong' },
+    })
+    assert.deepEqual(editorInspection.structuredContent.source, {
+      kind: 'scene-script',
+      readTool: 'inspect_project',
+      editTool: 'apply_scene_changes',
+      operation: 'replace_script',
+    })
+    const fieldMaterial = editorInspection.structuredContent.objects
+      .find(object => object.name === 'Field').material
+    assert.equal(fieldMaterial.type, 'MeshStandardMaterial')
+    assert.deepEqual(
+      fieldMaterial.properties.map(property => property.name),
+      ['color', 'roughness', 'metalness', 'opacity', 'transparent', 'wireframe'],
+    )
     assert.deepEqual(
       (await readdir(join(root, 'm1-pong'))).sort(),
       ['assets', 'project.json'],

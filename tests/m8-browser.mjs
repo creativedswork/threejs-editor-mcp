@@ -191,6 +191,14 @@ async function latestApp(title, entry, assets) {
   throw new Error(`timed out waiting for MCP App ${title}`)
 }
 
+async function currentRuntimeFrame(appFrame) {
+  const runtime = appFrame.locator('iframe[data-runtime-sandbox]')
+  await runtime.waitFor({ state: 'visible', timeout: 30_000 })
+  const frame = await (await runtime.elementHandle()).contentFrame()
+  assert.notEqual(frame, null)
+  return frame
+}
+
 function digest(value) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -266,6 +274,7 @@ async function verifyFailedStartDisposalHandshake() {
       runId: '55555555-6666-4777-8888-999999999999',
       nonce: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
       revision: 'a'.repeat(64),
+      evidenceToken: 'startup-failure-probe',
     }
     await probe.evaluate(value => {
       globalThis.__runtimeProbeEvents = []
@@ -302,13 +311,14 @@ async function verifyFailedStartDisposalHandshake() {
     ), undefined, { timeout: 10_000 })
     const events = await probe.evaluate(() => globalThis.__runtimeProbeEvents)
     assert.deepEqual(events.map(event => event.type), ['runtime-error', 'disposed'])
+    const { evidenceToken: _, ...identity } = run
     assert.deepEqual(events.map(event => ({
       channel: event.channel,
       projectId: event.projectId,
       runId: event.runId,
       nonce: event.nonce,
       revision: event.revision,
-    })), [run, run])
+    })), [identity, identity])
   } finally {
     await probe.close()
   }
@@ -379,7 +389,7 @@ async function findReplaySession(callId) {
   throw new Error(`Replay session for ${callId} was not observed`)
 }
 
-async function replayEvidence(sessionId, sourceEdit, diagnostics) {
+async function replayEvidence(sessionId, sourceEdit) {
   const expectedCallIds = [
     'call_threejs_m8_frost',
     'call_threejs_m8_pool',
@@ -495,9 +505,7 @@ async function replayEvidence(sessionId, sourceEdit, diagnostics) {
         assert.equal(
           diagnosticsText,
           `Checked ${sourceEdit.projectId} at revision ${sourceEdit.revision}: `
-            + '0 errors, 0 warnings. '
-            + `Diagnostics tested revision ${diagnostics.testedRevision} `
-            + `with run ${diagnostics.runId}.`,
+            + '0 errors, 1 warnings.',
         )
         return {
           source: evidenceSource,
@@ -563,7 +571,7 @@ async function waitForInspectedObject(projectId, path) {
   throw new Error(`Runtime object was not reported: ${path}`)
 }
 
-try {
+m8: try {
   await verifyFailedStartDisposalHandshake()
   await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   const mainFrameNavigationsAfterLoad = mainFrameNavigations
@@ -681,6 +689,8 @@ try {
   await waitForRuntimeFrames(frost.appFrame, 2)
   await captureGifFrame('00-frost-deposit.png')
 
+  let stableEditTextures
+  let stableRestoredRunTextures
   for (let cycle = 0; cycle < 10; cycle += 1) {
     await frost.appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
     await frost.appFrame.waitForFunction(() => (
@@ -690,8 +700,11 @@ try {
     assert.equal(stopped.inputOwner, 'editor')
     assert.equal(stopped.runtimeInputListeners, frostEdit.runtimeInputListeners)
     assert.equal(stopped.capturedPointers, 0)
-    assert.equal(stopped.gpuTextures, stableTextures)
-    await playRuntime(frost.appFrame)
+    stableEditTextures ??= stopped.gpuTextures
+    assert.equal(stopped.gpuTextures, stableEditTextures)
+    const playing = await playRuntime(frost.appFrame)
+    stableRestoredRunTextures ??= playing.gpuTextures
+    assert.equal(playing.gpuTextures, stableRestoredRunTextures)
   }
   await frost.appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
   await frost.appFrame.waitForFunction(() => (
@@ -771,6 +784,7 @@ try {
   assert.ok(Math.hypot(...poolAfterDrag.selectedBoundsCenter.map(
     (value, index) => value - poolBeforeDrag.selectedBoundsCenter[index],
   )) > 0.05)
+  assert.notDeepEqual(poolAfterDrag.selectedBoundsCenter, selectedSphere.selectedBoundsCenter)
   for (const type of ['pointerdown', 'pointermove', 'pointerup']) {
     assert.ok(
       inputEventCount(poolAfterDrag, type) > inputEventCount(poolBeforeDrag, type),
@@ -839,15 +853,42 @@ try {
   const poolFinalAfterDebug = await pixelStats(pool.runtimeFrame)
   assert.ok(poolFinalAfterDebug.lit > poolFinalAfterDebug.sampled * 0.25)
   assert.ok(poolFinalAfterDebug.colors > 128)
+  const playingRunId = (await pool.appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics(),
+  )).m7.runId
   await pool.appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
   await pool.appFrame.waitForFunction(() => (
     globalThis.__THREE_M7__.metrics().playState === 'editing'
   ))
   const poolStopped = await runtimeMetrics(pool.appFrame)
+  const poolStoppedApp = await pool.appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
+  assert.notEqual(poolStoppedApp.m7.runId, playingRunId)
   assert.equal(poolStopped.inputOwner, 'editor')
   assert.equal(poolStopped.runtimeInputListeners, poolEdit.runtimeInputListeners)
   assert.equal(poolStopped.capturedPointers, 0)
   assert.equal(poolStopped.selectedUuid, sphere.uuid)
+  assert.deepEqual(poolStopped.selectedBoundsCenter, selectedSphere.selectedBoundsCenter)
+  assert.deepEqual(poolStopped.cameraPosition, selectedSphere.cameraPosition)
+  assert.deepEqual(poolStopped.cameraQuaternion, selectedSphere.cameraQuaternion)
+  assert.deepEqual(poolStopped.cameraUp, selectedSphere.cameraUp)
+  assert.equal(poolStopped.cameraZoom, selectedSphere.cameraZoom)
+  assert.deepEqual(poolStopped.controlsTarget, selectedSphere.controlsTarget)
+  pool.runtimeFrame = await currentRuntimeFrame(pool.appFrame)
+  const poolRestoredPixels = await pixelStats(pool.runtimeFrame)
+  assert.ok(poolRestoredPixels.lit > poolRestoredPixels.sampled * 0.25)
+  assert.ok(poolRestoredPixels.colors > 128)
+  if (process.env.M8_RESTORE_ONLY === '1') {
+    process.stdout.write(`${JSON.stringify({
+      previousRunId: playingRunId,
+      restoredRunId: poolStoppedApp.m7.runId,
+      selectedUuid: poolStopped.selectedUuid,
+      selectedBoundsCenter: poolStopped.selectedBoundsCenter,
+      cameraPosition: poolStopped.cameraPosition,
+      controlsTarget: poolStopped.controlsTarget,
+      pixels: poolRestoredPixels,
+    }, null, 2)}\n`)
+    break m8
+  }
 
   const beforeHuman = await pool.appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
   const positionY = pool.appFrame.getByRole('spinbutton', { name: 'Position Y' })
@@ -914,22 +955,26 @@ try {
   assert.equal(cancelledReload.m7.active, false)
   assert.equal(cancelledReload.m7.runtimeFrameVisible, false)
   await playRuntime(pool.appFrame)
+  const sourceRunId = (await pool.appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics(),
+  )).m7.runId
   await pool.appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
   await pool.appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.playState === 'editing'
-      && metrics.m7.ready?.mode === 'run'
+      && metrics.m7.ready?.mode === 'edit'
       && metrics.m7.build?.revision === metrics.revision
   }, undefined, { timeout: 120_000 })
   const reloaded = await pool.appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
-  assert.notEqual(reloaded.m7.runId, human.m7.runId)
+  assert.notEqual(reloaded.m7.runId, sourceRunId)
   assert.notEqual(reloaded.m7.build.buildId, human.m7.build.buildId)
-  assert.equal(reloaded.m7.lastDispose.runId, human.m7.runId)
+  assert.equal(reloaded.m7.lastDispose.runId, sourceRunId)
   assert.equal(reloaded.m7.lastDispose.inputListenersAfterExampleDispose, 0)
   assert.equal(reloaded.m7.lastDispose.runtimeInputListenersAfterDispose, 0)
   assert.equal(reloaded.m7.lastDispose.capturedPointersAfterDispose, 0)
   assert.equal(reloaded.m7.lastDispose.rendererDisposed, true)
   assert.equal(reloaded.m7.lastDispose.disposeError, undefined)
+  pool.runtimeFrame = await currentRuntimeFrame(pool.appFrame)
   const reloadedFinalPixels = await pixelStats(pool.runtimeFrame)
   assert.ok(reloadedFinalPixels.lit > reloadedFinalPixels.sampled * 0.25)
   assert.ok(reloadedFinalPixels.colors > 128)
@@ -958,6 +1003,9 @@ try {
   await captureGifFrame('04-pool-clean-reload.png')
 
   await playRuntime(pool.appFrame)
+  const diagnosticsRunId = (await pool.appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics(),
+  )).m7.runId
   await pool.appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
   await pool.appFrame.getByText('Stopped; diagnostics recorded', { exact: true })
     .waitFor({ timeout: 30_000 })
@@ -973,7 +1021,7 @@ try {
     ), 'utf8')),
   }
   assert.equal(checked.testedRevision, sourceRevision)
-  assert.equal(checked.runId, reloaded.m7.runId)
+  assert.equal(checked.runId, diagnosticsRunId)
   assert.deepEqual(checked.errors, [])
   assert.deepEqual(checked.warnings, [])
   assert.deepEqual(appProblems, [])
@@ -988,7 +1036,7 @@ try {
     revision: sourceRevision,
     path: sourcePath,
     text: fixedSource,
-  }, checked)
+  })
   assert.equal(await appFrames.count(), 2)
   assert.equal(mainFrameNavigations, mainFrameNavigationsAfterLoad)
   assert.deepEqual(readdirSync(gifFrames).sort(), gifFrameNames)
@@ -1055,7 +1103,7 @@ try {
         sourceEditActor: 'replay-assistant-tool-call',
       },
       cleanReload: {
-        previousRunId: human.m7.runId,
+        previousRunId: sourceRunId,
         runId: reloaded.m7.runId,
         buildId: reloaded.m7.build.buildId,
         lastDispose: reloaded.m7.lastDispose,

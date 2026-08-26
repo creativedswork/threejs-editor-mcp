@@ -11,10 +11,14 @@ import {
 } from 'three/addons/controls/TransformControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import {
+  MATERIAL_BOOLEAN_PROPERTIES,
+  MATERIAL_NUMBER_PROPERTIES,
   applyOfficialEditorCommands,
   editorProjectFromSnapshots,
   officialCommandProof,
   type EditorCommandOperation,
+  type EditorMaterialProperty,
+  type EditorMaterialSnapshot,
   type EditorObjectSnapshot,
   type OfficialCommandProof,
 } from './official-editor.js'
@@ -223,11 +227,76 @@ function vector3(value: unknown): [number, number, number] | undefined {
     : undefined
 }
 
+function editorMaterialProperty(value: unknown): EditorMaterialProperty | undefined {
+  const property = record(value)
+  if (property?.name === 'color'
+    && property.kind === 'color'
+    && typeof property.value === 'string'
+    && property.command === 'set_material_color') {
+    return {
+      name: 'color',
+      kind: 'color',
+      value: property.value,
+      command: 'set_material_color',
+    }
+  }
+  const numberName = MATERIAL_NUMBER_PROPERTIES.find(name => name === property?.name)
+  if (numberName !== undefined
+    && property?.kind === 'number'
+    && typeof property.value === 'number'
+    && Number.isFinite(property.value)
+    && property.min === 0
+    && property.max === 1
+    && property.command === 'set_material_value') {
+    return {
+      name: numberName,
+      kind: 'number',
+      value: property.value,
+      min: 0,
+      max: 1,
+      command: 'set_material_value',
+    }
+  }
+  const booleanName = MATERIAL_BOOLEAN_PROPERTIES.find(name => name === property?.name)
+  if (booleanName !== undefined
+    && property?.kind === 'boolean'
+    && typeof property.value === 'boolean'
+    && property.command === 'set_material_boolean') {
+    return {
+      name: booleanName,
+      kind: 'boolean',
+      value: property.value,
+      command: 'set_material_boolean',
+    }
+  }
+  return undefined
+}
+
+function editorMaterialSnapshot(value: unknown): EditorMaterialSnapshot | undefined {
+  const material = record(value)
+  if (material === undefined
+    || typeof material.uuid !== 'string'
+    || typeof material.type !== 'string'
+    || (material.name !== undefined && typeof material.name !== 'string')
+    || !Array.isArray(material.properties)) return undefined
+  const properties = material.properties.map(editorMaterialProperty)
+  if (properties.some(property => property === undefined)) return undefined
+  return {
+    uuid: material.uuid,
+    type: material.type,
+    ...typeof material.name === 'string' ? { name: material.name } : {},
+    properties: properties as EditorMaterialProperty[],
+  }
+}
+
 function editorObjectSnapshot(value: unknown): EditorObjectSnapshot | undefined {
   const object = record(value)
   const position = vector3(object?.position)
   const rotationDegrees = vector3(object?.rotationDegrees)
   const scale = vector3(object?.scale)
+  const material = object?.material === undefined
+    ? undefined
+    : editorMaterialSnapshot(object.material)
   if (object === undefined
     || typeof object.uuid !== 'string'
     || typeof object.path !== 'string'
@@ -237,6 +306,7 @@ function editorObjectSnapshot(value: unknown): EditorObjectSnapshot | undefined 
     || position === undefined
     || rotationDegrees === undefined
     || scale === undefined
+    || (object.material !== undefined && material === undefined)
     || !Array.isArray(object.commands)
     || !object.commands.every(command => typeof command === 'string')) {
     return undefined
@@ -252,6 +322,7 @@ function editorObjectSnapshot(value: unknown): EditorObjectSnapshot | undefined 
     rotationDegrees,
     scale,
     ...typeof object.color === 'string' ? { color: object.color } : {},
+    ...material === undefined ? {} : { material },
     commands: object.commands as EditorCommandOperation['type'][],
   }
 }
@@ -277,12 +348,22 @@ function editorCommandOperation(value: unknown): EditorCommandOperation | undefi
     return { type: operation.type, objectUuid: operation.objectUuid, value: operation.value }
   }
   if (operation.type === 'set_material_value'
-    && operation.property === 'roughness'
+    && MATERIAL_NUMBER_PROPERTIES.some(property => property === operation.property)
     && typeof operation.value === 'number') {
     return {
       type: operation.type,
       objectUuid: operation.objectUuid,
-      property: operation.property,
+      property: operation.property as typeof MATERIAL_NUMBER_PROPERTIES[number],
+      value: operation.value,
+    }
+  }
+  if (operation.type === 'set_material_boolean'
+    && MATERIAL_BOOLEAN_PROPERTIES.some(property => property === operation.property)
+    && typeof operation.value === 'boolean') {
+    return {
+      type: operation.type,
+      objectUuid: operation.objectUuid,
+      property: operation.property as typeof MATERIAL_BOOLEAN_PROPERTIES[number],
       value: operation.value,
     }
   }
@@ -460,6 +541,7 @@ let pointerGesture: PointerPickGesture | undefined
 let lifecycle: GameLifecycle | undefined
 let playingProject: Project | undefined
 let playingRevision: string | undefined
+let playingRuntimeState: Record<string, unknown> | undefined
 let runtimeErrors: string[] = []
 let runtimeWarnings: string[] = []
 let restoreConsoleWarn: (() => void) | undefined
@@ -553,12 +635,16 @@ function disposeControls(): void {
   transformHelper = undefined
 }
 
+function objectMaterial(object: THREE.Object3D | undefined): THREE.Material | undefined {
+  if (!(object instanceof THREE.Mesh)) return undefined
+  return Array.isArray(object.material) ? object.material[0] : object.material
+}
+
 function editableMaterial(object: THREE.Object3D | undefined): (THREE.Material & {
   color: THREE.Color
   map?: THREE.Texture | null
 }) | undefined {
-  if (!(object instanceof THREE.Mesh)) return undefined
-  const material = Array.isArray(object.material) ? object.material[0] : object.material
+  const material = objectMaterial(object)
   if (material === undefined || !('color' in material) || !(material.color instanceof THREE.Color)) {
     return undefined
   }
@@ -1489,6 +1575,17 @@ function updateRuntimeMirror(
   if (material !== undefined && snapshot.color !== undefined) {
     material.color.set(snapshot.color)
   }
+  const firstMaterial = objectMaterial(object)
+  if (firstMaterial !== undefined && snapshot.material !== undefined) {
+    for (const property of snapshot.material.properties) {
+      if (property.kind === 'color') continue
+      const current = (firstMaterial as unknown as Record<string, unknown>)[property.name]
+      if (typeof current === typeof property.value) {
+        ;(firstMaterial as unknown as Record<string, unknown>)[property.name] = property.value
+      }
+    }
+    firstMaterial.needsUpdate = true
+  }
   object.updateMatrix()
   scene.updateMatrixWorld(true)
   if (selected?.uuid === object.uuid) {
@@ -1609,6 +1706,7 @@ function stopLocalRuntimeForSnapshot(): void {
   lifecycle = undefined
   playingProject = undefined
   playingRevision = undefined
+  playingRuntimeState = undefined
   runtimeInput.keys.clear()
   runtimeInput.pointer.buttons.clear()
   root.dataset.playState = 'stopped'
@@ -2220,7 +2318,7 @@ function savedStateIsCurrent(
     && revision === savedRevision
 }
 
-async function setM7Mode(run: M7Run, mode: 'edit' | 'run'): Promise<void> {
+async function setM7Mode(run: M7Run, mode: 'edit' | 'run'): Promise<M7RuntimeEvent> {
   const changed = waitForM7Event(
     ['mode', 'runtime-error'],
     run,
@@ -2235,6 +2333,7 @@ async function setM7Mode(run: M7Run, mode: 'edit' | 'run'): Promise<void> {
       ? event.data.message
       : 'Workspace Runtime mode change failed')
   }
+  return event
 }
 
 function postM7Run(
@@ -2615,6 +2714,7 @@ async function startM7Runtime(
   token: number,
   controller: AbortController,
   mode: 'edit' | 'run' = 'edit',
+  restoredRuntimeState?: Record<string, unknown>,
 ): Promise<void> {
   if (tearingDown || controller.signal.aborted) return
   if (projectId === undefined || revision === undefined || workspace === undefined) {
@@ -2623,9 +2723,9 @@ async function startM7Runtime(
   const startProjectId = projectId
   const startRevision = revision
   const startWorkspace = workspace
-  const previousRuntimeView = m7ActiveRun?.projectId === startProjectId
-    ? m7Metrics
-    : undefined
+  const previousRuntimeView = record(restoredRuntimeState?.viewState)
+    ?? (m7ActiveRun?.projectId === startProjectId ? m7Metrics : undefined)
+  const restoredSelectedUuid = restoredRuntimeState?.selectedUuid
   if (token !== m7StartToken) return
   status.textContent = `Building ${startWorkspace.entry}`
   let buildResult
@@ -2760,6 +2860,7 @@ async function startM7Runtime(
       mode,
       evidenceToken: m7EvidenceToken,
       ...previousRuntimeView === undefined ? {} : { viewState: previousRuntimeView },
+      ...typeof restoredSelectedUuid === 'string' ? { selectedUuid: restoredSelectedUuid } : {},
     })
     starting.runSent = true
     const event = await started
@@ -2797,9 +2898,11 @@ async function startM7Runtime(
     if (mode === 'run') {
       playingProject = serializeProject()
       playingRevision = startRevision
+      playingRuntimeState ??= record(event.data?.editState)
     } else {
       playingProject = undefined
       playingRevision = undefined
+      playingRuntimeState = undefined
     }
     root.dataset.playState = mode === 'run' ? 'playing' : 'editing'
     setEditorDisabled(mode === 'run')
@@ -2842,7 +2945,11 @@ async function startM7Runtime(
   }
 }
 
-function queueM7RuntimeStart(token: number, mode: 'edit' | 'run' = 'edit'): Promise<void> {
+function queueM7RuntimeStart(
+  token: number,
+  mode: 'edit' | 'run' = 'edit',
+  restoredRuntimeState?: Record<string, unknown>,
+): Promise<void> {
   if (tearingDown) return Promise.resolve()
   m7PendingStartController?.abort()
   const controller = new AbortController()
@@ -2854,7 +2961,7 @@ function queueM7RuntimeStart(token: number, mode: 'edit' | 'run' = 'edit'): Prom
         'Previous Runtime cleanup failed',
       )
     }
-    return startM7Runtime(token, controller, mode)
+    return startM7Runtime(token, controller, mode, restoredRuntimeState)
   })
   const settled = scheduled.finally(() => {
     if (m7PendingStartController === controller) m7PendingStartController = undefined
@@ -2887,6 +2994,7 @@ async function failM7Runtime(run: M7Run, message: string): Promise<void> {
   recordRuntimeError(message)
   playingProject = undefined
   playingRevision = undefined
+  playingRuntimeState = undefined
   root.dataset.playState = 'stopping'
   setEditorDisabled(true)
   refreshPlayButtons()
@@ -3026,6 +3134,7 @@ function startGame(): void {
   if (workspace !== undefined) {
     playingProject = serializeProject()
     playingRevision = revision
+    playingRuntimeState = undefined
     root.dataset.playState = 'starting'
     setEditorDisabled(true)
     save.disabled = true
@@ -3041,7 +3150,8 @@ function startGame(): void {
         await queueM7RuntimeStart(token, 'run')
       } else {
         const run = m7ActiveRun
-        await setM7Mode(run, 'run')
+        const event = await setM7Mode(run, 'run')
+        playingRuntimeState = record(event.data?.editState)
         if (token !== m7StartToken
           || m7ActiveRun === undefined
           || !sameM7Run(m7ActiveRun, run)
@@ -3093,6 +3203,7 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
   const stopLoadToken = loadToken
   const stopProjectId = projectId
   const stopWorkspace = workspace
+  const restoreRuntimeState = playingRuntimeState
   const stopIsCurrent = (): boolean => (
     !tearingDown
       && loadToken === stopLoadToken
@@ -3143,9 +3254,6 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
       }
     }
     if (!stopIsCurrent()) return
-    playingProject = undefined
-    playingRevision = undefined
-    refreshRuntimeOutput()
   } else {
     try {
       lifecycle?.dispose?.(runtimeContext())
@@ -3188,45 +3296,60 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
     refreshPlayButtons()
     if (root.dataset.sync !== 'conflict') status.textContent = finalStatus
   }
-  if (!report
-    || stopProjectId === undefined
-    || testedRevision === undefined
-    || (stopWorkspace !== undefined && runId === undefined)) {
-    await finishStop(false)
-    if (startCleanupError !== undefined) throw startCleanupError
-    return
-  }
-
-  if (!stopIsCurrent()) return
-  status.textContent = 'Recording diagnostics'
-  try {
-    if (stopWorkspace !== undefined) {
-      if (diagnosticsRun === undefined) throw new Error('Runtime run is not active')
-      await waitForM7EditorScene(diagnosticsRun)
-      if (!stopIsCurrent()) return
-    }
-    const result = await app.callServerTool({
-      name: 'report_diagnostics',
-      arguments: {
-        projectId: stopProjectId,
-        testedRevision,
-        ...runId === undefined ? {} : { runId },
-        errors: runtimeErrors,
-        warnings: runtimeWarnings,
-      },
-    }, {
-      timeout: M7_LIFECYCLE_TIMEOUT,
-      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
-    })
+  const shouldReport = report
+    && stopProjectId !== undefined
+    && testedRevision !== undefined
+    && (stopWorkspace === undefined || runId !== undefined)
+  if (shouldReport) {
     if (!stopIsCurrent()) return
-    if (result.isError) throw new Error(resultError(result))
-    if (runtimeErrors.length === 0 && runtimeWarnings.length === 0) {
-      finalStatus = `${reason}; diagnostics recorded`
+    status.textContent = 'Recording diagnostics'
+    try {
+      if (stopWorkspace !== undefined) {
+        if (diagnosticsRun === undefined) throw new Error('Runtime run is not active')
+        await waitForM7EditorScene(diagnosticsRun)
+        if (!stopIsCurrent()) return
+      }
+      const result = await app.callServerTool({
+        name: 'report_diagnostics',
+        arguments: {
+          projectId: stopProjectId,
+          testedRevision,
+          ...runId === undefined ? {} : { runId },
+          errors: runtimeErrors,
+          warnings: runtimeWarnings,
+        },
+      }, {
+        timeout: M7_LIFECYCLE_TIMEOUT,
+        maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+      })
+      if (!stopIsCurrent()) return
+      if (result.isError) throw new Error(resultError(result))
+      if (runtimeErrors.length === 0 && runtimeWarnings.length === 0) {
+        finalStatus = `${reason}; diagnostics recorded`
+      }
+    } catch (error) {
+      finalStatus = `Diagnostics not recorded: ${runtimeMessage(error).split('\n')[0]}`
     }
-  } catch (error) {
-    finalStatus = `Diagnostics not recorded: ${runtimeMessage(error).split('\n')[0]}`
   }
-  await finishStop(true)
+  if (stopWorkspace !== undefined
+    && m7ActiveRun !== undefined
+    && m7RunIsCurrent(m7ActiveRun)) {
+    status.textContent = 'Restoring editor'
+    try {
+      const token = ++m7StartToken
+      cancelM7Start()
+      await queueM7RuntimeStart(token, 'edit', restoreRuntimeState)
+    } catch (error) {
+      if (!stopIsCurrent()) return
+      recordRuntimeError(error)
+      finalStatus = `Editor restore failed: ${runtimeMessage(error).split('\n')[0]}`
+    }
+  }
+  playingProject = undefined
+  playingRevision = undefined
+  playingRuntimeState = undefined
+  refreshRuntimeOutput()
+  await finishStop(shouldReport)
   if (startCleanupError !== undefined) throw startCleanupError
 }
 
@@ -3260,12 +3383,17 @@ function canApplyEditorRevision(snapshot: RemoteSnapshot): boolean {
   return snapshot.editorOperations.every(operation => {
     const object = scene.getObjectByProperty('uuid', operation.objectUuid)
     if (object === undefined) return false
-    const material = editableMaterial(object)
-    if (operation.type === 'set_material_color') return material !== undefined
+    const material = objectMaterial(object)
+    if (operation.type === 'set_material_color') {
+      return editableMaterial(object) !== undefined
+    }
     if (operation.type === 'set_material_value') {
       return material !== undefined
-        && operation.property === 'roughness'
-        && 'roughness' in material
+        && typeof (material as unknown as Record<string, unknown>)[operation.property] === 'number'
+    }
+    if (operation.type === 'set_material_boolean') {
+      return material !== undefined
+        && typeof (material as unknown as Record<string, unknown>)[operation.property] === 'boolean'
     }
     return true
   })
@@ -3532,7 +3660,10 @@ app.ontoolresult = result => {
     status.textContent = 'Tool result did not identify a project'
     return
   }
-  void loadProject(nextProjectId).catch(error => {
+  const update = nextProjectId === projectId
+    ? pullLatest()
+    : loadProject(nextProjectId)
+  void update.catch(error => {
     if (tearingDown) return
     root.dataset.sync = 'error'
     status.textContent = error instanceof Error ? error.message : String(error)

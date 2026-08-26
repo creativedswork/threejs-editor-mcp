@@ -118,6 +118,29 @@ async function sessionId() {
   throw new Error('M8.1 Session was not observed')
 }
 
+async function waitForToolResult(ownerSessionId, callId) {
+  const deadline = Date.now() + 120_000
+  while (Date.now() < deadline) {
+    const history = await rpc('session.history', {
+      sessionId: ownerSessionId,
+      maxMessages: 100,
+    })
+    const result = history.events.find(item => (
+      item.event.time >= startedAt
+        && item.event.type === 'tool/result'
+        && historyMessage(item).source?.callId === callId
+    ))
+    const block = result === undefined
+      ? undefined
+      : historyMessage(result).content.find(item => (
+          item.type === 'tool-result' && item.toolCallId === callId
+        ))
+    if (block !== undefined) return block
+    await page.waitForTimeout(100)
+  }
+  throw new Error(`Tool result ${callId} was not observed`)
+}
+
 async function editorFrame(expectedSync = 'clean') {
   const outer = page.locator('iframe[title="MCP App: mcp__threejs__open_editor"]')
   await outer.waitFor({ state: 'visible', timeout: 60_000 })
@@ -556,6 +579,77 @@ async function run() {
     return
   }
 
+  const inspected = await callRuntimeTool('inspect_editor', { projectId }, ownerSessionId)
+  const identityObject = inspected.structuredContent.objects.find(
+    object => object.commands.includes('set_name')
+      && object.material?.properties.some(property => property.name === 'opacity')
+      && object.material?.properties.some(property => property.name === 'transparent'),
+  )
+  assert.notEqual(identityObject, undefined)
+  const runtimeMarker = `m81-identity-${Date.now()}`
+  await appFrame.evaluate(value => {
+    globalThis.__M81_RUNTIME_IDENTITY_MARKER__ = value
+  }, runtimeMarker)
+  await rpc('session.prompt', {
+    sessionId: ownerSessionId,
+    mode: 'queue',
+    content: [{
+      type: 'text',
+      text: `更新对象名称，将材质 opacity 设为 0.85、transparent 设为 true，`
+        + `并立即截帧验证；projectId=${projectId} `
+        + `baseRevision=${initial.revision} objectUuid=${identityObject.uuid} `
+        + `runId=${initial.m7.runId} nonce=${initial.m7.nonce}`,
+    }],
+  })
+  const capturedAfterEditor = await waitForToolResult(
+    ownerSessionId,
+    'call_threejs_m81_capture_after_editor',
+  )
+  assert.equal(capturedAfterEditor.isError, false)
+  assert.match(
+    capturedAfterEditor.content.find(block => block.type === 'text')?.text ?? '',
+    /^Captured validation Runtime evidence /,
+  )
+  await appFrame.waitForFunction(previous => {
+    const metrics = globalThis.__THREE_M7__.metrics()
+    return metrics.sync === 'clean'
+      && metrics.revision !== previous.revision
+      && metrics.m7.runId === previous.runId
+      && metrics.m7.nonce === previous.nonce
+  }, {
+    revision: initial.revision,
+    runId: initial.m7.runId,
+    nonce: initial.m7.nonce,
+  }, { timeout: revisionTimeout })
+  const identityAdvanced = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
+  assert.equal(identityAdvanced.m7.runId, initial.m7.runId)
+  assert.equal(identityAdvanced.m7.nonce, initial.m7.nonce)
+  const materialInspection = await callRuntimeTool(
+    'inspect_editor',
+    { projectId },
+    ownerSessionId,
+  )
+  const editedMaterial = materialInspection.structuredContent.objects
+    .find(object => object.uuid === identityObject.uuid).material
+  assert.equal(
+    editedMaterial.properties.find(property => property.name === 'opacity').value,
+    0.85,
+  )
+  assert.equal(
+    editedMaterial.properties.find(property => property.name === 'transparent').value,
+    true,
+  )
+  assert.equal(
+    await appFrame.evaluate(() => globalThis.__M81_RUNTIME_IDENTITY_MARKER__),
+    runtimeMarker,
+  )
+  assert.equal(await page.locator('[data-mcp-app-view]').count(), 1)
+  const identityUpdate = page.locator(
+    `[data-mcp-app-update="threejs:project:${projectId}"]`,
+  )
+  assert.equal(await identityUpdate.count(), 1)
+  await identityUpdate.getByRole('button', { name: 'Locate Editor' }).click()
+
   const sourcePath = resolve(
     workspacePath,
     'threejs-water-optics/interactive-pool-volume/scene.js',
@@ -575,7 +669,7 @@ async function run() {
       )
     }\n// M8.1 ordinary filesystem revision ${String(iteration)}\n`
   }
-  let previousRevision = initial.revision
+  let previousRevision = identityAdvanced.revision
   try {
     for (let iteration = 1; iteration <= revisionCount; iteration += 1) {
       writeFileSync(sourcePath, ordinarySource(iteration))
@@ -621,6 +715,9 @@ async function run() {
     previousRevision = applied.structuredContent.revision
     assert.equal(await page.locator('[data-mcp-app-view]').count(), 1)
     assert.equal(mainFrameNavigations, navigationsAfterLoad)
+    await page.locator(
+      `[data-mcp-app-update="threejs:project:${projectId}"]`,
+    ).last().getByRole('button', { name: 'Locate Editor' }).click()
 
     await appFrame.getByRole('button', { name: 'Enter fullscreen' }).click()
     await appFrame.waitForFunction(() => (
@@ -1079,6 +1176,9 @@ async function run() {
   const toolCalls = currentEvents.filter(item => item.event.type === 'tool/call')
   assert.deepEqual(toolCalls.map(item => item.event.data.name), [
     'mcp__threejs__open_editor',
+    'mcp__threejs__apply_editor_commands',
+    'mcp__threejs__inspect_editor',
+    'mcp__threejs__capture_runtime_frame',
     'mcp__threejs__open_editor',
   ])
   const runtimeContext = currentEvents.findLast(item => (

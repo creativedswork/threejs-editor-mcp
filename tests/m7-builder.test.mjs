@@ -1242,6 +1242,55 @@ export function createCar() {
     assert.equal(markerEntry.originalColumn, originalMarkerPosition.at(-1).length)
 
     const carUuid = '11111111-1111-4111-8111-111111111111'
+    const carMaterialUuid = '22222222-2222-4222-8222-222222222222'
+    const carMaterial = (metalness, wireframe) => ({
+      uuid: carMaterialUuid,
+      type: 'MeshStandardMaterial',
+      properties: [
+        {
+          name: 'color',
+          kind: 'color',
+          value: '#e10600',
+          command: 'set_material_color',
+        },
+        {
+          name: 'roughness',
+          kind: 'number',
+          value: 0.4,
+          min: 0,
+          max: 1,
+          command: 'set_material_value',
+        },
+        {
+          name: 'metalness',
+          kind: 'number',
+          value: metalness,
+          min: 0,
+          max: 1,
+          command: 'set_material_value',
+        },
+        {
+          name: 'opacity',
+          kind: 'number',
+          value: 1,
+          min: 0,
+          max: 1,
+          command: 'set_material_value',
+        },
+        {
+          name: 'transparent',
+          kind: 'boolean',
+          value: false,
+          command: 'set_material_boolean',
+        },
+        {
+          name: 'wireframe',
+          kind: 'boolean',
+          value: wireframe,
+          command: 'set_material_boolean',
+        },
+      ],
+    })
     const galleryRunId = '33333333-4444-4555-8666-777777777777'
     await client.callTool({
       name: 'register_runtime_run',
@@ -1261,17 +1310,22 @@ export function createCar() {
           uuid: carUuid,
           path: 'scene/VF-26#0',
           name: 'VF-26',
-          type: 'Group',
+          type: 'Mesh',
           visible: true,
           position: [0, 0, 0],
           rotationDegrees: [0, 0, 0],
           scale: [1, 1, 1],
+          color: '#e10600',
+          material: carMaterial(0.2, false),
           commands: [
             'set_position',
             'set_rotation',
             'set_scale',
             'set_name',
             'set_visible',
+            'set_material_color',
+            'set_material_value',
+            'set_material_boolean',
           ],
         }],
       },
@@ -1284,6 +1338,37 @@ export function createCar() {
     })
     assert.equal(inspected.structuredContent.objects[0].name, 'VF-26')
     assert.equal(inspected.structuredContent.objects[0].uuid, carUuid)
+    assert.deepEqual(inspected.structuredContent.source, {
+      kind: 'workspace-entry',
+      entry: `${sourceProjectPath}/scene.js`,
+      readTool: 'read_project_files',
+      editTool: 'apply_project_files',
+    })
+    assert.deepEqual(
+      inspected.structuredContent.objects[0].material,
+      carMaterial(0.2, false),
+    )
+    const unsupportedMaterial = await client.callTool({
+      name: 'apply_editor_commands',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        baseRevision: opened.structuredContent.revision,
+        operations: [{
+          type: 'set_material_value',
+          objectUuid: carUuid,
+          property: 'clearcoat',
+          value: 0.5,
+        }],
+      },
+    })
+    assert.equal(unsupportedMaterial.isError, true)
+    assert.equal(
+      (await client.callTool({
+        name: 'inspect_editor',
+        arguments: { projectId: opened.structuredContent.projectId },
+      })).structuredContent.revision,
+      opened.structuredContent.revision,
+    )
 
     const edited = await client.callTool({
       name: 'apply_editor_commands',
@@ -1296,10 +1381,24 @@ export function createCar() {
           type: 'set_position',
           objectUuid: carUuid,
           value: [0.25, 0, 0],
+        }, {
+          type: 'set_material_value',
+          objectUuid: carUuid,
+          property: 'metalness',
+          value: 0.65,
+        }, {
+          type: 'set_material_boolean',
+          objectUuid: carUuid,
+          property: 'wireframe',
+          value: true,
         }],
       },
     })
-    assert.deepEqual(edited.structuredContent.commandTypes, ['SetPositionCommand'])
+    assert.deepEqual(edited.structuredContent.commandTypes, [
+      'SetPositionCommand',
+      'SetMaterialValueCommand',
+      'SetMaterialValueCommand',
+    ])
     assert.notEqual(edited.structuredContent.revision, opened.structuredContent.revision)
     assert.deepEqual(
       JSON.parse(await readFile(join(
@@ -1314,6 +1413,16 @@ export function createCar() {
           type: 'set_position',
           objectUuid: carUuid,
           value: [0.25, 0, 0],
+        }, {
+          type: 'set_material_value',
+          objectUuid: carUuid,
+          property: 'metalness',
+          value: 0.65,
+        }, {
+          type: 'set_material_boolean',
+          objectUuid: carUuid,
+          property: 'wireframe',
+          value: true,
         }],
         recentChanges: [{
           source: 'human',
@@ -1321,6 +1430,22 @@ export function createCar() {
             type: 'set_position',
             objectUuid: carUuid,
             value: [0.25, 0, 0],
+          },
+        }, {
+          source: 'human',
+          operation: {
+            type: 'set_material_value',
+            objectUuid: carUuid,
+            property: 'metalness',
+            value: 0.65,
+          },
+        }, {
+          source: 'human',
+          operation: {
+            type: 'set_material_boolean',
+            objectUuid: carUuid,
+            property: 'wireframe',
+            value: true,
           },
         }],
       },
@@ -1341,6 +1466,16 @@ export function createCar() {
       type: 'set_position',
       objectUuid: carUuid,
       value: [0.25, 0, 0],
+    }, {
+      type: 'set_material_value',
+      objectUuid: carUuid,
+      property: 'metalness',
+      value: 0.65,
+    }, {
+      type: 'set_material_boolean',
+      objectUuid: carUuid,
+      property: 'wireframe',
+      value: true,
     }])
     const inspectedAfterEdit = await client.callTool({
       name: 'inspect_editor',
@@ -1369,17 +1504,22 @@ export function createCar() {
           uuid: carUuid,
           path: 'scene/VF-26#0',
           name: 'VF-26',
-          type: 'Group',
+          type: 'Mesh',
           visible: true,
           position: [0.25, 0, 0],
           rotationDegrees: [0, 0, 0],
           scale: [1, 1, 1],
+          color: '#e10600',
+          material: carMaterial(0.65, true),
           commands: [
             'set_position',
             'set_rotation',
             'set_scale',
             'set_name',
             'set_visible',
+            'set_material_color',
+            'set_material_value',
+            'set_material_boolean',
           ],
         }],
       },
@@ -1464,17 +1604,22 @@ export function createCar() {
           uuid: carUuid,
           path: 'scene/VF-26#0',
           name: 'VF-26',
-          type: 'Group',
+          type: 'Mesh',
           visible: true,
           position: [0.5, 0, 0],
           rotationDegrees: [0, 0, 0],
           scale: [1, 1, 1],
+          color: '#e10600',
+          material: carMaterial(0.65, true),
           commands: [
             'set_position',
             'set_rotation',
             'set_scale',
             'set_name',
             'set_visible',
+            'set_material_color',
+            'set_material_value',
+            'set_material_boolean',
           ],
         }],
       },
@@ -1485,6 +1630,10 @@ export function createCar() {
       arguments: { projectId: opened.structuredContent.projectId },
     })
     assert.deepEqual(inspectedAfterAdvance.structuredContent.objects[0].position, [0.5, 0, 0])
+    assert.deepEqual(
+      inspectedAfterAdvance.structuredContent.objects[0].material,
+      carMaterial(0.65, true),
+    )
     const projectAfterEdit = await client.callTool({
       name: 'inspect_project',
       arguments: { projectId: opened.structuredContent.projectId },
@@ -1498,6 +1647,28 @@ export function createCar() {
         objectName: 'VF-26',
         objectPath: 'scene/VF-26#0',
         value: [0.25, 0, 0],
+      },
+      {
+        source: 'human',
+        type: 'set_material_value',
+        objectUuid: carUuid,
+        objectName: 'VF-26',
+        objectPath: 'scene/VF-26#0',
+        value: {
+          property: 'metalness',
+          value: 0.65,
+        },
+      },
+      {
+        source: 'human',
+        type: 'set_material_boolean',
+        objectUuid: carUuid,
+        objectName: 'VF-26',
+        objectPath: 'scene/VF-26#0',
+        value: {
+          property: 'wireframe',
+          value: true,
+        },
       },
       {
         source: 'ai',
