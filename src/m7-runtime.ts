@@ -12,6 +12,7 @@ export function runtimeCommandSettlementDeadline(expiresAt: string): number {
 export interface WorkspaceEditorState {
   schemaVersion: 1
   operations: EditorCommandOperation[]
+  qualityTier?: string
   recentChanges?: Array<{
     source: 'human' | 'ai' | 'unknown'
     operation: EditorCommandOperation
@@ -63,6 +64,28 @@ export function shouldPickAfterPointerGesture(
     && Math.hypot(clientX - gesture.x, clientY - gesture.y) <= 4
 }
 
+export function installOwnedAssetFetch(
+  target: { fetch: typeof fetch },
+  ownedAssets: Map<string, Blob>,
+): () => void {
+  const originalFetch = target.fetch
+  target.fetch = (input, init) => {
+    const url = typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url
+    const blob = ownedAssets.get(url)
+    return blob === undefined
+      ? originalFetch.call(target, input, init)
+      : Promise.resolve(new Response(blob))
+  }
+  return () => {
+    ownedAssets.clear()
+    target.fetch = originalFetch
+  }
+}
+
 export function stableEditorUuid(value: string): string {
   const hash = (seed: number): number => {
     let result = seed >>> 0
@@ -109,11 +132,15 @@ export function m7BootstrapHtml(): string {
     const channel = ${JSON.stringify(M7_RUNTIME_CHANNEL)}
     const stableEditorUuid = ${stableEditorUuid.toString()}
     const shouldPickAfterPointerGesture = ${shouldPickAfterPointerGesture.toString()}
+    const installOwnedAssetFetch = ${installOwnedAssetFetch.toString()}
     const canvas = document.querySelector('canvas')
     let active
     let starting
     let lastDisposed
     let bundleUrl
+    let assetUrls = new Map()
+    let assetBlobs = new Map()
+    let restoreAssetFetch
     let eventProjectId
     let eventRevision
     let logCursor = 0
@@ -169,7 +196,16 @@ export function m7BootstrapHtml(): string {
     }
     canvas.addEventListener('webglcontextlost', event => {
       event.preventDefault()
-      if (active) appendLog('error', ['WebGL context lost'])
+      const current = active
+      if (!current || current.stopped) return
+      current.stopped = true
+      appendLog('error', ['WebGL context lost; restart the Runtime to recover'])
+      emit(current.runId, current.nonce, 'runtime-error', {
+        message: 'WebGL context lost; restart the Runtime to recover',
+        code: 'webgl-context-lost',
+        recoverable: true,
+        fatal: true,
+      })
     })
     canvas.addEventListener('webglcontextrestored', () => {
       if (active) appendLog('info', ['WebGL context restored'])
@@ -503,6 +539,14 @@ export function m7BootstrapHtml(): string {
       rendererBackend:
         current.renderer.backend?.constructor?.name
         ?? current.renderer.constructor.name,
+      renderPath: current.state.debugMode === 'no-post'
+        ? 'direct-renderer'
+        : current.example?.render
+          ? 'example-render'
+          : 'default-renderer',
+      buildId: current.buildId,
+      qualityTier: current.state.qualityTier,
+      debugMode: current.state.debugMode,
       gpuRenderer,
       gpuRendererUnmasked,
       draws: current.renderer.info?.render?.calls ?? 0,
@@ -518,39 +562,63 @@ export function m7BootstrapHtml(): string {
     const evidenceRuntime = (current, target) => ({
       projectId: current.projectId,
       revision: current.revision,
+      buildId: current.buildId,
       runId: current.runId,
       nonce: current.nonce,
       target,
     })
     const captureFrame = async (current, request) => {
-      const maxWidth = Math.max(64, Math.min(1024, Number(request.maxWidth) || 768))
-      const maxHeight = Math.max(64, Math.min(1024, Number(request.maxHeight) || 768))
-      const widthScale = maxWidth / Math.max(1, canvas.width)
-      const heightScale = maxHeight / Math.max(1, canvas.height)
-      const scale = Math.min(1, widthScale, heightScale)
-      const width = Math.max(1, Math.round(canvas.width * scale))
-      const height = Math.max(1, Math.round(canvas.height * scale))
-      const output = document.createElement('canvas')
-      output.width = width
-      output.height = height
-      output.getContext('2d').drawImage(canvas, 0, 0, width, height)
-      const mimeType = request.format === 'jpeg' ? 'image/jpeg' : 'image/png'
-      const url = output.toDataURL(mimeType, 0.9)
-      const data = url.slice(url.indexOf(',') + 1)
-      const bytes = Uint8Array.from(atob(data), character => character.charCodeAt(0))
-      if (data.length > 512 * 1024) throw new Error('Runtime frame exceeds the evidence limit')
-      return {
-        kind: 'capture-frame',
-        runtime: evidenceRuntime(current, request.target),
-        evidenceId: crypto.randomUUID(),
-        evidenceToken: current.evidenceToken,
-        digest: await sha256(bytes),
-        mimeType,
-        data,
-        width,
-        height,
-        frame: current.frame,
-        capturedAt: new Date().toISOString(),
+      const deterministic = request.deterministic === true
+      const previousTimeScale = current.state.timeScale
+      const previousCapturePaused = current.capturePaused
+      try {
+        if (deterministic) {
+          current.state.timeScale = 0
+          current.capturePaused = true
+          cancelAnimationFrame(current.animation)
+          await current.framePromise
+        }
+        const maxWidth = Math.max(64, Math.min(1024, Number(request.maxWidth) || 768))
+        const maxHeight = Math.max(64, Math.min(1024, Number(request.maxHeight) || 768))
+        const widthScale = maxWidth / Math.max(1, canvas.width)
+        const heightScale = maxHeight / Math.max(1, canvas.height)
+        const scale = Math.min(1, widthScale, heightScale)
+        const width = Math.max(1, Math.round(canvas.width * scale))
+        const height = Math.max(1, Math.round(canvas.height * scale))
+        const output = document.createElement('canvas')
+        output.width = width
+        output.height = height
+        output.getContext('2d').drawImage(canvas, 0, 0, width, height)
+        const mimeType = request.format === 'jpeg' ? 'image/jpeg' : 'image/png'
+        const url = output.toDataURL(mimeType, 0.9)
+        const data = url.slice(url.indexOf(',') + 1)
+        const bytes = Uint8Array.from(atob(data), character => character.charCodeAt(0))
+        if (data.length > 512 * 1024) throw new Error('Runtime frame exceeds the evidence limit')
+        return {
+          kind: 'capture-frame',
+          runtime: evidenceRuntime(current, request.target),
+          evidenceId: crypto.randomUUID(),
+          evidenceToken: current.evidenceToken,
+          digest: await sha256(bytes),
+          mimeType,
+          data,
+          width,
+          height,
+          frame: current.frame,
+          deterministic,
+          qualityTier: current.state.qualityTier,
+          debugMode: current.state.debugMode,
+          capturedAt: new Date().toISOString(),
+        }
+      } finally {
+        if (deterministic && !current.stopped) {
+          current.state.timeScale = previousTimeScale
+          current.capturePaused = previousCapturePaused
+          current.previous = performance.now()
+          if (!current.capturePaused && !current.modeTransitioning) {
+            current.animation = requestAnimationFrame(current.renderFrame)
+          }
+        }
       }
     }
     const readLogs = (current, request) => {
@@ -758,7 +826,12 @@ export function m7BootstrapHtml(): string {
     const resize = current => {
       const width = Math.max(1, canvas.clientWidth)
       const height = Math.max(1, canvas.clientHeight)
-      const dpr = Math.min(devicePixelRatio || 1, 2)
+      const qualityScale = current.state.qualityTier === 'performance'
+        ? 0.5
+        : current.state.qualityTier === 'balanced'
+          ? 0.75
+          : 1
+      const dpr = Math.min(devicePixelRatio || 1, 2) * qualityScale
       current.state.dpr = dpr
       const expectedWidth = Math.floor(width * dpr)
       const expectedHeight = Math.floor(height * dpr)
@@ -1019,6 +1092,7 @@ export function m7BootstrapHtml(): string {
     const disposeCurrent = async (current, preserveSurface = false) => {
       let evidence = {}
       const failures = []
+      let exampleDisposeError
       const cleanup = callback => {
         try {
           callback()
@@ -1059,7 +1133,7 @@ export function m7BootstrapHtml(): string {
         try {
           await current.example?.dispose?.()
         } catch (error) {
-          failures.push(message(error))
+          exampleDisposeError = message(error)
         } finally {
           const inputListenersAfterExampleDispose = current.runtimeInputListeners.length
           cleanup(() => current.transform?.detach())
@@ -1069,7 +1143,9 @@ export function m7BootstrapHtml(): string {
           cleanup(() => disposeRuntimeCanvas(current))
           cleanup(() => current.controls?.dispose())
           cleanup(() => current.renderer.dispose())
-          if (!preserveSurface) cleanup(() => current.renderer.forceContextLoss?.())
+          if (!preserveSurface && !current.renderer.getContext?.().isContextLost?.()) {
+            cleanup(() => current.renderer.forceContextLoss?.())
+          }
           evidence = {
             ...evidence,
             runId: current.runId,
@@ -1077,12 +1153,20 @@ export function m7BootstrapHtml(): string {
             runtimeInputListenersAfterDispose: current.runtimeInputListeners.length,
             capturedPointersAfterDispose: current.runtimeCapturedPointers.size,
             rendererDisposed: true,
+            ...(exampleDisposeError === undefined ? {} : { exampleDisposeError }),
             ...(failures.length === 0 ? {} : { disposeError: failures.join('\\n') }),
           }
         }
       }
       if (bundleUrl) cleanup(() => URL.revokeObjectURL(bundleUrl))
       bundleUrl = undefined
+      cleanup(() => restoreAssetFetch?.())
+      restoreAssetFetch = undefined
+      for (const url of assetUrls.values()) cleanup(() => URL.revokeObjectURL(url))
+      assetUrls = new Map()
+      assetBlobs = new Map()
+      delete globalThis.__THREEJS_EDITOR_ASSETS__
+      delete globalThis.__THREEJS_EDITOR_REGISTER_INLINE_ASSET__
       const disposeError = failures.length === 0 ? undefined : failures.join('\\n')
       return { evidence, disposeError }
     }
@@ -1108,11 +1192,16 @@ export function m7BootstrapHtml(): string {
         emit(runId, nonce, 'runtime-error', { message: 'Runtime evidence token is required' })
         return
       }
+      if (typeof request.buildId !== 'string' || !/^[a-f0-9]{64}$/.test(request.buildId)) {
+        emit(runId, nonce, 'runtime-error', { message: 'Runtime buildId is required' })
+        return
+      }
       const pending = {
         projectId: request.projectId,
         runId,
         nonce,
         revision: request.revision,
+        buildId: request.buildId,
         stopRequested: false,
       }
       starting = pending
@@ -1124,6 +1213,38 @@ export function m7BootstrapHtml(): string {
       let current
       let renderer
       try {
+        assetUrls = new Map()
+        assetBlobs = new Map()
+        for (const asset of request.assets ?? []) {
+          if (typeof asset.sha256 !== 'string'
+            || typeof asset.mediaType !== 'string'
+            || !(asset.bytes instanceof ArrayBuffer)) {
+            throw new Error('Runtime asset payload is invalid')
+          }
+          if (!assetUrls.has(asset.sha256)) {
+            const blob = new Blob([asset.bytes], { type: asset.mediaType })
+            const url = URL.createObjectURL(blob)
+            assetUrls.set(asset.sha256, url)
+            assetBlobs.set(url, blob)
+          }
+        }
+        restoreAssetFetch = installOwnedAssetFetch(window, assetBlobs)
+        globalThis.__THREEJS_EDITOR_ASSETS__ = assetUrls
+        globalThis.__THREEJS_EDITOR_REGISTER_INLINE_ASSET__ = (hash, mediaType, base64) => {
+          const existing = assetUrls.get(hash)
+          if (existing !== undefined) return existing
+          if (typeof hash !== 'string'
+            || typeof mediaType !== 'string'
+            || typeof base64 !== 'string') {
+            throw new Error('Inline Runtime asset payload is invalid')
+          }
+          const bytes = Uint8Array.from(atob(base64), character => character.charCodeAt(0))
+          const blob = new Blob([bytes], { type: mediaType })
+          const url = URL.createObjectURL(blob)
+          assetUrls.set(hash, url)
+          assetBlobs.set(url, blob)
+          return url
+        }
         bundleUrl = URL.createObjectURL(new Blob(
           [request.bundle],
           { type: 'text/javascript' },
@@ -1232,6 +1353,7 @@ export function m7BootstrapHtml(): string {
           nonce,
           evidenceToken: request.evidenceToken,
           revision: request.revision,
+          buildId: request.buildId,
           THREE,
           renderer,
           runtimeRenderer: undefined,
@@ -1262,6 +1384,7 @@ export function m7BootstrapHtml(): string {
           mode: request.mode === 'run' ? 'run' : 'edit',
           state: {
             debugMode: request.debugMode ?? 'final',
+            qualityTier: editorState?.qualityTier ?? request.qualityTier ?? 'default',
             paused: request.mode !== 'run',
             dpr: Math.min(devicePixelRatio || 1, 2),
             timeScale: 1,
@@ -1270,6 +1393,7 @@ export function m7BootstrapHtml(): string {
           elapsed: adapter.initialTime ?? 0,
           previous: performance.now(),
           animation: 0,
+          capturePaused: false,
           stopped: false,
           frameInProgress: false,
           framePromise: Promise.resolve(),
@@ -1314,6 +1438,7 @@ export function m7BootstrapHtml(): string {
         }
         if (current.stopped || active !== current) return
         current.example.setDebugMode?.(current.state.debugMode)
+        current.example.setQualityTier?.(current.state.qualityTier)
         const viewState = request.viewState
         if (viewState && Array.isArray(viewState.cameraPosition)
           && viewState.cameraPosition.length === 3
@@ -1391,7 +1516,9 @@ export function m7BootstrapHtml(): string {
           current.frameInProgress = true
           current.framePromise = (async () => {
             try {
-              if (canvas.clientWidth === 0 || canvas.clientHeight === 0) return
+              if (canvas.clientWidth === 0 || canvas.clientHeight === 0) {
+                return
+              }
               if (resize(current)) current.needsInitialUpdate = true
               const rawDelta = Math.min((now - current.previous) / 1000, 0.1)
               current.previous = now
@@ -1411,7 +1538,9 @@ export function m7BootstrapHtml(): string {
                 current.needsInitialUpdate = false
               }
               current.controls?.update()
-              if (current.example.render) {
+              if (current.state.debugMode === 'no-post') {
+                current.renderer.render(current.scene, current.camera)
+              } else if (current.example.render) {
                 await current.example.render({
                   renderer: current.runtimeRenderer,
                   scene: current.scene,
@@ -1453,7 +1582,7 @@ export function m7BootstrapHtml(): string {
               })
             } finally {
               current.frameInProgress = false
-              if (!current.stopped && !current.modeTransitioning) {
+              if (!current.stopped && !current.modeTransitioning && !current.capturePaused) {
                 current.animation = requestAnimationFrame(render)
               }
             }

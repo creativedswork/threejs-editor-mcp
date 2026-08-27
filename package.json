@@ -48,7 +48,10 @@
     "test:e2e:m7-gallery": "node tests/m7-gallery-browser.mjs",
     "test:e2e:m8": "node tests/m8-browser.mjs",
     "test:e2e:m81": "node tests/m81-browser.mjs",
+    "test:e2e:m9": "node tests/m9-browser.mjs",
+    "test:e2e:m9-ui": "node tests/m9-ui-browser.mjs",
     "test:corpus:m8": "node tests/m8-corpus-build.mjs",
+    "test:corpus:m9": "node tests/m9-corpus-build.mjs",
     "check:upstream": "node scripts/sync-three-editor.mjs",
     "test:pack": "pnpm run build && node tests/packed-install.mjs",
     "check": "pnpm run check:upstream && pnpm run typecheck && pnpm run test",
@@ -61,10 +64,14 @@
     "provenance": true
   },
   "dependencies": {
+    "@petamoriken/float16": "3.9.2",
     "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "astronomy-engine": "2.1.19",
     "esbuild": "0.25.3",
+    "postprocessing": "6.37.4",
     "three": "0.185.1",
+    "three-stdlib": "2.36.0",
     "typescript": "6.0.3",
     "zod": "4.4.3"
   },

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
+  installOwnedAssetFetch,
   m7BootstrapHtml,
   shouldPickAfterPointerGesture,
 } from '../src/m7-runtime.ts'
@@ -37,6 +38,36 @@ test('emits a syntactically valid Runtime bootstrap script', () => {
   assert.notEqual(script, undefined)
   assert.doesNotThrow(() => new Function(script))
 })
+
+test('fetches only owned Runtime asset URLs and restores fetch on teardown', async () => {
+  const calls = []
+  const originalFetch = async input => {
+    calls.push(input)
+    return new Response('passthrough')
+  }
+  const target = { fetch: originalFetch }
+  const ownedAssets = new Map([
+    ['blob:owned', new Blob(['owned'], { type: 'text/plain' })],
+  ])
+  const restore = installOwnedAssetFetch(target, ownedAssets)
+
+  assert.equal(await (await target.fetch('blob:owned')).text(), 'owned')
+  assert.equal(await (await target.fetch('blob:unknown')).text(), 'passthrough')
+  assert.equal(await (await target.fetch('data:text/plain,unknown')).text(), 'passthrough')
+  assert.deepEqual(calls, ['blob:unknown', 'data:text/plain,unknown'])
+
+  restore()
+  assert.equal(target.fetch, originalFetch)
+  assert.equal(ownedAssets.size, 0)
+
+  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  assert.ok(script.indexOf('restoreAssetFetch?.()') < script.indexOf('URL.revokeObjectURL(url)'))
+  assert.match(script, /__THREEJS_EDITOR_REGISTER_INLINE_ASSET__/)
+  assert.match(script, /assetBlobs\.set\(url, blob\)/)
+  assert.ok(script.includes('delete globalThis.__THREEJS_EDITOR_REGISTER_INLINE_ASSET__'))
+})
+
 
 test('waits for a laid out canvas before publishing Runtime ready', () => {
   const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
@@ -97,6 +128,18 @@ test('preserves the last framebuffer until replacement navigation', async () => 
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
   assert.match(source, /postM7Run\(run, 'stop', \{ preserveSurface \}\)/)
   assert.match(source, /disposeM7Runtime\(run, !hideFrame\)/)
+})
+
+test('keeps example cleanup failures non-fatal to Runtime teardown', () => {
+  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  const exampleDispose = script.indexOf('await current.example?.dispose?.()')
+  const frameworkCleanup = script.indexOf('cleanup(() => current.renderer.dispose())', exampleDispose)
+  assert.ok(exampleDispose >= 0)
+  assert.ok(frameworkCleanup > exampleDispose)
+  assert.ok(script.slice(exampleDispose, frameworkCleanup).includes('exampleDisposeError = message(error)'))
+  assert.doesNotMatch(script.slice(exampleDispose, frameworkCleanup), /failures.push/)
+  assert.ok(script.includes('exampleDisposeError === undefined ? {} : { exampleDisposeError }'))
 })
 
 test('keeps an async Runtime setup owned until disposal completes', () => {

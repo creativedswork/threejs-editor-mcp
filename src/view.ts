@@ -37,6 +37,7 @@ import {
   type PointerPickGesture,
   shouldPickAfterPointerGesture,
 } from './m7-runtime.js'
+import { RuntimeAssetCache } from './runtime-asset-cache.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
 type CameraView = 'broadcast' | 'overhead' | 'courtside'
@@ -51,6 +52,12 @@ interface WorkspaceFile {
   size: number
   mediaType: string
   text: boolean
+}
+
+interface RuntimeAsset {
+  sha256: string
+  mediaType: string
+  bytes: ArrayBuffer
 }
 
 type WorkspaceParameter =
@@ -77,6 +84,7 @@ interface WorkspaceView {
   entry: string
   backend: 'webgl' | 'webgpu' | 'raw-webgpu'
   debugModes: string[]
+  qualityTiers: string[]
   parameters: WorkspaceParameter[]
   capabilities?: {
     parameterPanel: { id: string; label: string; parameters: string[] }
@@ -461,6 +469,7 @@ const play = required<HTMLButtonElement>('[data-play]')
 const stop = required<HTMLButtonElement>('[data-stop]')
 const activeGrant = required<HTMLButtonElement>('[data-active-grant]')
 const runtimeDebug = required<HTMLSelectElement>('[data-runtime-debug]')
+const runtimeQuality = required<HTMLSelectElement>('[data-runtime-quality]')
 const fullscreen = required<HTMLButtonElement>('[data-fullscreen]')
 const save = required<HTMLButtonElement>('[data-save]')
 const hierarchy = required<HTMLUListElement>('[data-hierarchy]')
@@ -579,22 +588,28 @@ let m7ValidationRun: M7Run | undefined
 let m7EvidenceToken: string | undefined
 let m7Bundle: {
   revision: string
+  buildId: string
   bundle: string
   backend: 'webgl' | 'webgpu' | 'raw-webgpu'
+  assets: RuntimeAsset[]
 } | undefined
+const runtimeAssetCache = new RuntimeAssetCache()
 let runtimeHarnessPulling = false
 const runtimeHarnessCommands = new Set<string>()
 let restoredDraftOperations: EditorCommandOperation[] = []
 let appInstanceStorageIdentity: { sessionId: string; serverName: string } | undefined
 let draftSaveTimer: number | undefined
 let runtimeDebugMode = 'final'
+let runtimeQualityTier = 'default'
+let workspaceEditorStateDocument: Record<string, unknown> = {
+  schemaVersion: 1,
+  operations: [],
+}
 let parameterDocuments = new Map<string, Record<string, unknown>>()
 let parameterLoadToken = 0
 const expandedObjects = new Set<string>()
 const M7_REQUEST_TIMEOUT = 120_000
 const M7_LIFECYCLE_TIMEOUT = 10_000
-
-
 
 const loader = new THREE.ObjectLoader()
 const raycaster = new THREE.Raycaster()
@@ -705,6 +720,7 @@ function refreshPlayButtons(): void {
   runtimeDebug.disabled = workspace === undefined
     || playState === 'starting'
     || playState === 'stopping'
+  runtimeQuality.disabled = workspace === undefined || active
   importAssetButton.disabled = editorDisabled
     || active
     || navigationTab !== 'scene'
@@ -723,7 +739,7 @@ function refreshRuntimeDebugModes(): void {
   runtimeDebug.replaceChildren(...modes.map(mode => {
     const option = document.createElement('option')
     option.value = mode
-    option.textContent = mode
+    option.textContent = runtimeLabels.get(mode) ?? mode
     return option
   }))
   runtimeDebug.hidden = workspace === undefined || modes.length === 0
@@ -731,6 +747,80 @@ function refreshRuntimeDebugModes(): void {
   runtimeDebug.value = runtimeDebugMode
   runtimeDebug.disabled = workspace === undefined
   root.dataset.runtimeDebug = runtimeDebugMode
+}
+
+const runtimeLabels = new Map([
+  ['final', '最终画面'],
+  ['no-post', '基础画面'],
+  ['cascade-bands', '级联分区'],
+  ['normals', '法线'],
+  ['jacobian', '泡沫'],
+  ['spectrum-0', '远景频谱'],
+  ['spectrum-1', '中景频谱'],
+  ['spectrum-2', '近景频谱'],
+  ['atmosphere-only', '仅大气'],
+  ['clouds-only', '仅云层'],
+  ['no-detail', '关闭细节'],
+  ['no-turbulence', '关闭扰动'],
+  ['native-resolution', '原生分辨率'],
+  ['performance', '流畅'],
+  ['balanced', '均衡'],
+  ['quality', '精细'],
+  ['default', '默认'],
+])
+
+function refreshRuntimeQualityTiers(): void {
+  const tiers = workspace?.qualityTiers ?? []
+  runtimeQuality.replaceChildren(...tiers.map(tier => {
+    const option = document.createElement('option')
+    option.value = tier
+    option.textContent = runtimeLabels.get(tier) ?? tier
+    return option
+  }))
+  runtimeQuality.hidden = workspace === undefined || tiers.length < 2
+  const savedTier = workspaceEditorStateDocument.qualityTier
+  runtimeQualityTier = typeof savedTier === 'string' && tiers.includes(savedTier)
+    ? savedTier
+    : tiers[0] ?? 'default'
+  runtimeQuality.value = runtimeQualityTier
+  root.dataset.runtimeQuality = runtimeQualityTier
+  refreshPlayButtons()
+}
+
+async function saveRuntimeQuality(tier: string): Promise<void> {
+  if (projectId === undefined || revision === undefined || workspace === undefined) return
+  if (!workspace.qualityTiers.includes(tier)) throw new Error('未知画质档位')
+  const savedProjectId = projectId
+  const savedRevision = revision
+  root.dataset.sync = 'saving'
+  setEditorDisabled(true)
+  runtimeQuality.disabled = true
+  status.textContent = '正在保存画质'
+  const nextState = { ...workspaceEditorStateDocument, qualityTier: tier }
+  const result = await app.callServerTool({
+    name: 'apply_project_files',
+    arguments: {
+      projectId: savedProjectId,
+      baseRevision: savedRevision,
+      changes: [{
+        type: 'write',
+        path: WORKSPACE_EDITOR_STATE_PATH,
+        text: `${JSON.stringify(nextState, null, 2)}\n`,
+      }],
+    },
+  })
+  if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
+  if (result.isError) throw new Error(resultError(result))
+  const pulled = await app.callServerTool({
+    name: 'pull_project',
+    arguments: { projectId: savedProjectId },
+  })
+  if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
+  const snapshot = snapshotFromResult(pulled)
+  if (snapshot === undefined) throw new Error('未返回已保存的画质版本')
+  workspaceEditorStateDocument = nextState
+  setEditorDisabled(false)
+  acceptSnapshot(snapshot.project, snapshot.revision, '画质已保存', snapshot.workspace)
 }
 
 async function saveWorkspaceParameter(
@@ -841,8 +931,15 @@ async function loadWorkspaceParameters(): Promise<void> {
   const token = ++parameterLoadToken
   parameterDocuments = new Map()
   const parameters = workspace?.parameters ?? []
-  const paths = [...new Set(parameters.map(parameter => parameter.path))]
+  const paths = [...new Set([
+    ...parameters.map(parameter => parameter.path),
+    ...(workspace?.files.some(file => file.path === WORKSPACE_EDITOR_STATE_PATH)
+      ? [WORKSPACE_EDITOR_STATE_PATH]
+      : []),
+  ])]
   if (projectId === undefined || paths.length === 0) {
+    workspaceEditorStateDocument = { schemaVersion: 1, operations: [] }
+    refreshRuntimeQualityTiers()
     renderWorkspaceParameters()
     return
   }
@@ -862,8 +959,13 @@ async function loadWorkspaceParameters(): Promise<void> {
     const parsed = JSON.parse(file.text) as unknown
     const document = record(parsed)
     if (document === undefined) throw new Error(`parameter file must be a JSON object: ${file.path}`)
-    parameterDocuments.set(file.path, document)
+    if (file.path === WORKSPACE_EDITOR_STATE_PATH) {
+      workspaceEditorStateDocument = document
+    } else {
+      parameterDocuments.set(file.path, document)
+    }
   }
+  refreshRuntimeQualityTiers()
   renderWorkspaceParameters()
 }
 
@@ -1750,6 +1852,7 @@ function acceptSnapshot(
   }
   const previousFile = activeFile
   workspace = nextWorkspace
+  workspaceEditorStateDocument = { schemaVersion: 1, operations: [] }
   const capabilities = workspace?.capabilities
   if (capabilities === undefined) {
     delete root.dataset.capabilityCommand
@@ -1765,6 +1868,7 @@ function acceptSnapshot(
     runtimeDebug.title = capabilities.debugSurface.label
   }
   refreshRuntimeDebugModes()
+  refreshRuntimeQualityTiers()
   const filesTab = navigationTabs.find(button => button.dataset.navigationTab === 'files')
   if (filesTab !== undefined) filesTab.hidden = workspace === undefined
   if (workspace === undefined) {
@@ -1846,6 +1950,10 @@ function workspaceFromResult(value: unknown): WorkspaceView | undefined {
     && candidate.debugModes.every(mode => typeof mode === 'string' && mode !== '')
     ? [...new Set(candidate.debugModes as string[])]
     : ['final']
+  const qualityTiers = Array.isArray(candidate.qualityTiers)
+    && candidate.qualityTiers.every(tier => typeof tier === 'string' && tier !== '')
+    ? [...new Set(candidate.qualityTiers as string[])]
+    : ['default']
   const parameters = Array.isArray(candidate.parameters)
     ? candidate.parameters.map(record)
     : []
@@ -1903,6 +2011,7 @@ function workspaceFromResult(value: unknown): WorkspaceView | undefined {
     entry: candidate.entry,
     backend: candidate.backend,
     debugModes,
+    qualityTiers,
     parameters: parameters.map(parameter => (
       parameter?.type === 'number'
         ? {
@@ -2111,6 +2220,65 @@ function resourceText(result: ReadResourceResult, uri: string): string {
     throw new Error(`resource ${uri} did not return text`)
   }
   return content.text
+}
+
+function resourceBlob(result: ReadResourceResult, uri: string): Uint8Array {
+  const content = result.contents.find(item => item.uri === uri) ?? result.contents[0]
+  if (content === undefined || !('blob' in content) || typeof content.blob !== 'string') {
+    throw new Error(`resource ${uri} did not return binary data`)
+  }
+  const raw = atob(content.blob)
+  return Uint8Array.from(raw, character => character.charCodeAt(0))
+}
+
+async function runtimeAssets(
+  build: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<RuntimeAsset[]> {
+  const assets = Array.isArray(build.assets)
+    ? build.assets.map(record).filter(asset => typeof asset?.resourceUri === 'string')
+    : []
+  return Promise.all(assets.map(async asset => {
+    const sha256 = asset?.sha256
+    const mediaType = asset?.mediaType
+    const resourceUri = asset?.resourceUri
+    const chunks = asset?.chunks
+    const size = asset?.size
+    if (typeof sha256 !== 'string'
+      || typeof mediaType !== 'string'
+      || typeof resourceUri !== 'string'
+      || !Number.isInteger(chunks)
+      || Number(chunks) < 1
+      || !Number.isInteger(size)
+      || Number(size) < 1) {
+      throw new Error('build_project returned invalid Runtime asset metadata')
+    }
+    const pending = runtimeAssetCache.get(sha256, async () => {
+      const parts: Uint8Array[] = []
+      for (let index = 0; index < Number(chunks); index += 1) {
+        const uri = `${resourceUri}/${String(index)}`
+        const result = await app.readServerResource({ uri }, {
+          signal,
+          timeout: M7_REQUEST_TIMEOUT,
+          maxTotalTimeout: M7_REQUEST_TIMEOUT,
+        })
+        parts.push(resourceBlob(result, uri))
+      }
+      const bytes = new Uint8Array(Number(size))
+      let offset = 0
+      for (const part of parts) {
+        bytes.set(part, offset)
+        offset += part.byteLength
+      }
+      if (offset !== bytes.byteLength) throw new Error(`resource ${sha256} size mismatch`)
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+        .map(value => value.toString(16).padStart(2, '0'))
+        .join('')
+      if (digest !== sha256) throw new Error(`resource ${sha256} failed hash verification`)
+      return bytes.buffer
+    })
+    return { sha256, mediaType, bytes: await pending }
+  }))
 }
 
 function waitForM5Event(type: string, runId: string, timeout = 8_000): Promise<M5RuntimeEvent> {
@@ -2400,6 +2568,7 @@ async function runtimeBundleFor(run: M7Run): Promise<NonNullable<typeof m7Bundle
   const build = record(buildResult.structuredContent)
   if (build?.status !== 'ready'
     || typeof build.bundleUri !== 'string'
+    || typeof build.buildId !== 'string'
     || (build.backend !== 'webgl' && build.backend !== 'webgpu' && build.backend !== 'raw-webgpu')) {
     const diagnostics = Array.isArray(build?.diagnostics) ? build.diagnostics.map(record) : []
     throw new Error(String(
@@ -2415,8 +2584,10 @@ async function runtimeBundleFor(run: M7Run): Promise<NonNullable<typeof m7Bundle
   })
   m7Bundle = {
     revision: run.revision,
+    buildId: build.buildId,
     bundle: resourceText(resource, build.bundleUri),
     backend: build.backend,
+    assets: await runtimeAssets(build),
   }
   return m7Bundle
 }
@@ -2466,6 +2637,8 @@ async function ensureValidationRuntime(anchor: M7Run): Promise<M7Run> {
   postM7Run(run, 'run', {
     bundle: artifact.bundle,
     backend: artifact.backend,
+    buildId: artifact.buildId,
+    assets: artifact.assets,
     debugMode: runtimeDebugMode,
     mode: 'run',
     evidenceToken,
@@ -2682,6 +2855,9 @@ async function disposeM7Runtime(
   postM7Run(run, 'stop', { preserveSurface })
   const event = await disposed
   m7LastDispose = event.data
+  if (typeof event.data?.exampleDisposeError === 'string') {
+    recordRuntimeWarning([`Example cleanup warning: ${event.data.exampleDisposeError}`])
+  }
   if (typeof event.data?.disposeError === 'string') {
     throw new Error(`M7 Runtime teardown failed: ${event.data.disposeError}`)
   }
@@ -2763,6 +2939,7 @@ async function startM7Runtime(
     throw new Error(`${location}${String(first?.message ?? 'Workspace build failed')}`)
   }
   if (typeof build.bundleUri !== 'string'
+    || typeof build.buildId !== 'string'
     || (build.backend !== 'webgl' && build.backend !== 'webgpu' && build.backend !== 'raw-webgpu')) {
     throw new Error('build_project returned invalid Runtime metadata')
   }
@@ -2780,12 +2957,15 @@ async function startM7Runtime(
     throw error
   }
   const bundle = resourceText(bundleResource, build.bundleUri)
+  const assets = await runtimeAssets(build, controller.signal)
   if (tearingDown || token !== m7StartToken) return
   const previousBundle = m7Bundle
   m7Bundle = {
     revision: startRevision,
+    buildId: build.buildId,
     bundle,
     backend: build.backend,
+    assets,
   }
   try {
     await ensureValidationRuntime({
@@ -2831,6 +3011,7 @@ async function startM7Runtime(
       arguments: {
         projectId: startProjectId,
         revision: startRevision,
+        buildId: build.buildId,
         runId: run.runId,
         nonce: run.nonce,
       },
@@ -2860,6 +3041,8 @@ async function startM7Runtime(
     postM7Run(run, 'run', {
       bundle,
       backend: build.backend,
+      buildId: build.buildId,
+      assets,
       debugMode: runtimeDebugMode,
       mode,
       evidenceToken: m7EvidenceToken,
@@ -3729,6 +3912,8 @@ app.onteardown = async () => {
   await cleanup(() => disposeScene(scene))
   await cleanup(() => renderer.dispose())
   await cleanup(() => runtimeTimer.dispose())
+  runtimeAssetCache.clear()
+  m7Bundle = undefined
   const cleanupFailures = m7CleanupFailures.splice(0)
   const queueFailureIsRecorded = queueFailure !== undefined && (
     cleanupFailures.includes(queueFailure)
@@ -3798,6 +3983,16 @@ runtimeDebug.addEventListener('change', () => {
   runtimeDebugMode = runtimeDebug.value
   root.dataset.runtimeDebug = runtimeDebugMode
   if (m7ActiveRun !== undefined) postM7('set-debug', { debugMode: runtimeDebugMode })
+})
+runtimeQuality.addEventListener('change', () => {
+  const tier = runtimeQuality.value
+  void saveRuntimeQuality(tier).catch(error => {
+    root.dataset.sync = 'error'
+    setEditorDisabled(false)
+    runtimeQuality.value = runtimeQualityTier
+    runtimeQuality.disabled = false
+    status.textContent = error instanceof Error ? error.message : String(error)
+  })
 })
 importAssetButton.addEventListener('click', () => assetInput.click())
 assetInput.addEventListener('change', () => {
@@ -4585,6 +4780,7 @@ const diagnostics = {
     workspaceBackend: workspace?.backend,
     capabilities: workspace?.capabilities,
     runtimeDebugMode,
+    runtimeQualityTier,
     workspaceFiles: workspace?.files.map(file => file.path) ?? [],
     activeFile,
     fileHistoryIndex,

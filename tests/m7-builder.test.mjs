@@ -449,8 +449,10 @@ export default {
     })
     assert.equal(
       bundle.contents[0].text.split(asset.toString('base64')).length - 1,
-      2,
+      1,
     )
+    assert.doesNotMatch(bundle.contents[0].text, /data:image\/png;base64/)
+    assert.match(bundle.contents[0].text, /__THREEJS_EDITOR_REGISTER_INLINE_ASSET__/)
     assert.doesNotMatch(bundle.contents[0].text, /\.\/assets\/shared\.png\?v=json/)
     const jsonAssetHash = createHash('sha256')
       .update('src/assets.json\0./assets/shared.png?v=json')
@@ -463,7 +465,8 @@ export default {
     )
     assert.match(bundle.contents[0].text, /\.\/assets\/shared\.png\?v=key/)
     assert.match(bundle.contents[0].text, /\.\/assets\/shared\.png\?v=computed/)
-    assert.match(bundle.contents[0].text, /:is\(:root,:host\)\{--threejs-editor-asset-/)
+    assert.match(bundle.contents[0].text, /document\.documentElement\.style\.setProperty/)
+    assert.match(bundle.contents[0].text, /--threejs-editor-asset-/)
   } finally {
     await game.close()
   }
@@ -472,30 +475,24 @@ export default {
 test('M8 rejects generated build input above the bounded expansion limit', async () => {
   const game = await fixture()
   try {
-    await mkdir(join(game.workspace, 'src', 'assets'), { recursive: true })
-    await mkdir(join(game.workspace, 'src', 'styles'), { recursive: true })
-    await writeFile(
-      join(game.workspace, 'src', 'assets', 'heavy.png'),
-      Buffer.alloc(1024 * 1024, 7),
-    )
     const imports = []
-    const styles = []
-    for (let index = 0; index < 50; index += 1) {
-      const name = `style${String(index)}`
-      imports.push(`import ${name} from './styles/${name}.css'`)
-      styles.push(name)
+    const shaders = []
+    for (let index = 0; index < 5; index += 1) {
+      const name = `shader${String(index)}`
+      imports.push(`import ${name} from './${name}.glsl?raw'`)
+      shaders.push(name)
       await writeFile(
-        join(game.workspace, 'src', 'styles', `${name}.css`),
-        `.asset{background:url("../assets/heavy.png?v=${String(index)}")}\n`,
+        join(game.workspace, 'src', `${name}.glsl`),
+        Buffer.alloc(14 * 1024 * 1024, 97),
       )
     }
     await writeFile(
       join(game.workspace, 'src', 'main.ts'),
       `${imports.join('\n')}
-const styles = [${styles.join(',')}]
+const shaders = [${shaders.join(',')}]
 export default {
   setup() {
-    return { metrics: () => ({ styles }) }
+    return { metrics: () => ({ shaders }) }
   },
 }
 `,
@@ -1161,8 +1158,8 @@ export function createCar() {
     const galleryBundle = await client.readResource({
       uri: built.structuredContent.bundleUri,
     })
-    assert.match(galleryBundle.contents[0].text, /data:image\/png;base64,/)
-    assert.match(galleryBundle.contents[0].text, /data:model\/gltf-binary;base64,/)
+    assert.doesNotMatch(galleryBundle.contents[0].text, /data:(?:image\/png|model\/gltf-binary);base64,/)
+    assert.match(galleryBundle.contents[0].text, /__THREEJS_EDITOR_REGISTER_INLINE_ASSET__/)
     assert.match(galleryBundle.contents[0].text, /DefaultLoadingManager\.setURLModifier/)
     assert.match(galleryBundle.contents[0].text, /\.hero \{ background: var\(/)
     assert.match(galleryBundle.contents[0].text, /\.commented \{ background: var\(/)

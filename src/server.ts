@@ -53,6 +53,7 @@ import {
 } from './m7-runtime.js'
 import {
   WorkspaceStore,
+  RESOURCE_CHUNK_BYTES,
   workspaceCapabilitiesSchema,
   workspaceChangeSchema,
   workspaceFileSchema,
@@ -67,6 +68,8 @@ import {
 const RESOURCE_URI = 'ui://threejs-editor/app'
 const BUILD_RESOURCE_TEMPLATE =
   'threejs-build://runtime/{projectId}/{buildId}/{artifact}'
+const ASSET_RESOURCE_TEMPLATE =
+  'threejs-asset://runtime/{projectId}/{revision}/{sha256}/{chunk}'
 const DSH_WORKSPACE_META_KEY = 'ai.deepseek.dsh/workspace'
 const DSH_SESSION_META_KEY = 'ai.deepseek.dsh/session'
 const MAX_RUNTIME_EDITOR_OBJECTS = 2_048
@@ -158,6 +161,7 @@ const playerActionSchema = z.discriminatedUnion('type', [
   }),
 ])
 const runtimeEvidenceIdentitySchema = runtimeIdentitySchema.extend({
+  buildId: z.string().regex(/^[a-f0-9]{64}$/),
   target: runtimeTargetSchema,
 })
 const runtimeLogEntrySchema = z.object({
@@ -178,6 +182,9 @@ const runtimeEvidenceSchema = z.discriminatedUnion('kind', [
     width: z.number().int().positive().max(1_024),
     height: z.number().int().positive().max(1_024),
     frame: z.number().int().nonnegative(),
+    deterministic: z.boolean().optional(),
+    qualityTier: z.string().min(1).max(80).optional(),
+    debugMode: z.string().min(1).max(80).optional(),
     capturedAt: z.string().datetime(),
   }),
   z.object({
@@ -244,6 +251,9 @@ const buildOutputSchema = z.object({
     sha256: revisionSchema,
     size: z.number().int().nonnegative(),
     mediaType: z.string(),
+    external: z.literal(true).optional(),
+    resourceUri: z.string().optional(),
+    chunks: z.number().int().positive().optional(),
   })).optional(),
   bundleUri: z.string().optional(),
   sourceMapUri: z.string().optional(),
@@ -275,6 +285,7 @@ const workspaceViewSchema = z.object({
   entry: workspacePathSchema,
   backend: z.enum(['webgl', 'webgpu', 'raw-webgpu']),
   debugModes: z.array(z.string()),
+  qualityTiers: z.array(z.string()),
   parameters: z.array(workspaceParameterSchema),
   capabilities: workspaceCapabilitiesSchema.optional(),
   files: z.array(workspaceFileSchema),
@@ -452,6 +463,7 @@ const editorChangeSchema = z.object({
 const workspaceEditorStateSchema = z.object({
   schemaVersion: z.literal(1),
   operations: z.array(editorCommandSchema).max(4_096),
+  qualityTier: z.string().min(1).max(80).optional(),
   recentChanges: z.array(z.object({
     source: z.enum(['human', 'ai', 'unknown']),
     operation: editorCommandSchema,
@@ -558,6 +570,7 @@ function workspaceView(snapshot: WorkspaceSnapshot): z.infer<typeof workspaceVie
     entry: snapshot.manifest.entry,
     backend: snapshot.manifest.backend,
     debugModes: snapshot.manifest.runtime.debugModes,
+    qualityTiers: snapshot.manifest.runtime.qualityTiers,
     parameters: snapshot.manifest.runtime.parameters,
     ...snapshot.manifest.runtime.capabilities === undefined
       ? {}
@@ -577,11 +590,24 @@ function buildResourceUri(
   return `threejs-build://runtime/${projectId}/${buildId}/${artifact}`
 }
 
+function assetResourceUri(projectId: string, revision: string, sha256: string): string {
+  return `threejs-asset://runtime/${projectId}/${revision}/${sha256}`
+}
+
 function buildView(build: WorkspaceBuild): z.infer<typeof buildOutputSchema> {
   if (build.status === 'failed') return build
   const { bundle: _bundle, sourceMap: _sourceMap, ...summary } = build
   return {
     ...summary,
+    assets: summary.assets.map(asset => ({
+      ...asset,
+      ...asset.external
+        ? {
+            resourceUri: assetResourceUri(build.projectId, build.revision, asset.sha256),
+            chunks: Math.ceil(asset.size / RESOURCE_CHUNK_BYTES),
+          }
+        : {},
+    })),
     bundleUri: buildResourceUri(build.projectId, build.buildId, 'bundle.js'),
     sourceMapUri: buildResourceUri(build.projectId, build.buildId, 'bundle.js.map'),
   }
@@ -1028,7 +1054,7 @@ function viewHtml(script: string): string {
     button[aria-pressed=true]{border-color:rgb(99 184 255 / .48);background:var(--accent-soft);box-shadow:inset 0 0 18px rgb(99 184 255 / .08),0 0 22px rgb(99 184 255 / .09);color:#f4faff}
     button:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     .icon{width:32px;padding:0;font-size:15px}
-    .runtime-debug{height:32px;max-width:112px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface-control);color:var(--text);font:11px/1.2 "SFMono-Regular",Consolas,monospace}
+    .runtime-debug,.runtime-quality{height:32px;max-width:112px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface-control);color:var(--text);font:11px/1.2 "SF Pro Display","Avenir Next",ui-sans-serif,system-ui,sans-serif}
     .save{min-width:52px;border-color:rgb(132 202 255 / .9);background:var(--accent);box-shadow:inset 0 1px rgb(255 255 255 / .42),0 7px 22px rgb(38 137 218 / .26);color:var(--accent-ink)}
     .save:hover:not(:disabled){border-color:#8fd0ff;background:#8fd0ff;box-shadow:inset 0 1px rgb(255 255 255 / .5),0 9px 28px rgb(38 137 218 / .36);color:var(--accent-ink)}
     .asset-input{display:none}
@@ -1223,7 +1249,7 @@ function viewHtml(script: string): string {
       .topbar{gap:5px;padding-inline:8px}
       .toolbar{gap:3px}
       .toolbar .icon{width:29px}
-      .runtime-debug{max-width:84px}
+      .runtime-debug,.runtime-quality{max-width:84px}
       .hierarchy{left:8px;width:150px}
       .inspector{right:8px;width:210px}
       .status{left:168px;max-width:180px}
@@ -1274,7 +1300,8 @@ function viewHtml(script: string): string {
         <input class="asset-input" type="file" data-asset-input accept=".glb,.png,.jpg,.jpeg,model/gltf-binary,image/png,image/jpeg">
         <button class="icon" type="button" data-export aria-label="Export project" title="Export project" disabled>↓</button>
         <span class="toolbar-divider" aria-hidden="true"></span>
-        <select class="runtime-debug" data-runtime-debug aria-label="Runtime debug mode" title="Runtime debug mode" hidden></select>
+        <select class="runtime-quality" data-runtime-quality aria-label="画质" title="画质" hidden></select>
+        <select class="runtime-debug" data-runtime-debug aria-label="画面检查" title="画面检查" hidden></select>
         <button class="icon" type="button" data-play aria-label="Play" title="Play" disabled>▶</button>
         <button class="icon" type="button" data-stop aria-label="Stop" title="Stop" disabled>■</button>
         <button class="icon" type="button" data-active-grant aria-label="Allow one live validation" title="Allow one live validation" disabled>A</button>
@@ -1657,6 +1684,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       revision: revisionSchema,
+      buildId: buildIdSchema.optional(),
       runId: runIdSchema,
       nonce: nonceSchema.optional(),
       previousRevision: revisionSchema.optional(),
@@ -1664,15 +1692,17 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     outputSchema: z.object({
       projectId: projectIdSchema,
       revision: revisionSchema,
+      buildId: buildIdSchema.optional(),
       runId: z.string().uuid(),
       nonce: nonceSchema.optional(),
       evidenceToken: nonceSchema,
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, revision, runId, nonce, previousRevision }, { signal, _meta }) => {
+  }, async ({ projectId, revision, buildId, runId, nonce, previousRevision }, { signal, _meta }) => {
     const evidenceToken = await workspaces.registerRuntimeRun(
       projectId,
       revision,
+      buildId,
       runId,
       nonce,
       runtimeOwner(_meta, false),
@@ -1682,6 +1712,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     return textResult(`Registered Runtime run ${runId}.`, {
       projectId,
       revision,
+      buildId,
       runId,
       nonce,
       evidenceToken,
@@ -1799,6 +1830,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       format: z.enum(['png', 'jpeg']).default('png'),
       maxWidth: z.number().int().min(64).max(1_024).default(768),
       maxHeight: z.number().int().min(64).max(1_024).default(768),
+      deterministic: z.boolean().default(true),
       timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000).default(20_000),
     },
     outputSchema: runtimeEvidenceSchema.options[0].omit({
@@ -1812,6 +1844,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     format,
     maxWidth,
     maxHeight,
+    deterministic,
     timeoutMs,
     ...identity
   }, { _meta, signal }) => {
@@ -1822,7 +1855,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         runtimeOwner(_meta)!,
         'capture-frame',
         target,
-        { format, maxWidth, maxHeight },
+        { format, maxWidth, maxHeight, deterministic },
         timeoutMs,
         signal,
       ),
@@ -2117,6 +2150,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             ...editorState.operations,
             ...operations,
           ]),
+          ...editorState.qualityTier === undefined
+            ? {}
+            : { qualityTier: editorState.qualityTier },
           recentChanges: [
             ...(editorState.recentChanges ?? editorState.operations.map(operation => ({
               source: 'unknown' as const,
@@ -2630,6 +2666,36 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     },
   )
 
+  server.registerResource(
+    'workspace-revision-asset',
+    new ResourceTemplate(ASSET_RESOURCE_TEMPLATE, { list: undefined }),
+    {
+      title: 'Three.js Workspace revision asset',
+      description: 'A hash-verified binary chunk bound to one exact project revision.',
+    },
+    async (uri): Promise<ReadResourceResult> => {
+      const [projectIdValue, revisionValue, sha256Value, chunkValue] =
+        uri.pathname.split('/').filter(Boolean)
+      const projectId = projectIdSchema.parse(projectIdValue)
+      const revision = revisionSchema.parse(revisionValue)
+      const sha256 = revisionSchema.parse(sha256Value)
+      const chunk = z.coerce.number().int().nonnegative().parse(chunkValue)
+      const resource = await workspaces.readResourceChunk(
+        projectId,
+        revision,
+        sha256,
+        chunk,
+      )
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: resource.mediaType,
+          blob: resource.bytes.toString('base64'),
+        }],
+      }
+    },
+  )
+
   server.registerResource('m5-runtime-module-graph', M5_RUNTIME_RESOURCE_URI, {
     title: 'M5 isolated runtime module graph',
     description: 'A deterministic two-module WebGL2 and WebGPU capability fixture.',
@@ -2687,12 +2753,21 @@ const { values } = parseArgs({
     root: { type: 'string' },
     'workspace-root': { type: 'string', multiple: true },
     workspace: { type: 'string', multiple: true },
+    'workspace-max-files': { type: 'string' },
+    'workspace-max-file-bytes': { type: 'string' },
+    'workspace-max-total-bytes': { type: 'string' },
   },
   strict: true,
 })
 const root = values.root ?? process.env.THREEJS_EDITOR_PROJECT_ROOT
 if (root === undefined || root === '') {
   throw new Error('project root is required: pass --root or THREEJS_EDITOR_PROJECT_ROOT')
+}
+const positiveInteger = (name: string, value: string | undefined): number | undefined => {
+  if (value === undefined) return undefined
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`)
+  return parsed
 }
 
 await createServer(
@@ -2701,5 +2776,16 @@ await createServer(
     root,
     values['workspace-root'] ?? [],
     (values.workspace ?? []).map(workspaceRegistration),
+    {
+      maxFiles: positiveInteger('workspace-max-files', values['workspace-max-files']),
+      maxFileBytes: positiveInteger(
+        'workspace-max-file-bytes',
+        values['workspace-max-file-bytes'],
+      ),
+      maxTotalBytes: positiveInteger(
+        'workspace-max-total-bytes',
+        values['workspace-max-total-bytes'],
+      ),
+    },
   ),
 ).connect(new StdioServerTransport())

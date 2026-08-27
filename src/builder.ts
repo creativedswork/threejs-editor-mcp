@@ -19,15 +19,31 @@ import {
 import ts from 'typescript'
 import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
 
-export const BUILDER_VERSION = 'm8-multipass-runtime-v1'
-export const DEPENDENCY_PROFILE = `three@0.185.1+esbuild@${esbuildVersion}`
+export const BUILDER_VERSION = 'm9-resource-pipeline-v1'
+export const PINNED_RUNTIME_DEPENDENCIES = {
+  three: '0.185.1',
+  postprocessing: '6.37.4',
+  'three-stdlib': '2.36.0',
+  'astronomy-engine': '2.1.19',
+  '@petamoriken/float16': '3.9.2',
+} as const
+export const DEPENDENCY_PROFILE = [
+  ...Object.entries(PINNED_RUNTIME_DEPENDENCIES).map(([name, version]) => `${name}@${version}`),
+  `esbuild@${esbuildVersion}`,
+].join('+')
 
 const require = createRequire(import.meta.url)
 const threeRoot = dirname(dirname(require.resolve('three/webgpu')))
+const dependencyEntries = new Map(
+  Object.keys(PINNED_RUNTIME_DEPENDENCIES)
+    .filter(name => name !== 'three')
+    .map(name => [name, require.resolve(name)]),
+)
 const runtimeEntry = 'threejs-editor:runtime'
 const workspaceNamespace = 'threejs-editor-workspace'
 const runtimeNamespace = 'threejs-editor-runtime'
 const MAX_GENERATED_SOURCE_BYTES = 64 * 1024 * 1024
+export const MAX_INLINE_ASSET_BYTES = 256 * 1024
 const resolveExtensions = [
   '.ts',
   '.tsx',
@@ -63,6 +79,7 @@ export interface BuildAsset {
   sha256: string
   size: number
   mediaType: string
+  external?: true
 }
 
 interface BuildBase {
@@ -120,6 +137,8 @@ function dependencyPath(specifier: string): string | undefined {
   if (specifier === 'three') return join(threeRoot, 'build', 'three.module.js')
   if (specifier === 'three/webgpu') return join(threeRoot, 'build', 'three.webgpu.js')
   if (specifier === 'three/tsl') return join(threeRoot, 'build', 'three.tsl.js')
+  const dependency = dependencyEntries.get(specifier)
+  if (dependency !== undefined) return dependency
   const prefix = 'three/addons/'
   if (!specifier.startsWith(prefix)) return undefined
   const suffix = specifier.slice(prefix.length)
@@ -169,7 +188,7 @@ function loaderFor(file: BuildFile): Loader {
     || extension === '.frag'
     || extension === '.wgsl'
     || extension === '.tsl') return 'text'
-  if (!file.text) return 'dataurl'
+  if (!file.text) return 'js'
   return 'text'
 }
 
@@ -198,7 +217,7 @@ interface ModuleSpecifier {
 }
 
 const ASSET_REQUEST =
-  /^(?:\/(?:dev|skills)\/|\.\.?\/|assets\/)[^"'`$?#]+\.(?:gif|glb|jpe?g|png|webp)(?:[?#][^"'`\s]*)?$/i
+  /^(?:(?:\/(?:dev|skills)\/|\.\.?\/|assets\/)[^"'`$?#]+\.(?:avif|basis|bin|exr|gif|glb|gltf|hdr|jpe?g|ktx2|png|webp)|\/(?:dev|skills)\/[^"'`$?#]+\/assets\/[^"'`$?#]+)(?:[?#][^"'`\s]*)?$/i
 
 function scriptKind(path: string): ts.ScriptKind {
   const extension = extname(path).toLowerCase()
@@ -404,10 +423,6 @@ function moduleSpecifierRanges(source: string, path: string): Array<[number, num
     .map(specifier => [specifier.start, specifier.end])
 }
 
-function assetDataUrl(file: BuildFile): string {
-  return `data:${file.mediaType};base64,${Buffer.from(file.bytes).toString('base64')}`
-}
-
 class GeneratedSourceLimitError extends Error {}
 
 function assetAlias(importer: string, request: string, length = request.length): string {
@@ -456,20 +471,25 @@ function assetLiteralAlias(
 
 interface RuntimeAssets {
   aliases: Array<[string, string]>
-  data: Array<[string, string]>
+  css: Array<[string, string]>
+  inline: Array<[string, string, string]>
 }
 
 function runtimeAssets(files: Map<string, BuildFile>): RuntimeAssets {
   const aliases = new Map<string, string>()
-  const data = new Map<string, string>()
-  const keys = new Map<string, string>()
+  const css = new Map<string, string>()
+  const inline = new Map<string, [string, string]>()
   for (const file of files.values()) {
     if (file.text) continue
     const path = `/${file.path}`
-    const key = String(keys.size)
-    keys.set(path, key)
-    aliases.set(path, key)
-    data.set(key, assetDataUrl(file))
+    aliases.set(path, file.sha256)
+    css.set(cssAssetVariable(file.path), file.sha256)
+    if (file.bytes.byteLength <= MAX_INLINE_ASSET_BYTES) {
+      inline.set(
+        file.sha256,
+        [file.mediaType, Buffer.from(file.bytes).toString('base64')],
+      )
+    }
   }
   for (const file of files.values()) {
     if (!file.text
@@ -488,13 +508,14 @@ function runtimeAssets(files: Map<string, BuildFile>): RuntimeAssets {
           request,
           source.slice(literal.start + 1, literal.end - 1),
         )
-        aliases.set(alias.value, keys.get(`/${asset.path}`)!)
+        aliases.set(alias.value, asset.sha256)
       }
     }
   }
   return {
     aliases: [...aliases],
-    data: [...data],
+    css: [...css],
+    inline: [...inline].map(([hash, [mediaType, base64]]) => [hash, mediaType, base64]),
   }
 }
 
@@ -509,7 +530,6 @@ function rewriteAssetUrls(
 ): string {
   const css = extname(importer).toLowerCase() === '.css'
   if (css) {
-    const definitions = new Map<string, string>()
     let rewritten = ''
     let offset = 0
     for (const asset of assetCssUrls(source)) {
@@ -517,18 +537,12 @@ function rewriteAssetUrls(
       const file = path === undefined ? undefined : files.get(path)
       if (file === undefined || file.text) continue
       const variable = cssAssetVariable(file.path)
-      if (!definitions.has(variable)) definitions.set(variable, assetDataUrl(file))
       rewritten += source.slice(offset, asset.start)
         + `var(${variable})`
       offset = asset.end
     }
     rewritten += source.slice(offset)
-    if (definitions.size === 0) return rewritten
-    return `${rewritten}\n:is(:root,:host){${
-      [...definitions]
-        .map(([variable, value]) => `${variable}:url(${JSON.stringify(value)});`)
-        .join('')
-    }}`
+    return rewritten
   }
   const ranges = moduleSpecifierRanges(source, importer)
   let rewritten = ''
@@ -567,7 +581,20 @@ function runtimeSource(input: BuildWorkspaceInput, files: Map<string, BuildFile>
       ? `import editorState from ${JSON.stringify(`/${WORKSPACE_EDITOR_STATE_PATH}`)}`
       : 'const editorState = { schemaVersion: 1, operations: [] }',
     `const assetAliases = new Map(${JSON.stringify(assets.aliases)})`,
-    `const assetData = new Map(${JSON.stringify(assets.data)})`,
+    `const assetCss = new Map(${JSON.stringify(assets.css)})`,
+    'const assetData = globalThis.__THREEJS_EDITOR_ASSETS__',
+    'if (!(assetData instanceof Map)) throw new Error("Runtime assets are unavailable")',
+    ...assets.inline.length === 0
+      ? []
+      : [
+          'const registerInlineAsset = globalThis.__THREEJS_EDITOR_REGISTER_INLINE_ASSET__',
+          'if (typeof registerInlineAsset !== "function") throw new Error("Runtime asset registration is unavailable")',
+          `for (const [hash, mediaType, base64] of ${JSON.stringify(assets.inline)}) registerInlineAsset(hash, mediaType, base64)`,
+        ],
+    'for (const [name, hash] of assetCss) {',
+    '  const value = assetData.get(hash)',
+    '  if (value !== undefined) document.documentElement.style.setProperty(name, `url(${JSON.stringify(value)})`)',
+    '}',
     'const resolveAsset = path => {',
     '  const value = String(path)',
     '  const suffix = value.search(/[?#]/)',
@@ -588,15 +615,15 @@ function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): P
     throw new GeneratedSourceLimitError('generated build input exceeds 64 MiB')
   }
   for (const file of files.values()) {
-    const content = file.text && rewritesAssetLiterals(file.path)
-      ? rewriteAssetUrls(new TextDecoder().decode(file.bytes), file.path, files)
-      : file.bytes
+    const content = file.text
+      ? rewritesAssetLiterals(file.path)
+        ? rewriteAssetUrls(new TextDecoder().decode(file.bytes), file.path, files)
+        : file.bytes
+      : `export default globalThis.__THREEJS_EDITOR_ASSETS__.get(${JSON.stringify(file.sha256)})`
     contents.set(file.path, content)
     generatedBytes += typeof content === 'string'
       ? Buffer.byteLength(content)
-      : file.text
-        ? file.bytes.byteLength
-        : Buffer.byteLength(assetDataUrl(file))
+      : file.bytes.byteLength
     if (generatedBytes > MAX_GENERATED_SOURCE_BYTES) {
       throw new GeneratedSourceLimitError('generated build input exceeds 64 MiB')
     }
@@ -605,14 +632,19 @@ function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): P
     name: 'threejs-editor-vfs',
     setup(builder) {
       builder.onResolve({ filter: /^three(?:\/|$)/ }, args => {
-        if (args.namespace !== workspaceNamespace && args.namespace !== runtimeNamespace) {
-          return undefined
-        }
         const path = dependencyPath(args.path)
         if (path === undefined) {
           return { errors: [{ text: `unsupported Three.js import ${JSON.stringify(args.path)}` }] }
         }
         return { path }
+      })
+      builder.onResolve({
+        filter: /^(?:@petamoriken\/float16|astronomy-engine|postprocessing|three-stdlib)$/,
+      }, args => {
+        if (args.namespace !== workspaceNamespace && args.namespace !== runtimeNamespace) {
+          return undefined
+        }
+        return { path: dependencyEntries.get(args.path) }
       })
       builder.onResolve({ filter: /.*/ }, args => {
         if (args.kind === 'entry-point' && args.path === runtimeEntry) {
@@ -624,7 +656,7 @@ function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): P
         if (!args.path.startsWith('.') && !args.path.startsWith('/')) {
           return {
             errors: [{
-              text: `dependency ${JSON.stringify(args.path)} is not in the pinned M7 profile`,
+              text: `dependency ${JSON.stringify(args.path)} is not in the pinned M9 profile`,
             }],
           }
         }
@@ -669,6 +701,10 @@ function safeDiagnosticFile(file: string): string {
   const marker = '/node_modules/three/'
   const index = normalized.lastIndexOf(marker)
   if (index !== -1) return `dependency://three/${normalized.slice(index + marker.length)}`
+  const dependencyIndex = normalized.lastIndexOf('/node_modules/')
+  if (dependencyIndex !== -1) {
+    return `dependency://${normalized.slice(dependencyIndex + '/node_modules/'.length)}`
+  }
   if (isAbsolute(file)) return `dependency://three/${basename(file)}`
   return normalized.replace(/^(\.\.\/)+/, '')
 }
@@ -701,6 +737,10 @@ function safeSource(source: string): string {
   const marker = '/node_modules/three/'
   const index = normalized.lastIndexOf(marker)
   if (index !== -1) return `dependency://three/${normalized.slice(index + marker.length)}`
+  const dependencyIndex = normalized.lastIndexOf('/node_modules/')
+  if (dependencyIndex !== -1) {
+    return `dependency://${normalized.slice(dependencyIndex + '/node_modules/'.length)}`
+  }
   if (normalized.includes('/.pnpm/three@')) {
     const nested = normalized.lastIndexOf('/node_modules/three/')
     if (nested !== -1) return `dependency://three/${normalized.slice(nested + 20)}`
@@ -773,6 +813,12 @@ export async function buildWorkspace(input: BuildWorkspaceInput): Promise<Worksp
       format: 'esm',
       platform: 'browser',
       target: 'es2022',
+      tsconfigRaw: {
+        compilerOptions: {
+          experimentalDecorators: true,
+          useDefineForClassFields: false,
+        },
+      },
       treeShaking: true,
       sourcemap: 'external',
       sourcesContent: true,
@@ -806,6 +852,7 @@ export async function buildWorkspace(input: BuildWorkspaceInput): Promise<Worksp
           sha256: file.sha256,
           size: file.bytes.byteLength,
           mediaType: file.mediaType,
+          ...file.bytes.byteLength > MAX_INLINE_ASSET_BYTES ? { external: true as const } : {},
         }))
         .sort((left, right) => left.path.localeCompare(right.path)),
     }

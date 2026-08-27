@@ -25,6 +25,10 @@
     "m8Cases": [
       "threejs-temporal-surfaces/touch-history-frost",
       "threejs-water-optics/interactive-pool-volume"
+    ],
+    "m9Cases": [
+      "threejs-spectral-ocean/spectral-cascade-ocean",
+      "threejs-volumetric-clouds/weather-volume-clouds"
     ]
   },
   "m5Fixtures": {

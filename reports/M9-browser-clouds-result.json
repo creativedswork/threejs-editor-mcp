@@ -1,0 +1,249 @@
+{
+  "corpusCommit": "98453747cc0678f6a5d910f38d7483596a5f9a40",
+  "browser": "149.0.7827.55",
+  "clouds": {
+    "projectId": "example-ca7d3a00de72f03730e2a890e9985bcdcc5249908479704a8b45d212",
+    "revision": "9e13cb7addcadb89ecec8c8e63ad7e6befa61e734401e9e123334fdcd11042c4",
+    "buildId": "6c46f24500b36b0c20a25e964cd1bacd152ba4e653de6ae21ff175637a398dac",
+    "temporalMetrics": {
+      "frame": 12,
+      "mode": "run",
+      "cameraPosition": [
+        2505878.438671552,
+        2179.9648898377877,
+        5847326.702598899
+      ],
+      "cameraQuaternion": [
+        0.49219605433353397,
+        0.6002877351409895,
+        0.5340404776295113,
+        0.33496036689591413
+      ],
+      "cameraUp": [
+        0.3907311284892737,
+        0,
+        0.9205048534524403
+      ],
+      "cameraZoom": 1,
+      "controlsTarget": [
+        0,
+        0,
+        0
+      ],
+      "editorObjectCount": 0,
+      "selectedScreenPosition": null,
+      "selectedBoundsCenter": null,
+      "gizmoWorldPosition": [
+        0,
+        0,
+        0
+      ],
+      "transformAxis": null,
+      "transformDragging": false,
+      "inputOwner": "runtime",
+      "runtimeInputListeners": 7,
+      "runtimeInputEvents": {},
+      "capturedPointers": 0,
+      "rendererCanvasFacade": true,
+      "resizeCount": 1,
+      "devicePixelRatio": 1,
+      "clientSize": [
+        1280,
+        800
+      ],
+      "drawingBufferSize": [
+        1280,
+        800
+      ],
+      "gpuTextures": 41,
+      "gpuGeometries": 1,
+      "gpuPrograms": 14,
+      "rendererCount": 1,
+      "secureContext": true,
+      "webgpuApi": true,
+      "rendererBackend": "WebGLRenderer",
+      "renderPath": "example-render",
+      "buildId": "6c46f24500b36b0c20a25e964cd1bacd152ba4e653de6ae21ff175637a398dac",
+      "qualityTier": "default",
+      "debugMode": "final",
+      "gpuRenderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
+      "gpuRendererUnmasked": true,
+      "draws": 1,
+      "triangles": 1,
+      "tier": "128^3 shape / 32^3 detail / temporal upscale",
+      "controls": "terrain-safe surface orbit controls"
+    },
+    "nativeMetrics": {
+      "frame": 98,
+      "mode": "run",
+      "cameraPosition": [
+        2505878.438671552,
+        2179.9648898377877,
+        5847326.702598899
+      ],
+      "cameraQuaternion": [
+        0.49219605433353397,
+        0.6002877351409895,
+        0.5340404776295113,
+        0.33496036689591413
+      ],
+      "cameraUp": [
+        0.3907311284892737,
+        0,
+        0.9205048534524403
+      ],
+      "cameraZoom": 1,
+      "controlsTarget": [
+        0,
+        0,
+        0
+      ],
+      "editorObjectCount": 0,
+      "selectedScreenPosition": null,
+      "selectedBoundsCenter": null,
+      "gizmoWorldPosition": [
+        0,
+        0,
+        0
+      ],
+      "transformAxis": null,
+      "transformDragging": false,
+      "inputOwner": "runtime",
+      "runtimeInputListeners": 7,
+      "runtimeInputEvents": {},
+      "capturedPointers": 0,
+      "rendererCanvasFacade": true,
+      "resizeCount": 1,
+      "devicePixelRatio": 1,
+      "clientSize": [
+        1280,
+        800
+      ],
+      "drawingBufferSize": [
+        1280,
+        800
+      ],
+      "gpuTextures": 41,
+      "gpuGeometries": 1,
+      "gpuPrograms": 15,
+      "rendererCount": 1,
+      "secureContext": true,
+      "webgpuApi": true,
+      "rendererBackend": "WebGLRenderer",
+      "renderPath": "example-render",
+      "buildId": "6c46f24500b36b0c20a25e964cd1bacd152ba4e653de6ae21ff175637a398dac",
+      "qualityTier": "default",
+      "debugMode": "native-resolution",
+      "gpuRenderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
+      "gpuRendererUnmasked": true,
+      "draws": 1,
+      "triangles": 1,
+      "tier": "128^3 shape / 32^3 detail / native",
+      "controls": "terrain-safe surface orbit controls"
+    },
+    "noPostMetrics": {
+      "frame": 180,
+      "mode": "run",
+      "cameraPosition": [
+        2505878.438671552,
+        2179.9648898377877,
+        5847326.702598899
+      ],
+      "cameraQuaternion": [
+        0.49219605433353397,
+        0.6002877351409895,
+        0.5340404776295113,
+        0.33496036689591413
+      ],
+      "cameraUp": [
+        0.3907311284892737,
+        0,
+        0.9205048534524403
+      ],
+      "cameraZoom": 1,
+      "controlsTarget": [
+        0,
+        0,
+        0
+      ],
+      "editorObjectCount": 0,
+      "selectedScreenPosition": null,
+      "selectedBoundsCenter": null,
+      "gizmoWorldPosition": [
+        0,
+        0,
+        0
+      ],
+      "transformAxis": null,
+      "transformDragging": false,
+      "inputOwner": "runtime",
+      "runtimeInputListeners": 7,
+      "runtimeInputEvents": {},
+      "capturedPointers": 0,
+      "rendererCanvasFacade": true,
+      "resizeCount": 1,
+      "devicePixelRatio": 1,
+      "clientSize": [
+        1280,
+        800
+      ],
+      "drawingBufferSize": [
+        1280,
+        800
+      ],
+      "gpuTextures": 38,
+      "gpuGeometries": 1,
+      "gpuPrograms": 15,
+      "rendererCount": 1,
+      "secureContext": true,
+      "webgpuApi": true,
+      "rendererBackend": "WebGLRenderer",
+      "renderPath": "direct-renderer",
+      "buildId": "6c46f24500b36b0c20a25e964cd1bacd152ba4e653de6ae21ff175637a398dac",
+      "qualityTier": "default",
+      "debugMode": "no-post",
+      "gpuRenderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
+      "gpuRendererUnmasked": true,
+      "draws": 0,
+      "triangles": 0,
+      "tier": "128^3 shape / 32^3 detail / temporal upscale",
+      "controls": "terrain-safe surface orbit controls"
+    },
+    "noPostDifference": {
+      "changedRatio": 0.40712890625,
+      "meanAbsoluteDifference": 20.2994140625
+    },
+    "pipelineMetrics": {
+      "effectComposer": true,
+      "data3DTextureLoader": true,
+      "volumeAssets": 3,
+      "gpuTextures": 41,
+      "temporal": "128^3 shape / 32^3 detail / temporal upscale",
+      "native": "128^3 shape / 32^3 detail / native"
+    },
+    "pixels": {
+      "sampled": 10240,
+      "lit": 10240,
+      "colors": 5259
+    },
+    "deterministicDigest": "4cf2d27615dee2e6d3740795e54ee65f8b8a4f92f4df0e9c3fadc202fd33ae41",
+    "transfer": {
+      "bytes": 7915297,
+      "chunks": 31
+    },
+    "contextLoss": {
+      "message": "WebGL context lost; restart the Runtime to recover",
+      "code": "webgl-context-lost",
+      "recoverable": true,
+      "fatal": true
+    },
+    "recovery": {
+      "previousRunId": "f13e15cd-a86f-4784-8d16-1dd01b6289f4",
+      "runId": "859b9342-7617-4399-a2c7-a0a8f8f6b031",
+      "buildId": "6c46f24500b36b0c20a25e964cd1bacd152ba4e653de6ae21ff175637a398dac",
+      "ready": true
+    },
+    "contactSheet": "/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp/reports/assets/m9-p5-contact-sheet.png"
+  },
+  "browserProblems": []
+}

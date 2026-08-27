@@ -562,7 +562,7 @@ test('M8.1 rejects invalid capability references, extension paths, and permissio
       },
     })
     assert.equal(built.structuredContent.status, 'failed')
-    assert.ok(built.structuredContent.diagnostics.some(item => /pinned M7 profile/.test(item.message)))
+    assert.ok(built.structuredContent.diagnostics.some(item => /pinned M9 profile/.test(item.message)))
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
@@ -597,9 +597,15 @@ test('M8.1 isolates Runtime identities and control leases by Harness Session', a
       name: 'open_editor',
       arguments: { projectId: 'game' },
     })
+    const built = await client.callTool({
+      name: 'build_project',
+      arguments: { projectId: 'game', revision: opened.structuredContent.revision },
+    })
+    assert.equal(built.structuredContent.status, 'ready')
     const runtimeA = {
       projectId: 'game',
       revision: opened.structuredContent.revision,
+      buildId: built.structuredContent.buildId,
       runId: '22222222-2222-4222-8222-222222222222',
       nonce: '33333333-3333-4333-8333-333333333333',
     }
@@ -722,9 +728,15 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       name: 'open_editor',
       arguments: { projectId: 'game' },
     })
+    const built = await client.callTool({
+      name: 'build_project',
+      arguments: { projectId: 'game', revision: opened.structuredContent.revision },
+    })
+    assert.equal(built.structuredContent.status, 'ready')
     let runtime = {
       projectId: 'game',
       revision: opened.structuredContent.revision,
+      buildId: built.structuredContent.buildId,
       runId: '22222222-2222-4222-8222-222222222222',
       nonce: '33333333-3333-4333-8333-333333333333',
     }
@@ -854,6 +866,44 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
     })
     assert.equal(forgedEvidence.isError, true)
     assert.match(forgedEvidence.content[0].text, /evidence identity is stale or foreign/)
+    const forgedBuild = await client.callTool({
+      name: 'report_runtime_evidence',
+      arguments: {
+        ...runtime,
+        commandId: command.commandId,
+        result: {
+          kind: 'runtime-logs',
+          runtime: { ...runtime, buildId: '0'.repeat(64), target: 'validation' },
+          evidenceId: '44444444-4444-4444-8444-444444444444',
+          evidenceToken,
+          entries: [],
+          nextCursor: 0,
+          truncated: false,
+        },
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(forgedBuild.isError, true)
+    assert.match(forgedBuild.content[0].text, /evidence identity is stale or foreign/)
+    const { buildId: _buildId, ...runtimeWithoutBuild } = runtime
+    const missingBuild = await client.callTool({
+      name: 'report_runtime_evidence',
+      arguments: {
+        ...runtime,
+        commandId: command.commandId,
+        result: {
+          kind: 'runtime-logs',
+          runtime: { ...runtimeWithoutBuild, target: 'validation' },
+          evidenceId: '44444444-4444-4444-8444-444444444444',
+          evidenceToken,
+          entries: [],
+          nextCursor: 0,
+          truncated: false,
+        },
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(missingBuild.isError, true)
     const mismatchedEvidence = await client.callTool({
       name: 'report_runtime_evidence',
       arguments: {
@@ -1361,7 +1411,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       },
     })
     const previousRevision = runtime.revision
-    runtime = { ...runtime, revision: changed.structuredContent.revision }
+    runtime = { ...runtime, revision: changed.structuredContent.revision, buildId: undefined }
     const advanced = await client.callTool({
       name: 'register_runtime_run',
       arguments: { ...runtime, previousRevision },
