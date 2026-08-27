@@ -250,6 +250,10 @@ async function readyComposer() {
 
   if (hasConfiguredWorkspace()) {
     const workspaceName = basename(workspacePath)
+    const workspaceRow = page.getByRole('treeitem')
+      .filter({ hasText: workspaceName })
+      .first()
+    await workspaceRow.hover({ timeout: 30_000 })
     await page.getByRole('button', {
       name: `在“${workspaceName}”中新建会话`,
       exact: true,
