@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   m7BootstrapHtml,
@@ -37,6 +38,51 @@ test('emits a syntactically valid Runtime bootstrap script', () => {
   assert.doesNotThrow(() => new Function(script))
 })
 
+test('waits for a laid out canvas before publishing Runtime ready', () => {
+  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  const layoutGuard = script.indexOf('canvas.clientWidth === 0 || canvas.clientHeight === 0')
+  assert.ok(layoutGuard >= 0)
+  assert.ok(layoutGuard < script.indexOf('current.frame += 1', layoutGuard))
+  assert.ok(layoutGuard < script.indexOf("emit(runId, nonce, 'ready'", layoutGuard))
+})
+
+test('retries the first Runtime frame when its canvas becomes laid out', () => {
+  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  const observer = script.indexOf('current.layoutObserver = new ResizeObserver')
+  assert.ok(observer >= 0)
+  assert.ok(script.indexOf('current.frame !== 0', observer) > observer)
+  assert.ok(script.indexOf('cancelAnimationFrame(current.animation)', observer) > observer)
+  assert.ok(script.indexOf('current.renderFrame(performance.now())', observer) > observer)
+  assert.ok(script.includes('current.layoutObserver?.disconnect()'))
+})
+
+test('waits for canvas layout before creating the WebGL renderer', () => {
+  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  const wait = script.indexOf('await new Promise(resolve => {')
+  const renderer = script.indexOf('new THREE.WebGLRenderer(options)')
+  assert.ok(wait >= 0)
+  assert.ok(renderer > wait)
+  assert.ok(script.includes('starting.cancelLayoutWait?.()'))
+})
+
+test('keeps the Runtime frame visible while replacing an active run', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const stop = source.slice(
+    source.indexOf('async function stopM7Runtime('),
+    source.indexOf('async function startM7Runtime('),
+  )
+  const start = source.slice(
+    source.indexOf('async function startM7Runtime('),
+    source.indexOf('function queueM7RuntimeStart('),
+  )
+  assert.match(stop, /hideFrame = true/)
+  assert.match(stop, /if \(hideFrame\) runtimeFrame\.hidden = true/)
+  assert.match(start, /if \(m5ActiveRun !== undefined\) await stopIsolatedRuntime\(\)/)
+  assert.match(start, /await stopM7Runtime\(false, false\)/)
+})
 
 test('keeps an async Runtime setup owned until disposal completes', () => {
   const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]

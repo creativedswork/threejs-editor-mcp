@@ -2687,13 +2687,14 @@ async function disposeM7Runtime(run: M7Run): Promise<Record<string, unknown> | u
 
 async function stopM7Runtime(
   invalidate = true,
+  hideFrame = true,
 ): Promise<Record<string, unknown> | undefined> {
   if (invalidate) {
     m7StartToken += 1
     cancelM7Start()
   }
   if (m7ActiveRun === undefined) {
-    runtimeFrame.hidden = true
+    if (hideFrame) runtimeFrame.hidden = true
     return undefined
   }
   const run = m7ActiveRun
@@ -2704,7 +2705,7 @@ async function stopM7Runtime(
     if (m7ActiveRun === run) {
       m7ActiveRun = undefined
       m7EvidenceToken = undefined
-      runtimeFrame.hidden = true
+      if (hideFrame) runtimeFrame.hidden = true
     }
     await releaseM7Run(run)
   }
@@ -2796,8 +2797,8 @@ async function startM7Runtime(
     throw error
   }
   if (tearingDown || token !== m7StartToken) return
-  await stopIsolatedRuntime()
-  await stopM7Runtime(false)
+  if (m5ActiveRun !== undefined) await stopIsolatedRuntime()
+  await stopM7Runtime(false, false)
   if (tearingDown || token !== m7StartToken) return
 
   m7Events = []

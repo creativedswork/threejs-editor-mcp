@@ -1027,6 +1027,7 @@ export function m7BootstrapHtml(): string {
         }
       }
       if (current) {
+        cleanup(() => current.layoutObserver?.disconnect())
         cleanup(() => cancelAnimationFrame(current.animation))
         cleanup(() => current.renderer.setAnimationLoop?.(null))
         try {
@@ -1144,6 +1145,23 @@ export function m7BootstrapHtml(): string {
           throw new Error('raw-webgpu runtime is outside the M7 profile')
         }
         const backend = adapter.backend ?? request.backend
+        if (canvas.clientWidth === 0 || canvas.clientHeight === 0) {
+          await new Promise(resolve => {
+            const observer = new ResizeObserver(() => {
+              if (!pending.stopRequested
+                && (canvas.clientWidth === 0 || canvas.clientHeight === 0)) return
+              observer.disconnect()
+              pending.cancelLayoutWait = undefined
+              resolve()
+            })
+            pending.cancelLayoutWait = () => {
+              observer.disconnect()
+              resolve()
+            }
+            observer.observe(canvas)
+          })
+          if (pending.stopRequested) throw new Error('Runtime start cancelled')
+        }
         const options = {
           canvas,
           antialias: true,
@@ -1260,6 +1278,7 @@ export function m7BootstrapHtml(): string {
           revisionTransition: undefined,
           setupPromise: Promise.resolve(),
           renderFrame: undefined,
+          layoutObserver: undefined,
           needsInitialUpdate: true,
           resizeCount: 0,
         }
@@ -1372,6 +1391,7 @@ export function m7BootstrapHtml(): string {
           current.frameInProgress = true
           current.framePromise = (async () => {
             try {
+              if (canvas.clientWidth === 0 || canvas.clientHeight === 0) return
               if (resize(current)) current.needsInitialUpdate = true
               const rawDelta = Math.min((now - current.previous) / 1000, 0.1)
               current.previous = now
@@ -1440,6 +1460,16 @@ export function m7BootstrapHtml(): string {
           })()
         }
         current.renderFrame = render
+        current.layoutObserver = new ResizeObserver(() => {
+          if (current.frame !== 0
+            || current.stopped
+            || current.frameInProgress
+            || canvas.clientWidth === 0
+            || canvas.clientHeight === 0) return
+          cancelAnimationFrame(current.animation)
+          current.renderFrame(performance.now())
+        })
+        current.layoutObserver.observe(canvas)
         render(performance.now())
       } catch (error) {
         if (active === current) active = undefined
@@ -1586,6 +1616,7 @@ export function m7BootstrapHtml(): string {
           && starting.runId === runId
           && starting.nonce === nonce) {
           starting.stopRequested = true
+          starting.cancelLayoutWait?.()
           return
         }
         if (lastDisposed?.projectId === request.projectId
