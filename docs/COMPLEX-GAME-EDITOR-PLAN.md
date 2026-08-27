@@ -1012,6 +1012,11 @@ tool routing 的 deterministic Agent regression。
 
 ### M9：高级 Pipeline 与大型本地资产
 
+**状态（2026-08-27）：MILESTONE_SELF_TEST - BLOCKED。核心实现与 S1/S2 已本地原子提交；
+历史定向测试、corpus build 与 standalone browser 证据仍有效，但完整 DSH Replay UI
+在 `open_editor` 成功后停留于 App loading，尚未满足 Milestone 验收门禁。详见
+`reports/M9-validation.md`。**
+
 目标：覆盖 multipass FFT、post-processing、EXR/3D texture/bin 资产。
 
 实施：
