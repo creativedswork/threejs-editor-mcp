@@ -2674,9 +2674,12 @@ async function waitForM7EditorScene(run: M7Run): Promise<void> {
   if (report.error !== undefined) throw new Error(report.error)
 }
 
-async function disposeM7Runtime(run: M7Run): Promise<Record<string, unknown> | undefined> {
+async function disposeM7Runtime(
+  run: M7Run,
+  preserveSurface = false,
+): Promise<Record<string, unknown> | undefined> {
   const disposed = waitForM7Event(['disposed'], run, 10_000)
-  postM7Run(run, 'stop')
+  postM7Run(run, 'stop', { preserveSurface })
   const event = await disposed
   m7LastDispose = event.data
   if (typeof event.data?.disposeError === 'string') {
@@ -2699,7 +2702,7 @@ async function stopM7Runtime(
   }
   const run = m7ActiveRun
   try {
-    return await disposeM7Runtime(run)
+    return await disposeM7Runtime(run, !hideFrame)
   } finally {
     m7DisposedRuns.add(run.runId)
     if (m7ActiveRun === run) {

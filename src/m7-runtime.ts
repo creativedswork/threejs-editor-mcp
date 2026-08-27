@@ -1016,7 +1016,7 @@ export function m7BootstrapHtml(): string {
         ...(current.mode === 'run' ? { editState: current.editState } : {}),
       })
     })
-    const disposeCurrent = async current => {
+    const disposeCurrent = async (current, preserveSurface = false) => {
       let evidence = {}
       const failures = []
       const cleanup = callback => {
@@ -1069,7 +1069,7 @@ export function m7BootstrapHtml(): string {
           cleanup(() => disposeRuntimeCanvas(current))
           cleanup(() => current.controls?.dispose())
           cleanup(() => current.renderer.dispose())
-          cleanup(() => current.renderer.forceContextLoss?.())
+          if (!preserveSurface) cleanup(() => current.renderer.forceContextLoss?.())
           evidence = {
             ...evidence,
             runId: current.runId,
@@ -1086,10 +1086,10 @@ export function m7BootstrapHtml(): string {
       const disposeError = failures.length === 0 ? undefined : failures.join('\\n')
       return { evidence, disposeError }
     }
-    const dispose = async (runId, nonce, notify = true) => {
+    const dispose = async (runId, nonce, notify = true, preserveSurface = false) => {
       const current = active
       active = undefined
-      const { evidence, disposeError } = await disposeCurrent(current)
+      const { evidence, disposeError } = await disposeCurrent(current, preserveSurface)
       if (current) {
         lastDisposed = {
           projectId: current.projectId,
@@ -1608,7 +1608,7 @@ export function m7BootstrapHtml(): string {
           && active.nonce === nonce) {
           active.revision = request.revision
           eventRevision = request.revision
-          await dispose(runId, nonce)
+          await dispose(runId, nonce, true, request.preserveSurface === true)
           return
         }
         if (starting?.projectId === request.projectId

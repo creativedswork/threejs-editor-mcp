@@ -84,6 +84,21 @@ test('keeps the Runtime frame visible while replacing an active run', async () =
   assert.match(start, /await stopM7Runtime\(false, false\)/)
 })
 
+test('preserves the last framebuffer until replacement navigation', async () => {
+  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  const preserve = script.indexOf('!preserveSurface')
+  assert.ok(preserve >= 0)
+  assert.ok(script.indexOf('current.renderer.forceContextLoss', preserve) > preserve)
+  assert.match(
+    script,
+    /dispose\(runId, nonce, true, request\.preserveSurface === true\)/,
+  )
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  assert.match(source, /postM7Run\(run, 'stop', \{ preserveSurface \}\)/)
+  assert.match(source, /disposeM7Runtime\(run, !hideFrame\)/)
+})
+
 test('keeps an async Runtime setup owned until disposal completes', () => {
   const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
