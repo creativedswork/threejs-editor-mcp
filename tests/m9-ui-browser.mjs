@@ -241,6 +241,24 @@ function hasConfiguredWorkspace() {
     .some(workspace => resolve(workspace.path) === workspacePath)
 }
 
+async function waitForLatestTurn() {
+  const deadline = Date.now() + startupTimeout
+  while (Date.now() < deadline) {
+    const workspaceStore = JSON.parse(readFileSync(resolve(dshHome, 'storages/workspace.json'), 'utf8'))
+    const workspace = Object.values(workspaceStore.tables?.workspaces ?? {})
+      .find(item => resolve(item.path) === workspacePath)
+    const sessionId = workspace?.sessionIds?.[0]
+    const sessionStore = JSON.parse(readFileSync(resolve(
+      dshHome,
+      'storages/session_projcache.json',
+    ), 'utf8'))
+    const stats = sessionStore.tables?.sessions?.[sessionId]?.rows?.sessionStats?.val
+    if (stats?.lastTurn >= 1 && stats.openStep === null) return
+    await new Promise(resolve_ => setTimeout(resolve_, 100))
+  }
+  throw new Error(`Replay turn did not settle within ${startupTimeout} ms`)
+}
+
 async function readyComposer() {
   const composer = page.locator(
     'textarea:enabled[placeholder="描述你想要构建的内容"], '
@@ -356,6 +374,9 @@ try {
   stage('submitting open-editor replay prompt')
   await composer.fill('打开 threejs-volumetric-clouds/weather-volume-clouds')
   await composer.press('Enter')
+  await waitForLatestTurn()
+  stage('reloading settled replay session')
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
   const app = await appFrame()
   const initial = await app.evaluate(() => globalThis.__THREE_M7__.metrics())
 
