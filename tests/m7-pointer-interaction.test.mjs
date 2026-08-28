@@ -115,6 +115,22 @@ test('keeps the Runtime frame visible while replacing an active run', async () =
   assert.match(start, /await stopM7Runtime\(false, false\)/)
 })
 
+test('exposes lifecycle work pending after the early editing projection', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const start = source.slice(
+    source.indexOf('async function startM7Runtime('),
+    source.indexOf('function queueM7RuntimeStart('),
+  )
+  assert.ok(
+    start.indexOf("root.dataset.playState = mode === 'run' ? 'playing' : 'editing'")
+      < start.indexOf('await publishRuntimeModelContext(run)'),
+  )
+  assert.match(
+    source,
+    /lifecyclePending: m7PendingStartController !== undefined \|\| m7LifecycleTasks\.size > 0/,
+  )
+})
+
 test('preserves the last framebuffer until replacement navigation', async () => {
   const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)

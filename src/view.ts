@@ -4805,6 +4805,7 @@ const diagnostics = {
     },
     m7: {
       active: m7ActiveRun !== undefined,
+      lifecyclePending: m7PendingStartController !== undefined || m7LifecycleTasks.size > 0,
       runId: m7ActiveRun?.runId,
       nonce: m7ActiveRun?.nonce,
       validationRunId: m7ValidationRun?.runId,
