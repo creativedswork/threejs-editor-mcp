@@ -270,10 +270,86 @@ try {
   const restarted = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   assert.equal(restarted.ready.rendererCount, 1)
   assert.equal(restarted.build.buildId, firstRun.build.buildId)
+
+  let delayedModelContext
+  let signalDelayedModelContext = () => {}
+  let releaseModelContext = () => {}
+  const modelContextDelayed = new Promise(resolve => {
+    signalDelayedModelContext = resolve
+  })
+  const modelContextRelease = new Promise(resolve => {
+    releaseModelContext = resolve
+  })
+  const delayModelContextResponse = async route => {
+    if (delayedModelContext !== undefined) {
+      await route.continue()
+      return
+    }
+    const response = await route.fetch()
+    delayedModelContext = {
+      request: route.request().postDataJSON(),
+      status: response.status(),
+    }
+    signalDelayedModelContext()
+    await modelContextRelease
+    await route.fulfill({ response })
+  }
+  await page.route('**/api/mcp-apps/model-context', delayModelContextResponse)
+  const revisionBeforeOverlap = await appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics().revision,
+  )
   await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
-  await appFrame.waitForFunction(() => (
-    globalThis.__THREE_M7__.metrics().playState === 'editing'
-  ))
+  await Promise.race([
+    modelContextDelayed,
+    page.waitForTimeout(120_000).then(() => {
+      throw new Error('Stop did not publish Runtime model context')
+    }),
+  ])
+  await appFrame.waitForFunction(() => {
+    const metrics = globalThis.__THREE_M7__.metrics()
+    return metrics.playState === 'editing'
+      && metrics.m7.lifecyclePending === true
+  })
+  const editingWhileLifecyclePending = await appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics(),
+  )
+  assert.equal(delayedModelContext.status, 200)
+  assert.equal(
+    delayedModelContext.request.structuredContent.runtime.runId,
+    editingWhileLifecyclePending.m7.runId,
+  )
+
+  await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
+  const overlapPositionX = appFrame.getByRole('spinbutton', { name: 'Position X' })
+  await overlapPositionX.fill('0.35')
+  await overlapPositionX.press('Enter')
+  const dirtyWhileLifecyclePending = await appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics(),
+  )
+  assert.equal(dirtyWhileLifecyclePending.playState, 'editing')
+  assert.equal(dirtyWhileLifecyclePending.m7.lifecyclePending, true)
+  assert.equal(dirtyWhileLifecyclePending.sync, 'dirty')
+  await appFrame.getByRole('button', { name: 'Save', exact: true }).click()
+  const saveStartedWhileLifecyclePending = await appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics(),
+  )
+  assert.equal(saveStartedWhileLifecyclePending.playState, 'editing')
+  assert.equal(saveStartedWhileLifecyclePending.m7.lifecyclePending, true)
+  assert.equal(saveStartedWhileLifecyclePending.sync, 'saving')
+  releaseModelContext()
+  await appFrame.waitForFunction(previousRevision => {
+    const metrics = globalThis.__THREE_M7__.metrics()
+    return metrics.playState === 'editing'
+      && metrics.m7.lifecyclePending === false
+      && metrics.sync === 'clean'
+      && metrics.revision !== previousRevision
+  }, revisionBeforeOverlap, { timeout: 120_000 })
+  await page.unroute('**/api/mcp-apps/model-context', delayModelContextResponse)
+  const immediateSaveOutcome = await appFrame.evaluate(
+    () => globalThis.__THREE_M7__.metrics(),
+  )
+  assert.equal(Number(await overlapPositionX.inputValue()), 0.35)
+  assert.equal(immediateSaveOutcome.m7.runId, editingWhileLifecyclePending.m7.runId)
 
   assert.deepEqual(appProblems, [])
   process.stdout.write(`${JSON.stringify({
@@ -294,6 +370,24 @@ try {
       rendererCount: restarted.ready.rendererCount,
       cacheBuildId: restarted.build.buildId,
       messagesAfterStop: afterStop.messagesAfterStop,
+    },
+    immediateSaveRace: {
+      delayedModelContextStatus: delayedModelContext.status,
+      editingWhileLifecyclePending: {
+        playState: editingWhileLifecyclePending.playState,
+        lifecyclePending: editingWhileLifecyclePending.m7.lifecyclePending,
+      },
+      saveStartedWhileLifecyclePending: {
+        sync: saveStartedWhileLifecyclePending.sync,
+        lifecyclePending: saveStartedWhileLifecyclePending.m7.lifecyclePending,
+      },
+      outcome: {
+        sync: immediateSaveOutcome.sync,
+        playState: immediateSaveOutcome.playState,
+        lifecyclePending: immediateSaveOutcome.m7.lifecyclePending,
+        revisionChanged: immediateSaveOutcome.revision !== revisionBeforeOverlap,
+        positionX: Number(await overlapPositionX.inputValue()),
+      },
     },
     appProblems,
   }, null, 2)}\n`)
