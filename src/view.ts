@@ -178,7 +178,8 @@ interface RuntimeHarnessCommand {
   target: 'active' | 'validation'
   runtime: M7Run
   payload: Record<string, unknown>
-  expiresAt: string
+  timeoutMs: number
+  expiresAt?: string
 }
 
 interface WorkspaceDraft {
@@ -2676,16 +2677,47 @@ async function reportRuntimeHarnessResult(
 }
 
 async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Promise<void> {
-  if (m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, command.runtime)) {
-    throw new Error('Runtime Harness command targets a stale active run')
+  let targetRun: M7Run
+  try {
+    if (m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, command.runtime)) {
+      throw new Error('Runtime Harness command targets a stale active run')
+    }
+    targetRun = command.target === 'validation'
+      ? await ensureValidationRuntime(command.runtime)
+      : command.runtime
+    const startedResult = await app.callServerTool({
+      name: 'start_runtime_command',
+      arguments: {
+        ...command.runtime,
+        commandId: command.commandId,
+      },
+    }, {
+      timeout: M7_LIFECYCLE_TIMEOUT,
+      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    })
+    const started = record(startedResult.structuredContent)
+    if (startedResult.isError || typeof started?.expiresAt !== 'string') {
+      throw new Error(resultError(startedResult))
+    }
+    command.expiresAt = started.expiresAt
+  } catch (error) {
+    await app.callServerTool({
+      name: 'fail_runtime_command',
+      arguments: {
+        ...command.runtime,
+        commandId: command.commandId,
+        message: runtimeMessage(error).slice(0, 2_048),
+      },
+    }, {
+      timeout: M7_LIFECYCLE_TIMEOUT,
+      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    }).catch(() => {})
+    throw error
   }
   const expiresAt = Date.parse(command.expiresAt)
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     throw new Error('Runtime Harness command expired')
   }
-  const targetRun = command.target === 'validation'
-    ? await ensureValidationRuntime(command.runtime)
-    : command.runtime
   const frameElement = command.target === 'validation' ? validationFrame : runtimeFrame
   let cancelSent = false
   let monitorBusy = false
@@ -2791,7 +2823,7 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
       || (command.target !== 'active' && command.target !== 'validation')
       || runtime === undefined
       || payload === undefined
-      || typeof command.expiresAt !== 'string') {
+      || typeof command.timeoutMs !== 'number') {
       throw new Error('Server returned an invalid Runtime Harness command')
     }
     const parsed: RuntimeHarnessCommand = {
@@ -2800,7 +2832,7 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
       target: command.target,
       runtime: runtime as unknown as M7Run,
       payload,
-      expiresAt: command.expiresAt,
+      timeoutMs: command.timeoutMs,
     }
     runtimeHarnessCommands.add(parsed.commandId)
     if (runtimeHarnessCommands.size > 100) {

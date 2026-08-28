@@ -48,6 +48,20 @@ async function connectWorkspace(root, allowlistedRoot, workspace) {
   return client
 }
 
+async function startRuntimeCommand(client, runtime, meta, command) {
+  const started = await client.callTool({
+    name: 'start_runtime_command',
+    arguments: {
+      ...runtime,
+      commandId: command.commandId,
+    },
+    _meta: meta,
+  })
+  assert.equal(started.isError, undefined)
+  assert.ok(Number.isFinite(Date.parse(started.structuredContent.expiresAt)))
+  return started.structuredContent.expiresAt
+}
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m81-projects-'))
   const workspace = await mkdtemp(join(tmpdir(), 'threejs-editor-m81-workspace-'))
@@ -123,6 +137,60 @@ test('M8.1 keeps imported project identity stable and reconciles ordinary source
     })
     assert.equal(reopened.structuredContent.projectId, opened.structuredContent.projectId)
     assert.equal(reopened.structuredContent.revision, pulled.structuredContent.revision)
+  } finally {
+    await client.close()
+    await rm(root, { recursive: true, force: true })
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('M8.1 accepts the canonical entry basename as its explicit alias', async () => {
+  const { root, workspace } = await fixture()
+  const client = await connect(root)
+  try {
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectPath: 'pool' },
+      _meta: { 'ai.deepseek.dsh/workspace': { cwd: workspace } },
+    })
+    const inspected = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: opened.structuredContent.projectId },
+    })
+    assert.equal(inspected.structuredContent.source.entry, 'pool/scene.js')
+    assert.equal(inspected.structuredContent.source.entryAlias, 'scene.js')
+
+    const read = await client.callTool({
+      name: 'read_project_files',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        files: [{ path: 'scene.js' }],
+      },
+    })
+    assert.equal(read.isError, undefined)
+    assert.equal(read.structuredContent.files[0].path, 'pool/scene.js')
+
+    const applied = await client.callTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        baseRevision: opened.structuredContent.revision,
+        changes: [{
+          type: 'write',
+          path: 'scene.js',
+          text: 'export default { setup() { return { version: 2 } } }\n',
+        }],
+      },
+    })
+    assert.equal(applied.isError, undefined)
+    const canonical = await client.callTool({
+      name: 'read_project_files',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        files: [{ path: 'pool/scene.js' }],
+      },
+    })
+    assert.match(canonical.structuredContent.files[0].text, /version: 2/)
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
@@ -455,6 +523,18 @@ test('M8.1 exposes the Runtime Harness tools and exact server-owned prompt', asy
     assert.match(text, /capture_runtime_frame/)
     assert.match(text, /低于 85 分/)
     assert.match(text, /不支持图像输入时/)
+    assert.match(client.getInstructions(), /canonical workspace-relative entry/)
+    assert.match(client.getInstructions(), /Do not read or search the threejs-editor-mcp or deepseek-harness/)
+    await client.callTool({
+      name: 'create_workspace',
+      arguments: { projectId: 'contract', template: 'empty' },
+    })
+    const inspected = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: 'contract' },
+    })
+    assert.match(inspected.structuredContent.runtimeContract.setupContext, /controls/)
+    assert.match(inspected.structuredContent.runtimeContract.inputEvents, /canvas with bubbles enabled/)
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
@@ -465,7 +545,11 @@ test('M8.1 marks a claimed Runtime command before execution can fail', async () 
   const viewSource = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
   const remember = viewSource.indexOf('runtimeHarnessCommands.add(parsed.commandId)')
   const execute = viewSource.indexOf('await executeRuntimeHarnessCommand(parsed)', remember)
+  const prepare = viewSource.indexOf('await ensureValidationRuntime(command.runtime)')
+  const start = viewSource.indexOf("name: 'start_runtime_command'", prepare)
+  const dispatch = viewSource.indexOf("postM7Run(targetRun, 'harness-command'", start)
   assert.ok(remember >= 0 && execute > remember)
+  assert.ok(prepare >= 0 && start > prepare && dispatch > start)
 })
 
 test('M8.1 derives settlement grace from the absolute execution deadline', () => {
@@ -660,6 +744,7 @@ test('M8.1 isolates Runtime identities and control leases by Harness Session', a
       [runtimeB, metaB, commandB, registrationB.structuredContent.evidenceToken],
     ]) {
       const [runtime, meta, command, evidenceToken] = item
+      await startRuntimeCommand(client, runtime, meta, command)
       const reported = await client.callTool({
         name: 'report_runtime_evidence',
         arguments: {
@@ -824,6 +909,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
     })
     assert.equal(foreignReport.isError, true)
     assert.match(foreignReport.content[0].text, /another Harness Session/)
+    await startRuntimeCommand(client, runtime, ownerMeta, command)
     const staleEvidence = await client.callTool({
       name: 'report_runtime_evidence',
       arguments: {
@@ -1002,6 +1088,17 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       _meta: ownerMeta,
     })).structuredContent.command
     assert.equal(afterCancelCommand.kind, 'read-logs')
+    await new Promise(resolve => setTimeout(
+      resolve,
+      RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
+    ))
+    const stillPreparing = (await client.callTool({
+      name: 'pull_runtime_command',
+      arguments: runtime,
+      _meta: ownerMeta,
+    })).structuredContent.command
+    assert.equal(stillPreparing.commandId, afterCancelCommand.commandId)
+    await startRuntimeCommand(client, runtime, ownerMeta, afterCancelCommand)
     const afterCancelReported = await client.callTool({
       name: 'report_runtime_evidence',
       arguments: {
@@ -1021,6 +1118,31 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
     })
     assert.equal(afterCancelReported.isError, undefined)
     assert.equal((await afterCancelPending).isError, undefined)
+
+    const preparationFailurePending = client.callTool({
+      name: 'read_runtime_logs',
+      arguments: { ...runtime, target: 'validation', cursor: 0, limit: 1 },
+      _meta: ownerMeta,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const preparationFailureCommand = (await client.callTool({
+      name: 'pull_runtime_command',
+      arguments: runtime,
+      _meta: ownerMeta,
+    })).structuredContent.command
+    const preparationFailure = await client.callTool({
+      name: 'fail_runtime_command',
+      arguments: {
+        ...runtime,
+        commandId: preparationFailureCommand.commandId,
+        message: 'Validation Runtime failed',
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(preparationFailure.isError, undefined)
+    const preparationFailureResult = await preparationFailurePending
+    assert.equal(preparationFailureResult.isError, true)
+    assert.match(preparationFailureResult.content[0].text, /preparation failed/)
 
     const activeWithoutIntent = await client.callTool({
       name: 'capture_runtime_frame',
@@ -1068,6 +1190,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       _meta: ownerMeta,
     })).structuredContent.command
     assert.equal(activeCommand.target, 'active')
+    await startRuntimeCommand(client, runtime, ownerMeta, activeCommand)
     const oversizedEvidence = await client.callTool({
       name: 'report_runtime_evidence',
       arguments: {
@@ -1142,6 +1265,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       arguments: runtime,
       _meta: ownerMeta,
     })).structuredContent.command
+    await startRuntimeCommand(client, runtime, ownerMeta, deadlineTraceCommand)
     await new Promise(resolve => setTimeout(
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
@@ -1190,6 +1314,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       arguments: runtime,
       _meta: ownerMeta,
     })).structuredContent.command
+    await startRuntimeCommand(client, runtime, ownerMeta, lateSuccessCommand)
     await new Promise(resolve => setTimeout(
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
@@ -1237,6 +1362,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       arguments: runtime,
       _meta: ownerMeta,
     })).structuredContent.command
+    await startRuntimeCommand(client, runtime, ownerMeta, lateCancelledCommand)
     await new Promise(resolve => setTimeout(
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
@@ -1287,6 +1413,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       arguments: runtime,
       _meta: ownerMeta,
     })).structuredContent.command
+    await startRuntimeCommand(client, runtime, ownerMeta, lateHarnessErrorCommand)
     await new Promise(resolve => setTimeout(
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
@@ -1323,11 +1450,12 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       _meta: ownerMeta,
     }, undefined, { signal: graceAbortController.signal })
     await new Promise(resolve => setImmediate(resolve))
-    await client.callTool({
+    const graceAbortCommand = (await client.callTool({
       name: 'pull_runtime_command',
       arguments: runtime,
       _meta: ownerMeta,
-    })
+    })).structuredContent.command
+    await startRuntimeCommand(client, runtime, ownerMeta, graceAbortCommand)
     await new Promise(resolve => setTimeout(
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
@@ -1357,6 +1485,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       arguments: runtime,
       _meta: ownerMeta,
     })).structuredContent.command
+    await startRuntimeCommand(client, runtime, ownerMeta, timedOutCommand)
     const timedOut = await timedOutPending
     assert.equal(timedOut.isError, true)
     assert.match(timedOut.content[0].text, /timed out/)

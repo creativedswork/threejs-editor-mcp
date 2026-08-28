@@ -2,6 +2,7 @@
 
 import { parseArgs } from 'node:util'
 import { readFile } from 'node:fs/promises'
+import { posix } from 'node:path'
 import {
   RESOURCE_MIME_TYPE,
   registerAppResource,
@@ -294,6 +295,7 @@ const editorSourceSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('workspace-entry'),
     entry: workspacePathSchema,
+    entryAlias: workspacePathSchema,
     readTool: z.literal('read_project_files'),
     editTool: z.literal('apply_project_files'),
   }),
@@ -1406,6 +1408,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   const server = new McpServer({
     name: 'threejs-editor-mcp',
     version: '0.1.0',
+  }, {
+    instructions:
+      'For ordinary Three.js scene authoring, use inspect_editor first, then read_project_files and apply_project_files with the canonical workspace-relative entry or entryAlias it returns. Do not reinterpret either as a host filesystem path. Use the public tool schemas and Runtime contract. Do not read or search the threejs-editor-mcp or deepseek-harness implementation source unless the user explicitly asks to debug or extend those systems.',
   })
   const loadWorkspace = async (projectId: string): Promise<WorkspaceSnapshot | undefined> => (
     await workspaces.has(projectId) ? workspaces.load(projectId) : undefined
@@ -1778,7 +1783,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         target: runtimeTargetSchema,
         runtime: runtimeIdentitySchema,
         payload: z.record(z.string(), z.unknown()),
-        expiresAt: z.string().datetime(),
+        timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000),
+        expiresAt: z.string().datetime().optional(),
       }).optional(),
     }),
     _meta: { ui: { visibility: ['app'] } },
@@ -1791,6 +1797,56 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       ? 'No Runtime Harness command is pending.'
       : `Runtime Harness command ${command.commandId} is pending.`, {
       ...command === undefined ? {} : { command },
+    })
+  })
+
+  registerAppTool(server, 'start_runtime_command', {
+    title: 'Start Runtime Harness command',
+    description: 'Starts the execution deadline after the target Runtime is ready.',
+    inputSchema: {
+      ...runtimeIdentitySchema.shape,
+      commandId: z.string().uuid(),
+    },
+    outputSchema: z.object({
+      commandId: z.string().uuid(),
+      expiresAt: z.string().datetime(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ commandId, ...identity }, { _meta }) => {
+    const expiresAt = await workspaces.startRuntimeCommand(
+      identity,
+      runtimeOwner(_meta)!,
+      commandId,
+    )
+    return textResult(`Started Runtime Harness command ${commandId}.`, {
+      commandId,
+      expiresAt,
+    })
+  })
+
+  registerAppTool(server, 'fail_runtime_command', {
+    title: 'Fail Runtime Harness preparation',
+    description: 'Fails a pending Runtime command when its target Runtime cannot be prepared.',
+    inputSchema: {
+      ...runtimeIdentitySchema.shape,
+      commandId: z.string().uuid(),
+      message: z.string().min(1).max(2_048),
+    },
+    outputSchema: z.object({
+      commandId: z.string().uuid(),
+      accepted: z.literal(true),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ commandId, message, ...identity }, { _meta }) => {
+    await workspaces.failRuntimeCommand(
+      identity,
+      runtimeOwner(_meta)!,
+      commandId,
+      message,
+    )
+    return textResult(`Failed Runtime Harness command ${commandId}.`, {
+      commandId,
+      accepted: true,
     })
   })
 
@@ -1985,13 +2041,17 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'inspect_editor', {
     title: 'Inspect Three.js editor objects',
     description:
-      'Inspect this first for the canonical scene source route, object UUIDs, current material values, and the official Three.js Editor commands advertised for each object.',
+      'Inspect this first for the canonical scene source route, object UUIDs, current material values, and the official Three.js Editor commands advertised for each object. For ordinary project edits, use only the returned project tools and canonical entry; do not inspect MCP or Harness implementation source.',
     inputSchema: { projectId: projectIdSchema },
     outputSchema: z.object({
       projectId: projectIdSchema,
       title: z.string(),
       revision: revisionSchema,
       source: editorSourceSchema,
+      runtimeContract: z.object({
+        setupContext: z.string(),
+        inputEvents: z.string(),
+      }),
       objects: z.array(editorObjectSchema),
       editorChanges: z.array(editorChangeSchema),
     }),
@@ -2036,9 +2096,16 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         : {
             kind: 'workspace-entry' as const,
             entry: workspace.manifest.entry,
+            entryAlias: posix.basename(workspace.manifest.entry),
             readTool: 'read_project_files' as const,
             editTool: 'apply_project_files' as const,
           },
+      runtimeContract: {
+        setupContext:
+          'setup receives THREE, canvas, renderer, scene, camera, controls, runtime, moduleUrl, and resolveAsset.',
+        inputEvents:
+          'Use browser input listeners on canvas or window. Harness keyboard events are dispatched on canvas with bubbles enabled.',
+      },
       objects,
       editorChanges: changes,
     }
@@ -2188,7 +2255,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'read_project_files', {
     title: 'Read Three.js workspace files',
     description:
-      'Reads bounded files from an explicitly registered workspace by projectId. For scene source, use the canonical entry returned by inspect_editor instead of searching first.',
+      'Reads bounded files from an explicitly registered workspace by projectId. For scene source, use the canonical entry or entryAlias returned by inspect_editor instead of searching first; do not search MCP or Harness implementation repositories for ordinary scene authoring.',
     inputSchema: {
       projectId: projectIdSchema,
       files: z.array(z.object({
@@ -2244,7 +2311,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'apply_project_files', {
     title: 'Apply Three.js workspace file changes',
     description:
-      'Atomically writes, moves, or deletes workspace files at one exact revision. Use the canonical entry returned by inspect_editor for scene source changes not represented by apply_editor_commands. The project-bound Editor is created or updated automatically; do not call open_editor again.',
+      'Atomically writes, moves, or deletes workspace files at one exact revision. Use the canonical workspace-relative entry or entryAlias returned by inspect_editor for scene source changes not represented by apply_editor_commands. The project-bound Editor is created or updated automatically; do not call open_editor again or inspect MCP/Harness implementation source.',
     inputSchema: {
       projectId: projectIdSchema,
       baseRevision: revisionSchema,

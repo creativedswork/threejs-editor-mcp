@@ -73,6 +73,7 @@ const ABSOLUTE_MAX_FILE_BYTES = 64 * 1024 * 1024
 const MAX_TEXT_READ_BYTES = 512 * 1024
 const MAX_DISCOVERY_DIRECTORIES = 2048
 const MAX_DISCOVERED_PROJECTS = 200
+const RUNTIME_COMMAND_PREPARATION_TIMEOUT_MS = 180_000
 const EXCLUDED_DIRECTORIES = new Set([
   '.git',
   '.threejs-editor',
@@ -320,7 +321,8 @@ export interface RuntimeHarnessCommand {
   target: 'active' | 'validation'
   runtime: RuntimeIdentity
   payload: Record<string, unknown>
-  expiresAt: string
+  timeoutMs: number
+  expiresAt?: string
 }
 
 const RUNTIME_EVIDENCE_KIND = {
@@ -378,9 +380,10 @@ interface Transaction {
 interface PendingRuntimeCommand {
   command: RuntimeHarnessCommand
   owner: RuntimeOwner
+  phase: 'preparing' | 'executing'
   resolve(value: unknown): void
   reject(error: Error): void
-  settlementDeadline: number
+  settlementDeadline?: number
   timer: ReturnType<typeof setTimeout>
   abort?: () => void
 }
@@ -457,6 +460,13 @@ function safePath(input: string): string {
     throw new Error('.threejs-editor is managed metadata')
   }
   return parts.join('/')
+}
+
+function workspaceFilePath(manifest: WorkspaceManifest, input: string): string {
+  const path = safePath(input)
+  return !path.includes('/') && path === posix.basename(manifest.entry)
+    ? manifest.entry
+    : path
 }
 
 function safeProjectPath(input: string): string {
@@ -1102,7 +1112,7 @@ export class WorkspaceStore {
   }>> {
     const snapshot = await this.load(projectId)
     return Promise.all(paths.map(async request => {
-      const path = safePath(request.path)
+      const path = workspaceFilePath(snapshot.manifest, request.path)
       const summary = snapshot.manifest.files[path]
       if (summary === undefined) throw new Error(`unknown workspace file ${path}`)
       const bytes = await this.readWorkspaceFile(snapshot.path, path)
@@ -1570,33 +1580,27 @@ export class WorkspaceStore {
           throw new Error('Active Runtime access requires a current user grant from the Editor')
         }
       }
-      const expiresAt = Date.now() + timeoutMs
       const command: RuntimeHarnessCommand = {
         commandId: randomUUID(),
         kind,
         target,
         runtime,
         payload,
-        expiresAt: new Date(expiresAt).toISOString(),
+        timeoutMs,
       }
-      const settlementDeadline = runtimeCommandSettlementDeadline(command.expiresAt)
-      const expireSettlement = () => {
+      const preparationDeadline = Date.now() + RUNTIME_COMMAND_PREPARATION_TIMEOUT_MS
+      const expirePreparation = () => {
         if (this.runtimeCommands.get(key) !== pending) return
         this.runtimeCommands.delete(key)
-        rejectPending(new Error('Runtime Harness command timed out'))
+        rejectPending(new Error('Runtime Harness preparation timed out'))
       }
-      const timer = setTimeout(() => {
-        if (this.runtimeCommands.get(key) !== pending) return
-        const remainingGraceMs = settlementDeadline - Date.now()
-        if (remainingGraceMs <= 0) expireSettlement()
-        else pending!.timer = setTimeout(expireSettlement, remainingGraceMs)
-      }, timeoutMs)
+      const timer = setTimeout(expirePreparation, preparationDeadline - Date.now())
       pending = {
         command,
         owner,
+        phase: 'preparing',
         resolve: resolvePending,
         reject: rejectPending,
-        settlementDeadline,
         timer,
       }
       this.runtimeCommands.set(key, pending)
@@ -1638,6 +1642,58 @@ export class WorkspaceStore {
     })
   }
 
+  async startRuntimeCommand(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+    commandId: string,
+  ): Promise<string> {
+    validateProjectId(runtime.projectId)
+    return this.withLock(runtime.projectId, async () => {
+      await this.assertRuntimeIdentity(runtime, owner)
+      const key = this.runtimeKey(runtime.projectId, owner)
+      const pending = this.runtimeCommands.get(key)
+      if (pending === undefined
+        || pending.command.commandId !== commandId
+        || !sameRuntimeOwner(pending.owner, owner)
+        || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
+        throw new Error('Runtime Harness command is stale or foreign')
+      }
+      if (pending.phase === 'executing') return pending.command.expiresAt!
+      clearTimeout(pending.timer)
+      const expiresAt = new Date(Date.now() + pending.command.timeoutMs).toISOString()
+      const settlementDeadline = runtimeCommandSettlementDeadline(expiresAt)
+      pending.command.expiresAt = expiresAt
+      pending.phase = 'executing'
+      pending.settlementDeadline = settlementDeadline
+      pending.timer = setTimeout(() => {
+        if (this.runtimeCommands.get(key) !== pending) return
+        this.rejectRuntimeCommand(key, 'Runtime Harness command timed out')
+      }, settlementDeadline - Date.now())
+      return expiresAt
+    })
+  }
+
+  async failRuntimeCommand(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+    commandId: string,
+    message: string,
+  ): Promise<void> {
+    validateProjectId(runtime.projectId)
+    await this.withLock(runtime.projectId, async () => {
+      await this.assertRuntimeIdentity(runtime, owner)
+      const key = this.runtimeKey(runtime.projectId, owner)
+      const pending = this.runtimeCommands.get(key)
+      if (pending === undefined
+        || pending.command.commandId !== commandId
+        || !sameRuntimeOwner(pending.owner, owner)
+        || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
+        throw new Error('Runtime Harness command is stale or foreign')
+      }
+      this.rejectRuntimeCommand(key, `Runtime Harness preparation failed: ${message}`)
+    })
+  }
+
   async reportRuntimeEvidence(
     runtime: RuntimeIdentity,
     owner: RuntimeOwner,
@@ -1657,6 +1713,13 @@ export class WorkspaceStore {
         || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
         throw new Error('Runtime Harness result is stale or foreign')
       }
+      if (pending.phase !== 'executing'
+        || pending.command.expiresAt === undefined
+        || pending.settlementDeadline === undefined) {
+        throw new Error('Runtime Harness command has not started')
+      }
+      const expiresAt = pending.command.expiresAt
+      const settlementDeadline = pending.settlementDeadline
       const evidenceRuntime = result !== null
         && typeof result === 'object'
         && 'runtime' in result
@@ -1695,14 +1758,14 @@ export class WorkspaceStore {
         && 'status' in result
         ? result.status
         : undefined
-      if (Date.now() > pending.settlementDeadline) {
+      if (Date.now() > settlementDeadline) {
         this.runtimeCommands.delete(key)
         clearTimeout(pending.timer)
         pending.reject(new Error('Runtime Harness command timed out'))
         throw new Error('Runtime Harness result missed its settlement deadline')
       }
       // Settlement grace preserves terminal diagnostics, not successful evidence.
-      if (Date.now() > Date.parse(pending.command.expiresAt)
+      if (Date.now() > Date.parse(expiresAt)
         && !(evidenceKind === 'runtime-harness-error'
           || (evidenceKind === 'action-trace'
             && (evidenceStatus === 'failed' || evidenceStatus === 'cancelled')))) {
@@ -1990,7 +2053,7 @@ export class WorkspaceStore {
     }
     for (const candidate of changes) {
       if (candidate.type === 'write') {
-        const path = safePath(candidate.path)
+        const path = workspaceFilePath(snapshot.manifest, candidate.path)
         remember(path)
         const bytes = candidate.text === undefined
           ? Buffer.from(candidate.base64 ?? '', 'base64')
@@ -2004,12 +2067,12 @@ export class WorkspaceStore {
         const hash = await this.writeObject(snapshot.path, bytes)
         state.set(path, hash)
       } else if (candidate.type === 'delete') {
-        const path = safePath(candidate.path)
+        const path = workspaceFilePath(snapshot.manifest, candidate.path)
         if (!state.has(path)) throw new Error(`unknown workspace file ${path}`)
         remember(path)
         state.delete(path)
       } else {
-        const from = safePath(candidate.from)
+        const from = workspaceFilePath(snapshot.manifest, candidate.from)
         const path = safePath(candidate.path)
         if (!state.has(from)) throw new Error(`unknown workspace file ${from}`)
         if (state.has(path)) throw new Error(`workspace file ${path} already exists`)
