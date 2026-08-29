@@ -2999,17 +2999,19 @@ async function startM7Runtime(
     backend: build.backend,
     assets,
   }
-  try {
-    await ensureValidationRuntime({
-      projectId: startProjectId,
-      revision: startRevision,
-      runId: crypto.randomUUID(),
-      nonce: crypto.randomUUID(),
-    })
-    await stopValidationRuntime()
-  } catch (error) {
-    m7Bundle = previousBundle
-    throw error
+  if (m7ActiveRun !== undefined) {
+    try {
+      await ensureValidationRuntime({
+        projectId: startProjectId,
+        revision: startRevision,
+        runId: crypto.randomUUID(),
+        nonce: crypto.randomUUID(),
+      })
+      await stopValidationRuntime()
+    } catch (error) {
+      m7Bundle = previousBundle
+      throw error
+    }
   }
   if (tearingDown || token !== m7StartToken) return
   if (m5ActiveRun !== undefined) await stopIsolatedRuntime()

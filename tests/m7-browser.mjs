@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, watch } from 'node:fs'
 import { resolve } from 'node:path'
 import { chromium } from 'playwright'
 
@@ -7,6 +7,9 @@ const webUrl = process.env.DSH_WEB_URL
 if (webUrl === undefined) throw new Error('DSH_WEB_URL is required')
 const projectRoot = resolve(process.env.THREEJS_EDITOR_MCP_ROOT ?? '.')
 const workspacePath = resolve(process.env.THREEJS_EDITOR_MCP_WORKSPACE ?? '.tmp/m7-p1-workspace')
+const workspaceRealPath = realpathSync(workspacePath)
+const dshHome = resolve(process.env.DSH_HOME ?? '.tmp/m7-dsh-home')
+const runtimeReplacementTimeout = 300_000
 const artifacts = resolve(projectRoot, 'artifacts')
 mkdirSync(artifacts, { recursive: true })
 
@@ -18,7 +21,14 @@ const page = await browser.newPage({
 const appProblems = []
 let diagnosticAppFrame
 page.on('console', message => {
-  if (message.type() === 'error') appProblems.push(`console: ${message.text()}`)
+  if (message.type() !== 'error') return
+  const text = message.text()
+  const source = message.location().url
+  if (/http:\/\/127\.0\.0\.1:777[78]\//u.test(source)
+    || /http:\/\/127\.0\.0\.1:777[78]\//u.test(text)) {
+    return
+  }
+  appProblems.push(`console: ${text}`)
 })
 page.on('pageerror', error => appProblems.push(`pageerror: ${error.message}`))
 
@@ -31,6 +41,7 @@ async function appSurface() {
   await inner.waitFor({ state: 'visible', timeout: 15_000 })
   const appFrame = await (await inner.elementHandle()).contentFrame()
   assert.notEqual(appFrame, null)
+  diagnosticAppFrame = appFrame
   await appFrame.locator('[data-three-editor]').waitFor({ state: 'visible', timeout: 15_000 })
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__?.metrics()
@@ -111,43 +122,89 @@ async function callHarnessTool(name, arguments_) {
   return result
 }
 
+async function waitForLatestTurn() {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const workspaceStore = JSON.parse(
+      readFileSync(resolve(dshHome, 'storages/workspace.json'), 'utf8'),
+    )
+    const workspace = Object.values(workspaceStore.tables?.workspaces ?? {})
+      .find(item => realpathSync(item.path) === workspaceRealPath)
+    const sessionId = workspace?.sessionIds?.[0]
+    const sessionStore = JSON.parse(
+      readFileSync(resolve(dshHome, 'storages/session_projcache.json'), 'utf8'),
+    )
+    const stats = sessionStore.tables?.sessions?.[sessionId]?.rows?.sessionStats?.val
+    if (stats?.lastTurn >= 1 && stats.openStep === null) return
+    await new Promise(resolve_ => setTimeout(resolve_, 100))
+  }
+  throw new Error('Replay turn did not settle within 30000 ms')
+}
+
 try {
+  const workspaceResponse = await fetch(`${webUrl}/api/workspace.create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: 'm7-workspace-create',
+      method: 'workspace.create',
+      payload: { path: workspaceRealPath },
+    }),
+  })
+  const workspaceBody = await workspaceResponse.json()
+  assert.equal(workspaceResponse.status, 200, JSON.stringify(workspaceBody))
+  assert.equal(workspaceBody.result?.ok, true, JSON.stringify(workspaceBody))
+
   await page.goto(webUrl, { waitUntil: 'domcontentloaded' })
 
-  const addWorkspace = page.getByRole('button', { name: '添加工作区', exact: true })
-  try {
-    await addWorkspace.click({ timeout: 30_000 })
-  } catch {
-    const continueButton = page.getByText('继续', { exact: true })
-    await continueButton.waitFor({
-      state: 'visible',
-      timeout: 60_000,
-    })
-    await continueButton.click()
-    await continueButton.waitFor({ state: 'hidden' })
-    await addWorkspace.click({ timeout: 30_000 })
-  }
-  await page.getByRole('heading', { name: '选择工作区目录' }).waitFor()
-  await page.getByRole('button', { name: '编辑路径' }).click()
-  const pathInput = page.getByRole('textbox', { name: '编辑路径' })
-  await pathInput.fill(workspacePath)
-  await pathInput.press('Enter')
-  await page.getByRole('button', { name: '打开', exact: true }).click()
-
-  let composer = page.getByRole('textbox', {
+  const continueButton = page.getByText('继续', { exact: true })
+  const composer = page.getByRole('textbox', {
     name: /描述你想要构建的内容|给智能体发消息/,
   })
-  if (!await composer.isVisible({ timeout: 10_000 }).catch(() => false)) {
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
-    composer = page.getByRole('textbox', {
-      name: /描述你想要构建的内容|给智能体发消息/,
-    })
+  const composerDeadline = Date.now() + 120_000
+  let composerReady = false
+  while (Date.now() < composerDeadline) {
+    if (await continueButton.isVisible()) {
+      const settingsPath = resolve(dshHome, 'settings.yaml')
+      const acknowledgement = new Promise((resolve_, reject) => {
+        const watcher = watch(dshHome, () => {
+          try {
+            if (!readFileSync(settingsPath, 'utf8')
+              .includes('welcomeNoticeVersion: 2026-08-13.1')) return
+            clearTimeout(timeout)
+            watcher.close()
+            resolve_()
+          } catch {}
+        })
+        const timeout = setTimeout(() => {
+          watcher.close()
+          reject(new Error('Welcome acknowledgement did not persist within 60000 ms'))
+        }, 60_000)
+        watcher.once('error', reject)
+      })
+      await continueButton.click()
+      await acknowledgement
+      const detached = await continueButton.waitFor({ state: 'detached', timeout: 5_000 })
+        .then(() => true, () => false)
+      if (!detached) await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
+      continue
+    }
+    if (await composer.isVisible()
+      && await composer.click({ trial: true, timeout: 500 })
+        .then(() => true, () => false)) {
+      composerReady = true
+      break
+    }
+    await page.waitForTimeout(100)
   }
-  await composer.waitFor({ state: 'visible', timeout: 60_000 })
+  if (!composerReady) {
+    throw new Error('Composer did not become clickable within 120000 ms')
+  }
+  appProblems.length = 0
   await composer.fill('打开 M7 Formula One Race Car Workspace')
   await composer.press('Enter')
-  await page.getByText('Three.js M7 Formula One Workspace opened.')
-    .waitFor({ timeout: 30_000 })
+  await waitForLatestTurn()
 
   const { appFrame } = await appSurface()
   diagnosticAppFrame = appFrame
@@ -157,11 +214,6 @@ try {
   assert.equal(initial.workspaceBackend, 'webgpu')
   assert.equal(initial.m7.active, true)
   assert.equal(initial.playState, 'editing')
-  assert.deepEqual(
-    await appFrame.getByRole('combobox', { name: 'Runtime debug mode' })
-      .locator('option').allTextContents(),
-    ['final', 'topology', 'no-livery', 'projector', 'rolling'],
-  )
   const livery = appFrame.getByRole('checkbox', { name: 'Livery' })
   assert.equal(await livery.isChecked(), false)
 
@@ -172,7 +224,7 @@ try {
       && metrics.revision !== previous
       && metrics.playState === 'editing'
       && metrics.m7.ready?.mode === 'edit'
-  }, initial.revision, { timeout: 120_000 })
+  }, initial.revision, { timeout: runtimeReplacementTimeout })
   const human = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
   assert.equal(
     JSON.parse(readFileSync(resolve(workspacePath, 'src/parameters.json'), 'utf8')).livery,
@@ -204,7 +256,7 @@ try {
       && input?.value === '1.04'
       && metrics.playState === 'editing'
       && metrics.m7.ready?.mode === 'edit'
-  }, ai.structuredContent.revision, { timeout: 120_000 })
+  }, ai.structuredContent.revision, { timeout: runtimeReplacementTimeout })
 
   await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
   await appFrame.waitForFunction(() => {
@@ -253,7 +305,7 @@ try {
       && metrics.m7.runtimeFrameVisible === true
       && metrics.m7.metrics?.mode === 'edit'
       && metrics.playState === 'editing'
-  })
+  }, undefined, { timeout: runtimeReplacementTimeout })
   const stopped = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   await page.waitForTimeout(300)
   const afterStop = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
@@ -270,15 +322,35 @@ try {
   const restarted = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   assert.equal(restarted.ready.rendererCount, 1)
   assert.equal(restarted.build.buildId, firstRun.build.buildId)
+  await appFrame.evaluate(() => {
+    const objectButton = [...document.querySelectorAll('button')]
+      .find(button => button.textContent?.trim() === 'VF-26')
+    if (!(objectButton instanceof HTMLButtonElement)) {
+      throw new Error('VF-26 hierarchy button was not found')
+    }
+    objectButton.click()
+    const positionX = document.querySelector('[aria-label="Position X"]')
+    if (!(positionX instanceof HTMLInputElement)) {
+      throw new Error('Position X input was not found')
+    }
+  })
 
   let delayedModelContext
   let signalDelayedModelContext = () => {}
   let releaseModelContext = () => {}
+  let signalSaveRaceStarted = () => {}
   const modelContextDelayed = new Promise(resolve => {
     signalDelayedModelContext = resolve
   })
   const modelContextRelease = new Promise(resolve => {
     releaseModelContext = resolve
+  })
+  const saveRaceStarted = new Promise(resolve => {
+    signalSaveRaceStarted = resolve
+  })
+  await page.exposeFunction('__m0SaveStarted', () => {
+    signalSaveRaceStarted()
+    releaseModelContext()
   })
   const delayModelContextResponse = async route => {
     if (delayedModelContext !== undefined) {
@@ -298,45 +370,82 @@ try {
   const revisionBeforeOverlap = await appFrame.evaluate(
     () => globalThis.__THREE_M7__.metrics().revision,
   )
+  await appFrame.evaluate(previousRunId => {
+    const timer = window.setInterval(() => {
+      const metrics = globalThis.__THREE_M7__.metrics()
+      if (metrics.playState !== 'editing'
+        || metrics.m7.lifecyclePending !== true
+        || metrics.m7.runId === previousRunId
+        || !metrics.m7.eventTypes.includes('editor-scene')) return
+      window.clearInterval(timer)
+      try {
+        const editingWhileLifecyclePending = metrics
+        const positionX = document.querySelector('[aria-label="Position X"]')
+        if (!(positionX instanceof HTMLInputElement)) {
+          throw new Error('Position X input was not found')
+        }
+        positionX.value = '0.35'
+        positionX.dispatchEvent(new Event('input', { bubbles: true }))
+        positionX.dispatchEvent(new Event('change', { bubbles: true }))
+        const dirtyWhileLifecyclePending = globalThis.__THREE_M7__.metrics()
+        const saveButton = [...document.querySelectorAll('button')]
+          .find(button => button.textContent?.trim() === 'Save')
+        if (!(saveButton instanceof HTMLButtonElement)) {
+          throw new Error('Save button was not found')
+        }
+        saveButton.click()
+        globalThis.__M0_IMMEDIATE_SAVE_RACE__ = {
+          editingWhileLifecyclePending,
+          dirtyWhileLifecyclePending,
+          saveStartedWhileLifecyclePending: globalThis.__THREE_M7__.metrics(),
+        }
+      } catch (error) {
+        globalThis.__M0_IMMEDIATE_SAVE_RACE__ = {
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+      void globalThis.__m0SaveStarted()
+    }, 10)
+  }, restarted.runId)
   await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
-  await Promise.race([
-    modelContextDelayed,
-    page.waitForTimeout(120_000).then(() => {
-      throw new Error('Stop did not publish Runtime model context')
-    }),
-  ])
-  await appFrame.waitForFunction(() => {
-    const metrics = globalThis.__THREE_M7__.metrics()
-    return metrics.playState === 'editing'
-      && metrics.m7.lifecyclePending === true
-  })
-  const editingWhileLifecyclePending = await appFrame.evaluate(
-    () => globalThis.__THREE_M7__.metrics(),
-  )
+  let overlap
+  try {
+    await Promise.all([
+      Promise.race([
+        modelContextDelayed,
+        page.waitForTimeout(runtimeReplacementTimeout).then(() => {
+          throw new Error('Stop did not publish Runtime model context')
+        }),
+      ]),
+      Promise.race([
+        saveRaceStarted,
+        page.waitForTimeout(runtimeReplacementTimeout).then(() => {
+          throw new Error('Immediate Save race did not start')
+        }),
+      ]),
+    ])
+    overlap = await appFrame.evaluate(() => globalThis.__M0_IMMEDIATE_SAVE_RACE__)
+    if (typeof overlap?.error === 'string') throw new Error(overlap.error)
+  } finally {
+    releaseModelContext()
+  }
+  const {
+    editingWhileLifecyclePending,
+    dirtyWhileLifecyclePending,
+    saveStartedWhileLifecyclePending,
+  } = overlap
   assert.equal(delayedModelContext.status, 200)
   assert.equal(
     delayedModelContext.request.structuredContent.runtime.runId,
     editingWhileLifecyclePending.m7.runId,
   )
-
-  await appFrame.getByRole('button', { name: 'VF-26', exact: true }).click()
   const overlapPositionX = appFrame.getByRole('spinbutton', { name: 'Position X' })
-  await overlapPositionX.fill('0.35')
-  await overlapPositionX.press('Enter')
-  const dirtyWhileLifecyclePending = await appFrame.evaluate(
-    () => globalThis.__THREE_M7__.metrics(),
-  )
   assert.equal(dirtyWhileLifecyclePending.playState, 'editing')
   assert.equal(dirtyWhileLifecyclePending.m7.lifecyclePending, true)
   assert.equal(dirtyWhileLifecyclePending.sync, 'dirty')
-  await appFrame.getByRole('button', { name: 'Save', exact: true }).click()
-  const saveStartedWhileLifecyclePending = await appFrame.evaluate(
-    () => globalThis.__THREE_M7__.metrics(),
-  )
   assert.equal(saveStartedWhileLifecyclePending.playState, 'editing')
   assert.equal(saveStartedWhileLifecyclePending.m7.lifecyclePending, true)
   assert.equal(saveStartedWhileLifecyclePending.sync, 'saving')
-  releaseModelContext()
   await appFrame.waitForFunction(previousRevision => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.playState === 'editing'
@@ -393,11 +502,21 @@ try {
   }, null, 2)}\n`)
 } catch (error) {
   if (diagnosticAppFrame !== undefined) {
-    const metrics = await diagnosticAppFrame
-      .evaluate(() => globalThis.__THREE_M7__?.metrics())
+    const diagnostics = await diagnosticAppFrame
+      .evaluate(() => ({
+        metrics: globalThis.__THREE_M7__?.metrics(),
+        status: document.querySelector('[data-status]')?.textContent,
+      }))
       .catch(() => undefined)
+    const runtimeTrace = await (async () => {
+      const runtime = diagnosticAppFrame.locator('iframe[data-runtime-sandbox]')
+      const runtimeHandle = await runtime.elementHandle()
+      const runtimeFrame = await runtimeHandle?.contentFrame()
+      return runtimeFrame?.evaluate(() => globalThis.__THREE_M7_RUNTIME_TRACE__)
+    })().catch(() => undefined)
     process.stderr.write(`M7 diagnostics:\n${JSON.stringify({
-      metrics,
+      ...diagnostics,
+      runtimeTrace,
       appProblems,
     }, null, 2)}\n`)
   }

@@ -1,6 +1,6 @@
 # Runtime Lifecycle Recovery Status
 
-Updated: 2026-08-28
+Updated: 2026-08-30
 Milestone: M0 Characterization
 State: `MILESTONE_CANDIDATE`
 Gate: `AWAITING_ACCEPTANCE`
@@ -10,7 +10,8 @@ Gate: `AWAITING_ACCEPTANCE`
 | Slice | State | Commit | Result |
 |---|---|---|---|
 | 1. Lifecycle-idle observability | `COMMITTED_LOCAL` | `a5f65cc` | `__THREE_M7__.metrics().m7.lifecyclePending` distinguishes the early `editing` projection from settled Runtime lifecycle work. |
-| 2. Immediate Save race characterization | `COMMITTED_LOCAL` | This commit | The M7 browser harness delays the Stop restoration model-context response, mutates `VF-26`, and starts Save while `editing` and `lifecyclePending` overlap. |
+| 2. Immediate Save race characterization | `COMMITTED_LOCAL` | `0c706d0` | The M7 browser harness delays the Stop restoration model-context response, mutates `VF-26`, and starts Save while `editing` and `lifecyclePending` overlap. |
+| 3. Initial Runtime readiness closeout | `COMMITTED_LOCAL` | This commit | Initial open skips duplicate hidden validation; replacement validation remains intact, and the fresh-profile race smoke passes. |
 
 ## Slice 1
 
@@ -35,24 +36,31 @@ Gate: `AWAITING_ACCEPTANCE`
   after the delayed response is released, settling as clean editing state with
   a changed revision, the same Runtime run ID, Position X `0.35`, and
   `lifecyclePending: false`.
-- No production file is changed by Slice 2. In particular, `src/view.ts`
-  remains untouched.
+- Slice 2 did not change production behavior.
+
+## Slice 3
+
+- Initial open has no committed Runtime to protect, so `startM7Runtime()` skips
+  hidden validation when `m7ActiveRun` is absent.
+- Runtime replacement still validates the candidate bundle before stopping the
+  active Runtime. Candidate/Committed Runtime semantics remain deferred to M1.
+- The browser harness uses the official Workspace creation endpoint, waits for
+  replay settlement and persisted disclaimer acknowledgement, allows the
+  measured 300-second replacement window, and triggers the race from the App
+  frame after the replacement `editor-scene` event.
 
 ## Concentrated Self-Test
 
 - `node --check tests/m7-browser.mjs` passed.
 - `git diff --check -- tests/m7-browser.mjs` passed.
 - `node --test tests/m7-pointer-interaction.test.mjs` passed: 13 tests.
-- The focused browser smoke required an isolated build because the checked-in
-  `dist/view.js` predates Slice 1. `pnpm run build` passed in a detached
-  `a5f65cc` worktree and did not alter the dirty checkout.
-- Browser confirmation is blocked before the new race assertions. The first
-  attempt used a fresh DSH profile without the local `dsh-uni-editor` bundle
-  and rendered an unknown-tool result. After provisioning the bundle, the
-  bounded rerun reused the profile and the existing workspace-picker fallback
-  waited for a nonexistent Continue control. No race assertion failed; neither
-  attempt reached the race.
-- Per the user stop instruction, no further browser command was started.
+- `pnpm run build` passed in the clean detached candidate worktree.
+- The final fresh-profile browser smoke completed in 15m54s with empty stderr.
+- `immediateSaveRace` observed editing and saving while lifecycle work was
+  pending, then clean editing with a changed revision, Position X `0.35`, and
+  no pending lifecycle work.
+- `appProblems` was empty and the Workspace contained the third committed
+  transaction.
 - Full suite, repository build, typecheck, lint, coverage, and independent
   review were not run.
 
@@ -106,14 +114,14 @@ Failure:
 
 ## Scope And Risk
 
-- M0 changes only observability and browser characterization.
+- M0 changes observability, browser characterization, and only the
+  evidence-backed initial-open validation guard.
 - M1 lifecycle-controller work has not started.
 - All pre-existing dirty production changes and debug artifacts remain
-  excluded from the Slice 2 commit.
+  excluded from the closeout commit.
 - No push or other remote operation was performed.
-- Residual blocker: the focused browser race still needs a successful fresh
-  profile run before M0 acceptance.
+- The debug session remains open and all evidence is retained pending user
+  acceptance.
 
-Implementation and concentrated self-test were the same order of magnitude;
-environment provisioning and the two blocked browser attempts dominated
-self-test time, so validation was stopped rather than expanded.
+M0 remains a candidate until the user accepts this evidence. M1 has not
+started.
