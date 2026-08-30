@@ -38,6 +38,11 @@ import {
   shouldPickAfterPointerGesture,
 } from './m7-runtime.js'
 import { RuntimeAssetCache } from './runtime-asset-cache.js'
+import {
+  RuntimeTransitionController,
+  type RuntimeLifecycleSnapshot,
+  type RuntimeTransitionContext,
+} from './runtime-lifecycle.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
 type CameraView = 'broadcast' | 'overhead' | 'courtside'
@@ -172,6 +177,12 @@ interface M7Run {
   nonce: string
 }
 
+interface CommittedRuntime {
+  projectId: string
+  revision: string
+  run?: M7Run
+}
+
 interface RuntimeHarnessCommand {
   commandId: string
   kind: 'capture-frame' | 'read-logs' | 'simulate-actions'
@@ -206,7 +217,7 @@ interface WorkspaceDraft {
 
 interface M7StartingRun {
   run: M7Run
-  controller: AbortController
+  signal: AbortSignal
   runSent: boolean
 }
 
@@ -568,10 +579,7 @@ let m5MessagesAfterStop = 0
 let m5FrameAtStop: number | undefined
 let m7ActiveRun: M7Run | undefined
 let m7StartingRun: M7StartingRun | undefined
-let m7PendingStartController: AbortController | undefined
 let m7StartToken = 0
-let m7StartQueue = Promise.resolve()
-let m7StartCompletion = Promise.resolve()
 let m7Build: Record<string, unknown> | undefined
 let m7Events: M7RuntimeEvent[] = []
 let m7Errors: string[] = []
@@ -580,7 +588,6 @@ let m7Metrics: Record<string, unknown> | undefined
 let m7LastDispose: Record<string, unknown> | undefined
 let m7MessagesAfterStop = 0
 const m7DisposedRuns = new Set<string>()
-const m7LifecycleControllers = new Set<AbortController>()
 const m7LifecycleTasks = new Set<Promise<unknown>>()
 const m7CleanupFailures: unknown[] = []
 let m7EditorSceneAccepted = false
@@ -611,6 +618,10 @@ let parameterLoadToken = 0
 const expandedObjects = new Set<string>()
 const M7_REQUEST_TIMEOUT = 120_000
 const M7_LIFECYCLE_TIMEOUT = 10_000
+const M7_TRANSITION_TIMEOUT = 300_000
+const runtimeTransitions = new RuntimeTransitionController<CommittedRuntime>(
+  projectRuntimeUi,
+)
 
 const loader = new THREE.ObjectLoader()
 const raycaster = new THREE.Raycaster()
@@ -709,18 +720,41 @@ function refreshHistoryButtons(): void {
   redo.disabled = historyIndex < 0 || historyIndex >= history.length - 1
 }
 
+function projectRuntimeUi(snapshot: RuntimeLifecycleSnapshot<CommittedRuntime>): void {
+  root.dataset.lifecyclePhase = snapshot.phase
+  root.dataset.lifecycleEpoch = String(snapshot.epoch)
+  root.dataset.playState = snapshot.phase === 'playing'
+    ? 'playing'
+    : snapshot.phase === 'edit-ready' || snapshot.phase === 'saving'
+      ? 'editing'
+      : snapshot.phase === 'recoverable-failure'
+        ? 'error'
+        : snapshot.phase === 'disposed'
+          ? 'stopped'
+          : snapshot.phase === 'restoring'
+            ? 'stopping'
+            : 'starting'
+  if (snapshot.phase === 'saving') root.dataset.sync = 'saving'
+  const editable = snapshot.phase === 'edit-ready'
+  setEditorDisabled(!editable)
+  if (snapshot.phase === 'bootstrapping') status.textContent = 'Preparing editor'
+  else if (snapshot.phase === 'entering-play') status.textContent = 'Entering Play'
+  else if (snapshot.phase === 'restoring') status.textContent = 'Restoring edit state'
+  else if (snapshot.phase === 'saving') status.textContent = 'Committing revision'
+}
+
 function refreshPlayButtons(): void {
-  const playState = root.dataset.playState
-  const active = playState === 'starting' || playState === 'playing' || playState === 'stopping'
+  const phase = runtimeTransitions.snapshot().phase
+  const stable = phase === 'edit-ready' || phase === 'playing'
+  const active = phase !== 'edit-ready' && phase !== 'disposed'
   play.disabled = editorDisabled
-    || active
+    || phase !== 'edit-ready'
     || navigationTab !== 'scene'
     || root.dataset.sync !== 'clean'
-  stop.disabled = playState !== 'starting' && playState !== 'playing'
-  activeGrant.disabled = playState !== 'playing' || m7ActiveRun === undefined
+  stop.disabled = phase !== 'playing'
+  activeGrant.disabled = phase !== 'playing' || m7ActiveRun === undefined
   runtimeDebug.disabled = workspace === undefined
-    || playState === 'starting'
-    || playState === 'stopping'
+    || !stable
   runtimeQuality.disabled = workspace === undefined || active
   importAssetButton.disabled = editorDisabled
     || active
@@ -733,6 +767,7 @@ function refreshPlayButtons(): void {
     || active
     || project === undefined
     || root.dataset.sync !== 'clean'
+  if (phase !== 'edit-ready') save.disabled = true
 }
 
 function refreshRuntimeDebugModes(): void {
@@ -821,7 +856,7 @@ async function saveRuntimeQuality(tier: string): Promise<void> {
   if (snapshot === undefined) throw new Error('未返回已保存的画质版本')
   workspaceEditorStateDocument = nextState
   setEditorDisabled(false)
-  acceptSnapshot(snapshot.project, snapshot.revision, '画质已保存', snapshot.workspace)
+  await adoptSnapshot(snapshot.project, snapshot.revision, '画质已保存', snapshot.workspace)
 }
 
 async function saveWorkspaceParameter(
@@ -863,7 +898,7 @@ async function saveWorkspaceParameter(
     if (snapshot === undefined) throw new Error('saved parameter snapshot was not returned')
     parameterDocuments.set(parameter.path, nextDocument)
     setEditorDisabled(false)
-    acceptSnapshot(
+    await adoptSnapshot(
       snapshot.project,
       snapshot.revision,
       `Saved ${parameter.label}`,
@@ -1300,7 +1335,7 @@ async function restoreWorkspaceDraft(snapshot: RemoteSnapshot): Promise<void> {
   }
 
   restoredDraftOperations = [...draft.editorOperations]
-  await m7StartCompletion
+  await runtimeTransitions.idle()
   if (tearingDown || workspace === undefined || project === undefined) return
   const baseline = cloneProject(history[0]?.project ?? project)
   const restored = applyOfficialEditorCommands(
@@ -1812,44 +1847,23 @@ function stopLocalRuntimeForSnapshot(): void {
   playingRuntimeState = undefined
   runtimeInput.keys.clear()
   runtimeInput.pointer.buttons.clear()
-  root.dataset.playState = 'stopped'
 }
 
-function acceptSnapshot(
+async function applySnapshotPort(
   nextProject: Project,
   nextRevision: string,
   message: string,
   nextWorkspace?: WorkspaceView,
   workspaceMode: 'edit' | 'run' = 'edit',
-): void {
-  if (tearingDown) return
+  context?: RuntimeTransitionContext<CommittedRuntime>,
+): Promise<CommittedRuntime> {
+  if (tearingDown) throw new Error('Editor is tearing down')
   fileLoadToken += 1
   fileLoading = false
   stopLocalRuntimeForSnapshot()
   if (workspace !== undefined && nextWorkspace === undefined) {
-    const token = ++m7StartToken
-    cancelM7Start()
-    root.dataset.playState = 'stopping'
     runtimeFrame.hidden = true
-    refreshPlayButtons()
-    const cleanup = m7StartQueue.then(async () => {
-      if (token !== m7StartToken) return
-      await stopM7Runtime(false)
-      if (token === m7StartToken && workspace === undefined) {
-        root.dataset.playState = 'stopped'
-        refreshPlayButtons()
-      }
-    })
-    m7StartCompletion = cleanup
-    m7StartQueue = cleanup.catch(() => {})
-    void cleanup.catch(error => {
-      m7CleanupFailures.push(error)
-      if (token === m7StartToken) {
-        root.dataset.playState = 'error'
-        refreshPlayButtons()
-        status.textContent = `Runtime cleanup failed: ${runtimeMessage(error).split('\n')[0]}`
-      }
-    })
+    await stopM7Runtime(false)
   }
   const previousFile = activeFile
   workspace = nextWorkspace
@@ -1896,9 +1910,7 @@ function acceptSnapshot(
   }]
   historyIndex = 0
   refreshHistoryButtons()
-  setEditorDisabled(false)
   setClean(nextRevision)
-  status.textContent = message
   void loadWorkspaceParameters().catch(error => {
     status.textContent = error instanceof Error ? error.message : String(error)
   })
@@ -1907,22 +1919,39 @@ function acceptSnapshot(
     else void selectWorkspaceFile(activeFile)
   }
   if (workspace !== undefined) {
-    root.dataset.playState = 'starting'
-    setEditorDisabled(true)
-    const token = ++m7StartToken
-    cancelM7Start()
-    refreshPlayButtons()
-    status.textContent = 'Preparing editable Workspace'
-    void queueM7RuntimeStart(token, workspaceMode).then(() => {
-    }).catch(error => {
-      if (token !== m7StartToken) return
-      recordRuntimeError(error)
-      root.dataset.playState = 'error'
-      setEditorDisabled(false)
-      refreshPlayButtons()
-      status.textContent = `Editor Runtime error: ${runtimeMessage(error).split('\n')[0]}`
-    })
+    if (context === undefined) throw new Error('Runtime transition context is required')
+    const run = await startM7RuntimePort(context, workspaceMode)
+    if (run === undefined || !context.isCurrent()) {
+      throw new Error('Runtime snapshot adoption was cancelled')
+    }
+    status.textContent = message
+    return { projectId: run.projectId, revision: run.revision, run }
   }
+  status.textContent = message
+  if (projectId === undefined) throw new Error('Project identity is unavailable')
+  return { projectId, revision: nextRevision }
+}
+
+function adoptSnapshot(
+  nextProject: Project,
+  nextRevision: string,
+  message: string,
+  nextWorkspace?: WorkspaceView,
+  workspaceMode: 'edit' | 'run' = 'edit',
+  command: 'reload' | 'adopt-snapshot' = 'adopt-snapshot',
+): Promise<void> {
+  return runtimeTransitions.enqueue(command, M7_TRANSITION_TIMEOUT, async context => ({
+    phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',
+    committed: await applySnapshotPort(
+      nextProject,
+      nextRevision,
+      message,
+      nextWorkspace,
+      workspaceMode,
+      context,
+    ),
+    value: undefined,
+  }))
 }
 
 function showConflict(snapshot: RemoteSnapshot): void {
@@ -2447,6 +2476,7 @@ function waitForM7Event(
       const candidate = record(event.data)
       if (event.source !== frameElement.contentWindow) return
       if (candidate?.channel !== M7_RUNTIME_CHANNEL
+        || candidate.epoch !== runtimeTransitions.snapshot().epoch
         || candidate.projectId !== run.projectId
         || candidate.runId !== run.runId
         || candidate.nonce !== run.nonce
@@ -2487,12 +2517,16 @@ function savedStateIsCurrent(
     && revision === savedRevision
 }
 
-async function setM7Mode(run: M7Run, mode: 'edit' | 'run'): Promise<M7RuntimeEvent> {
+async function setM7Mode(
+  run: M7Run,
+  mode: 'edit' | 'run',
+  signal?: AbortSignal,
+): Promise<M7RuntimeEvent> {
   const changed = waitForM7Event(
     ['mode', 'runtime-error'],
     run,
     10_000,
-    undefined,
+    signal,
     event => event.type === 'runtime-error' || event.data?.mode === mode,
   )
   postM7Run(run, 'set-mode', { mode })
@@ -2516,6 +2550,7 @@ function postM7Run(
   }
   frameElement.contentWindow.postMessage({
     channel: M7_RUNTIME_CHANNEL,
+    epoch: runtimeTransitions.snapshot().epoch,
     action,
     ...run,
     ...payload,
@@ -2844,16 +2879,6 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
   }
 }
 
-function cancelM7Start(): void {
-  const starting = m7StartingRun
-  const pending = m7PendingStartController
-  if (starting === undefined && pending === undefined) return
-  m7StartingRun = undefined
-  m7PendingStartController = undefined
-  pending?.abort()
-  starting?.controller.abort()
-}
-
 async function releaseM7Run(run: M7Run): Promise<void> {
   const result = await app.callServerTool({
     name: 'release_runtime_run',
@@ -2900,10 +2925,7 @@ async function stopM7Runtime(
   invalidate = true,
   hideFrame = true,
 ): Promise<Record<string, unknown> | undefined> {
-  if (invalidate) {
-    m7StartToken += 1
-    cancelM7Start()
-  }
+  if (invalidate) runtimeTransitions.cancelActive()
   if (m7ActiveRun === undefined) {
     if (hideFrame) runtimeFrame.hidden = true
     return undefined
@@ -2924,11 +2946,11 @@ async function stopM7Runtime(
 
 async function startM7Runtime(
   token: number,
-  controller: AbortController,
+  signal: AbortSignal,
   mode: 'edit' | 'run' = 'edit',
   restoredRuntimeState?: Record<string, unknown>,
-): Promise<void> {
-  if (tearingDown || controller.signal.aborted) return
+): Promise<M7Run | undefined> {
+  if (tearingDown || signal.aborted) return
   if (projectId === undefined || revision === undefined || workspace === undefined) {
     throw new Error('Workspace is not ready')
   }
@@ -2946,12 +2968,12 @@ async function startM7Runtime(
       name: 'build_project',
       arguments: { projectId: startProjectId, revision: startRevision },
     }, {
-      signal: controller.signal,
+      signal,
       timeout: M7_REQUEST_TIMEOUT,
       maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
   } catch (error) {
-    if (tearingDown || token !== m7StartToken || controller.signal.aborted) return
+    if (tearingDown || !runtimeTransitions.isCurrent(token) || signal.aborted) return
     throw error
   }
   if (tearingDown || token !== m7StartToken) return
@@ -2980,16 +3002,16 @@ async function startM7Runtime(
     bundleResource = await app.readServerResource({
       uri: build.bundleUri,
     }, {
-      signal: controller.signal,
+      signal,
       timeout: M7_REQUEST_TIMEOUT,
       maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
   } catch (error) {
-    if (tearingDown || token !== m7StartToken || controller.signal.aborted) return
+    if (tearingDown || !runtimeTransitions.isCurrent(token) || signal.aborted) return
     throw error
   }
   const bundle = resourceText(bundleResource, build.bundleUri)
-  const assets = await runtimeAssets(build, controller.signal)
+  const assets = await runtimeAssets(build, signal)
   if (tearingDown || token !== m7StartToken) return
   const previousBundle = m7Bundle
   m7Bundle = {
@@ -3033,7 +3055,7 @@ async function startM7Runtime(
   m7EditorSceneReport = undefined
   const starting: M7StartingRun = {
     run,
-    controller,
+    signal,
     runSent: false,
   }
   m7StartingRun = starting
@@ -3050,7 +3072,7 @@ async function startM7Runtime(
         nonce: run.nonce,
       },
     }, {
-      signal: controller.signal,
+      signal,
       timeout: M7_LIFECYCLE_TIMEOUT,
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
@@ -3061,16 +3083,16 @@ async function startM7Runtime(
     }
     m7EvidenceToken = registration.evidenceToken
     if (token !== m7StartToken
-      || starting.controller.signal.aborted
+      || starting.signal.aborted
       || m7StartingRun !== starting) {
       throw new Error('M7 Runtime start cancelled')
     }
-    await loadM7Frame(starting.controller.signal)
+    await loadM7Frame(starting.signal)
     const started = waitForM7Event(
       ['ready', 'runtime-error'],
       run,
       120_000,
-      starting.controller.signal,
+      starting.signal,
     )
     postM7Run(run, 'run', {
       bundle,
@@ -3086,7 +3108,7 @@ async function startM7Runtime(
     starting.runSent = true
     const event = await started
     if (token !== m7StartToken
-      || starting.controller.signal.aborted
+      || starting.signal.aborted
       || m7StartingRun !== starting) {
       throw new Error('M7 Runtime start cancelled')
     }
@@ -3103,7 +3125,7 @@ async function startM7Runtime(
         ['editor-scene', 'runtime-error'],
         run,
         10_000,
-        starting.controller.signal,
+        starting.signal,
       )
       postM7Run(run, 'apply-draft-operations', {
         operations: restoredDraftOperations,
@@ -3125,19 +3147,16 @@ async function startM7Runtime(
       playingRevision = undefined
       playingRuntimeState = undefined
     }
-    root.dataset.playState = mode === 'run' ? 'playing' : 'editing'
-    setEditorDisabled(mode === 'run')
-    refreshPlayButtons()
     await publishRuntimeModelContext(run)
     status.textContent = mode === 'run'
       ? `${String(build.backend).toUpperCase()} Runtime`
       : `${String(build.backend).toUpperCase()} Edit`
+    return run
   } catch (error) {
     const cancelled = token !== m7StartToken
-      || starting.controller.signal.aborted
+      || starting.signal.aborted
       || m7StartingRun !== starting
     if (m7StartingRun === starting) m7StartingRun = undefined
-    starting.controller.abort()
     const cleanupErrors: unknown[] = []
     if (starting.runSent) {
       try {
@@ -3166,79 +3185,38 @@ async function startM7Runtime(
   }
 }
 
-function queueM7RuntimeStart(
-  token: number,
+function startM7RuntimePort(
+  context: RuntimeTransitionContext<CommittedRuntime>,
   mode: 'edit' | 'run' = 'edit',
   restoredRuntimeState?: Record<string, unknown>,
-): Promise<void> {
-  if (tearingDown) return Promise.resolve()
-  m7PendingStartController?.abort()
-  const controller = new AbortController()
-  m7PendingStartController = controller
-  const scheduled = m7StartQueue.then(() => {
-    if (m7CleanupFailures.length > 0) {
-      throw new AggregateError(
-        [...m7CleanupFailures],
-        'Previous Runtime cleanup failed',
-      )
-    }
-    return startM7Runtime(token, controller, mode, restoredRuntimeState)
-  })
-  const settled = scheduled.finally(() => {
-    if (m7PendingStartController === controller) m7PendingStartController = undefined
-  })
-  m7StartCompletion = settled
-  m7StartQueue = settled.catch(() => {})
-  return settled
-}
-
-function waitForM7StartQueue(timeout = 10_000): Promise<void> {
-  const completion = m7StartCompletion
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      reject(new Error('M7 Runtime start cancellation timed out'))
-    }, timeout)
-    completion.then(() => {
-      window.clearTimeout(timer)
-      resolve()
-    }, error => {
-      window.clearTimeout(timer)
-      reject(error)
-    })
-  })
+): Promise<M7Run | undefined> {
+  if (tearingDown) return Promise.resolve(undefined)
+  m7StartToken = context.epoch
+  if (m7CleanupFailures.length > 0) {
+    return Promise.reject(new AggregateError(
+      [...m7CleanupFailures],
+      'Previous Runtime cleanup failed',
+    ))
+  }
+  return startM7Runtime(context.epoch, context.signal, mode, restoredRuntimeState)
 }
 
 async function failM7Runtime(run: M7Run, message: string): Promise<void> {
   if (tearingDown || m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, run)) return
-  const token = ++m7StartToken
-  cancelM7Start()
   recordRuntimeError(message)
   playingProject = undefined
   playingRevision = undefined
   playingRuntimeState = undefined
-  root.dataset.playState = 'stopping'
-  setEditorDisabled(true)
-  refreshPlayButtons()
-  const teardown = m7StartQueue.then(async () => {
-    if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run)) {
-      await stopM7Runtime(false)
-    }
-  })
-  m7StartCompletion = teardown
-  m7StartQueue = teardown.catch(() => {})
   try {
-    await teardown
+    await runtimeTransitions.enqueue('reload', M7_LIFECYCLE_TIMEOUT, async () => {
+      if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run)) {
+        await stopM7Runtime(false)
+      }
+      return { phase: 'disposed', committed: null, value: undefined }
+    })
   } catch (error) {
     recordRuntimeError(error)
   }
-  if (token !== m7StartToken
-    || projectId !== run.projectId
-    || revision !== run.revision
-    || m7ActiveRun !== undefined
-    || m7StartingRun !== undefined) return
-  root.dataset.playState = 'error'
-  setEditorDisabled(false)
-  refreshPlayButtons()
   status.textContent = `Runtime error: ${message.split('\n')[0]}`
 }
 
@@ -3247,6 +3225,7 @@ window.addEventListener('message', event => {
   if (tearingDown) return
   const candidate = record(event.data)
   if (candidate?.channel !== M7_RUNTIME_CHANNEL
+    || candidate.epoch !== runtimeTransitions.snapshot().epoch
     || typeof candidate.projectId !== 'string'
     || typeof candidate.runId !== 'string'
     || typeof candidate.nonce !== 'string'
@@ -3323,7 +3302,7 @@ window.addEventListener('message', event => {
       void failM7Runtime(run, message)
     } else if (root.dataset.playState === 'playing') {
       recordRuntimeError(message)
-      void stopGame('Play failed').catch(handleStopFailure)
+      void stopGame('Play failed').catch(handleTransitionFailure)
     }
   }
 })
@@ -3344,10 +3323,25 @@ function recordRuntimeWarning(values: unknown[]): void {
   refreshRuntimeOutput()
 }
 
-function startGame(): void {
+function committedRuntime(): CommittedRuntime {
+  if (projectId === undefined || revision === undefined) {
+    throw new Error('Project is not ready')
+  }
+  if (workspace !== undefined && m7ActiveRun === undefined) {
+    throw new Error('Workspace Runtime is not active')
+  }
+  return {
+    projectId,
+    revision,
+    ...m7ActiveRun === undefined ? {} : { run: m7ActiveRun },
+  }
+}
+
+async function startGamePort(
+  context: RuntimeTransitionContext<CommittedRuntime>,
+): Promise<CommittedRuntime> {
   if (project === undefined || revision === undefined || root.dataset.sync !== 'clean') {
-    status.textContent = 'Save the project before Play'
-    return
+    throw new Error('Save the project before Play')
   }
   runtimeErrors = []
   runtimeWarnings = []
@@ -3356,44 +3350,29 @@ function startGame(): void {
     playingProject = serializeProject()
     playingRevision = revision
     playingRuntimeState = undefined
-    root.dataset.playState = 'starting'
-    setEditorDisabled(true)
-    save.disabled = true
-    refreshPlayButtons()
     status.textContent = `Starting ${workspace.backend.toUpperCase()} Runtime`
-    const token = ++m7StartToken
-    void (async () => {
-      if (m7ActiveRun !== undefined && !m7RunIsCurrent(m7ActiveRun)) {
-        await stopM7Runtime(false)
+    if (m7ActiveRun !== undefined && !m7RunIsCurrent(m7ActiveRun)) {
+      await stopM7Runtime(false)
+    }
+    if (!context.isCurrent()) throw new Error('Play transition was cancelled')
+    if (m7ActiveRun === undefined) {
+      await startM7RuntimePort(context, 'run')
+    } else {
+      const run = m7ActiveRun
+      const event = await setM7Mode(run, 'run', context.signal)
+      playingRuntimeState = record(event.data?.editState)
+      if (!context.isCurrent()
+        || m7ActiveRun === undefined
+        || !sameM7Run(m7ActiveRun, run)
+        || !m7RunIsCurrent(run)) {
+        throw new Error('Play transition became stale')
       }
-      if (token !== m7StartToken) return
-      if (m7ActiveRun === undefined) {
-        await queueM7RuntimeStart(token, 'run')
-      } else {
-        const run = m7ActiveRun
-        const event = await setM7Mode(run, 'run')
-        playingRuntimeState = record(event.data?.editState)
-        if (token !== m7StartToken
-          || m7ActiveRun === undefined
-          || !sameM7Run(m7ActiveRun, run)
-          || !m7RunIsCurrent(run)) return
-        root.dataset.playState = 'playing'
-        setEditorDisabled(true)
-        refreshPlayButtons()
-        status.textContent = `${workspace.backend.toUpperCase()} Runtime`
-      }
-    })().catch(async error => {
-        if (token !== m7StartToken) return
-        recordRuntimeError(error)
-        await stopGame('Play failed', false)
-      }).catch(handleStopFailure)
-    return
+      status.textContent = `${workspace.backend.toUpperCase()} Runtime`
+    }
+    return committedRuntime()
   }
   playingProject = serializeProject()
   playingRevision = revision
-  root.dataset.playState = 'playing'
-  setEditorDisabled(true)
-  save.disabled = true
   disposeControls()
   selected = undefined
   selectionAnchor = undefined
@@ -3415,12 +3394,25 @@ function startGame(): void {
     lifecycle.start?.(runtimeContext())
   } catch (error) {
     recordRuntimeError(error)
-    void stopGame('Play failed').catch(handleStopFailure)
+    stopLocalRuntimeForSnapshot()
+    throw error
   }
+  return committedRuntime()
 }
 
-async function stopGame(reason = 'Stopped', report = true): Promise<void> {
-  if (root.dataset.playState !== 'starting' && root.dataset.playState !== 'playing') return
+function startGame(): void {
+  void runtimeTransitions.enqueue('play', M7_TRANSITION_TIMEOUT, async context => ({
+    phase: 'playing',
+    committed: await startGamePort(context),
+    value: undefined,
+  })).catch(handleTransitionFailure)
+}
+
+async function stopGamePort(
+  context: RuntimeTransitionContext<CommittedRuntime>,
+  reason = 'Stopped',
+  report = true,
+): Promise<CommittedRuntime> {
   const stopLoadToken = loadToken
   const stopProjectId = projectId
   const stopWorkspace = workspace
@@ -3429,24 +3421,10 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
     !tearingDown
       && loadToken === stopLoadToken
       && projectId === stopProjectId
+      && context.isCurrent()
   )
-  const cancellingStart = root.dataset.playState === 'starting'
-  if (cancellingStart) {
-    m7StartToken += 1
-    cancelM7Start()
-  }
-  root.dataset.playState = 'stopping'
-  let startCleanupError: unknown
-  if (cancellingStart) {
-    try {
-      await waitForM7StartQueue()
-    } catch (error) {
-      startCleanupError = error
-      if (stopIsCurrent()) recordRuntimeError(error)
-      else m7CleanupFailures.push(error)
-    }
-  }
-  if (!stopIsCurrent()) return
+  const cancellingStart = false
+  if (!stopIsCurrent()) throw new Error('Stop transition became stale')
   const testedRevision = playingRevision
   const diagnosticsRun = stopWorkspace !== undefined
     && m7ActiveRun !== undefined
@@ -3459,22 +3437,22 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
       if (m7ActiveRun !== undefined && !m7RunIsCurrent(m7ActiveRun)) {
         await stopM7Runtime(false)
       } else if (m7ActiveRun !== undefined) {
-        await setM7Mode(m7ActiveRun, 'edit')
+        await setM7Mode(m7ActiveRun, 'edit', context.signal)
       }
     } catch (error) {
-      if (!stopIsCurrent()) return
+      if (!stopIsCurrent()) throw new Error('Stop transition became stale')
       recordRuntimeError(error)
       try {
         await stopM7Runtime(false)
       } catch (teardownError) {
         if (!stopIsCurrent()) {
           m7CleanupFailures.push(teardownError)
-          return
+          throw new Error('Stop transition became stale')
         }
         recordRuntimeError(teardownError)
       }
     }
-    if (!stopIsCurrent()) return
+    if (!stopIsCurrent()) throw new Error('Stop transition became stale')
   } else {
     try {
       lifecycle?.dispose?.(runtimeContext())
@@ -3497,38 +3475,18 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
   let finalStatus = runtimeErrors.length === 0
     ? stopWorkspace === undefined ? reason : `${stopWorkspace.backend.toUpperCase()} Edit`
     : `Runtime error: ${runtimeErrors[0]?.split('\n')[0] ?? 'unknown error'}`
-  const finishStop = async (pull: boolean): Promise<void> => {
-    if (!stopIsCurrent()) return
-    root.dataset.playState = runtimeErrors.length === 0
-      ? stopWorkspace === undefined
-        ? 'stopped'
-        : m7ActiveRun !== undefined && m7RunIsCurrent(m7ActiveRun)
-          ? 'editing'
-          : 'stopped'
-      : 'error'
-    try {
-      if (pull) await pullLatest(M7_LIFECYCLE_TIMEOUT)
-    } catch (error) {
-      finalStatus = `Refresh failed: ${runtimeMessage(error).split('\n')[0]}`
-    }
-    if (!stopIsCurrent()) return
-    if (root.dataset.playState === 'starting') return
-    setEditorDisabled(false)
-    refreshPlayButtons()
-    if (root.dataset.sync !== 'conflict') status.textContent = finalStatus
-  }
   const shouldReport = report
     && stopProjectId !== undefined
     && testedRevision !== undefined
     && (stopWorkspace === undefined || runId !== undefined)
   if (shouldReport) {
-    if (!stopIsCurrent()) return
+    if (!stopIsCurrent()) throw new Error('Stop transition became stale')
     status.textContent = 'Recording diagnostics'
     try {
       if (stopWorkspace !== undefined) {
         if (diagnosticsRun === undefined) throw new Error('Runtime run is not active')
         await waitForM7EditorScene(diagnosticsRun)
-        if (!stopIsCurrent()) return
+        if (!stopIsCurrent()) throw new Error('Stop transition became stale')
       }
       const result = await app.callServerTool({
         name: 'report_diagnostics',
@@ -3543,7 +3501,7 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
         timeout: M7_LIFECYCLE_TIMEOUT,
         maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
       })
-      if (!stopIsCurrent()) return
+      if (!stopIsCurrent()) throw new Error('Stop transition became stale')
       if (result.isError) throw new Error(resultError(result))
       if (runtimeErrors.length === 0 && runtimeWarnings.length === 0) {
         finalStatus = `${reason}; diagnostics recorded`
@@ -3557,34 +3515,38 @@ async function stopGame(reason = 'Stopped', report = true): Promise<void> {
     && m7RunIsCurrent(m7ActiveRun)) {
     status.textContent = 'Restoring editor'
     try {
-      const token = ++m7StartToken
-      cancelM7Start()
-      await queueM7RuntimeStart(token, 'edit', restoreRuntimeState)
+      const token = context.epoch
+      await startM7RuntimePort(context, 'edit', restoreRuntimeState)
     } catch (error) {
-      if (!stopIsCurrent()) return
+      if (!stopIsCurrent()) throw new Error('Stop transition became stale')
       recordRuntimeError(error)
       finalStatus = `Editor restore failed: ${runtimeMessage(error).split('\n')[0]}`
+      throw error
     }
   }
   playingProject = undefined
   playingRevision = undefined
   playingRuntimeState = undefined
   refreshRuntimeOutput()
-  await finishStop(shouldReport)
-  if (startCleanupError !== undefined) throw startCleanupError
+  if (root.dataset.sync !== 'conflict') status.textContent = finalStatus
+  return committedRuntime()
 }
 
-function handleStopFailure(error: unknown): void {
+function stopGame(reason = 'Stopped', report = true): Promise<void> {
+  return runtimeTransitions.enqueue('stop', M7_TRANSITION_TIMEOUT, async context => ({
+    phase: 'edit-ready',
+    committed: await stopGamePort(context, reason, report),
+    value: undefined,
+  }))
+}
+
+function handleTransitionFailure(error: unknown): void {
   if (tearingDown) return
-  root.dataset.playState = 'error'
-  setEditorDisabled(false)
-  refreshPlayButtons()
   status.textContent = `Runtime cleanup failed: ${runtimeMessage(error).split('\n')[0]}`
 }
 
 function canApplyEditorRevision(snapshot: RemoteSnapshot): boolean {
   if (navigationTab !== 'scene'
-    || root.dataset.playState !== 'editing'
     || workspace === undefined
     || snapshot.workspace === undefined
     || snapshot.editorOperations === undefined
@@ -3631,6 +3593,7 @@ function trackM7Lifecycle<T>(task: Promise<T>): Promise<T> {
 
 async function applyEditorRevision(
   snapshot: RemoteSnapshot,
+  context: RuntimeTransitionContext<CommittedRuntime>,
   expectedSync = 'clean',
 ): Promise<boolean> {
   if (!canApplyEditorRevision(snapshot)
@@ -3640,15 +3603,13 @@ async function applyEditorRevision(
 
   const run = m7ActiveRun
   const nextRun = { ...run, revision: snapshot.revision }
-  const token = m7StartToken
-  const controller = new AbortController()
-  m7LifecycleControllers.add(controller)
+  const token = context.epoch
+  m7StartToken = token
   let registrationStarted = false
   let advanced = false
   let runtimeAdvanced = false
   try {
     status.textContent = 'Applying external Editor changes'
-    setEditorDisabled(true)
     registrationStarted = true
     const registered = await app.callServerTool({
       name: 'register_runtime_run',
@@ -3660,7 +3621,7 @@ async function applyEditorRevision(
         previousRevision: run.revision,
       },
     }, {
-      signal: controller.signal,
+      signal: context.signal,
       timeout: M7_LIFECYCLE_TIMEOUT,
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
@@ -3674,7 +3635,7 @@ async function applyEditorRevision(
       || !sameM7Run(m7ActiveRun, run)
       || !m7RunIsCurrent(run)
       || token !== m7StartToken
-      || root.dataset.playState !== 'editing'
+      || !context.isCurrent()
       || root.dataset.sync !== expectedSync) {
       throw new Error('Editor state changed during Runtime revision rollover')
     }
@@ -3683,7 +3644,7 @@ async function applyEditorRevision(
       ['editor-scene', 'runtime-error'],
       nextRun,
       10_000,
-      controller.signal,
+      context.signal,
     )
     postM7Run(run, 'apply-operations', {
       operations: snapshot.editorOperations,
@@ -3707,7 +3668,7 @@ async function applyEditorRevision(
       || !sameM7Run(m7ActiveRun, run)
       || !m7RunIsCurrent(run)
       || token !== m7StartToken
-      || root.dataset.playState !== 'editing'
+      || !context.isCurrent()
       || root.dataset.sync !== expectedSync) {
       throw new Error('Editor state changed during Runtime revision rollover')
     }
@@ -3728,7 +3689,6 @@ async function applyEditorRevision(
       throw new Error('Runtime lifecycle changed during revision rollover')
     }
     await publishRuntimeModelContext(nextRun)
-    setEditorDisabled(false)
     if (root.dataset.sync === 'clean') {
       status.textContent = 'Updated Editor changes from server'
     }
@@ -3777,7 +3737,6 @@ async function applyEditorRevision(
       setClean(run.revision)
     }
     if (projectId === run.projectId && revision === run.revision) {
-      setEditorDisabled(false)
     }
     if (cleanupErrors.length > 0) {
       throw new AggregateError(
@@ -3786,16 +3745,12 @@ async function applyEditorRevision(
       )
     }
     return false
-  } finally {
-    m7LifecycleControllers.delete(controller)
   }
 }
 
 async function pullLatest(timeout = 60_000): Promise<void> {
   if (tearingDown
     || pulling
-    || root.dataset.playState === 'starting'
-    || root.dataset.playState === 'stopping'
     || projectId === undefined || revision === undefined) return
   pulling = true
   const pullProjectId = projectId
@@ -3814,26 +3769,49 @@ async function pullLatest(timeout = 60_000): Promise<void> {
     if (tearingDown || projectId !== pullProjectId || revision !== pullRevision) return
     const snapshot = snapshotFromResult(result)
     if (snapshot === undefined) return
-    if (root.dataset.sync === 'saving' || snapshot.revision === revision) return
-    if (root.dataset.sync === 'clean') {
-      const workspaceMode = root.dataset.playState === 'playing' ? 'run' : 'edit'
-      if (!await trackM7Lifecycle(applyEditorRevision(snapshot))) {
-        if (tearingDown || projectId !== pullProjectId || revision !== pullRevision) return
+    if (snapshot.revision === revision) return
+    const workspaceMode = root.dataset.playState === 'playing' ? 'run' : 'edit'
+    await runtimeTransitions.enqueue('adopt-snapshot', timeout, async context => {
+      if (tearingDown || projectId !== pullProjectId || revision !== pullRevision) {
+        return {
+          phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',
+          committed: context.committed,
+          value: undefined,
+        }
+      }
+      if (root.dataset.sync === 'clean') {
+        if (workspaceMode === 'edit' && await applyEditorRevision(snapshot, context)) {
+          return {
+            phase: 'edit-ready',
+            committed: committedRuntime(),
+            value: undefined,
+          }
+        }
+        if (tearingDown || projectId !== pullProjectId || revision !== pullRevision) {
+          throw new Error('External snapshot became stale')
+        }
         if (root.dataset.sync === 'clean') {
-          acceptSnapshot(
+          return {
+            phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',
+            committed: await applySnapshotPort(
             snapshot.project,
             snapshot.revision,
             'Updated from server',
             snapshot.workspace,
             workspaceMode,
-          )
-        } else {
-          showConflict(snapshot)
+            context,
+            ),
+            value: undefined,
+          }
         }
       }
-    } else {
       showConflict(snapshot)
-    }
+      return {
+        phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',
+        committed: context.committed,
+        value: undefined,
+      }
+    })
   } finally {
     pulling = false
   }
@@ -3845,28 +3823,58 @@ async function loadProject(nextProjectId: string): Promise<void> {
   const preserveDirty = projectId === nextProjectId
     && (root.dataset.sync === 'dirty' || root.dataset.sync === 'conflict')
   loadingId = nextProjectId
-  if (!preserveDirty) {
-    root.dataset.sync = 'loading'
-    refreshPlayButtons()
-    status.textContent = 'Loading project'
-  }
+  const previousPhase = runtimeTransitions.snapshot().phase === 'playing'
+    ? 'playing'
+    : 'edit-ready'
+  let loadedSnapshot: RemoteSnapshot | undefined
+  runtimeTransitions.cancelActive('Reload requested')
   try {
-    const result = await app.callServerTool({
-      name: 'pull_project',
-      arguments: { projectId: nextProjectId },
+    await runtimeTransitions.enqueue('reload', M7_TRANSITION_TIMEOUT, async context => {
+      if (!preserveDirty) {
+        root.dataset.sync = 'loading'
+        status.textContent = 'Loading project'
+      }
+      const result = await app.callServerTool({
+        name: 'pull_project',
+        arguments: { projectId: nextProjectId },
+      }, {
+        signal: context.signal,
+        timeout: M7_REQUEST_TIMEOUT,
+        maxTotalTimeout: M7_REQUEST_TIMEOUT,
+      })
+      if (tearingDown || token !== loadToken || !context.isCurrent()) {
+        throw new Error('Project reload became stale')
+      }
+      const snapshot = snapshotFromResult(result)
+      if (snapshot === undefined) throw new Error('project snapshot was not returned')
+      loadedSnapshot = snapshot
+      if (preserveDirty) {
+        showConflict(snapshot)
+        persistWorkspaceDraft()
+        return {
+          phase: previousPhase,
+          committed: context.committed,
+          value: undefined,
+        }
+      }
+      projectId = nextProjectId
+      root.dataset.projectId = projectId
+      return {
+        phase: 'edit-ready',
+        committed: await applySnapshotPort(
+          snapshot.project,
+          snapshot.revision,
+          'Project loaded',
+          snapshot.workspace,
+          'edit',
+          context,
+        ),
+        value: undefined,
+      }
     })
-    if (tearingDown || token !== loadToken) return
-    const snapshot = snapshotFromResult(result)
-    if (snapshot === undefined) throw new Error('project snapshot was not returned')
-    if (preserveDirty) {
-      showConflict(snapshot)
-      persistWorkspaceDraft()
-      return
+    if (!preserveDirty && loadedSnapshot !== undefined) {
+      await restoreWorkspaceDraft(loadedSnapshot)
     }
-    projectId = nextProjectId
-    root.dataset.projectId = projectId
-    acceptSnapshot(snapshot.project, snapshot.revision, 'Project loaded', snapshot.workspace)
-    await restoreWorkspaceDraft(snapshot)
   } finally {
     if (token === loadToken) loadingId = undefined
   }
@@ -3906,10 +3914,7 @@ app.onteardown = async () => {
   tearingDown = true
   loadToken += 1
   parameterLoadToken += 1
-  m7StartToken += 1
-  cancelM7Start()
-  for (const controller of m7LifecycleControllers) controller.abort()
-  m7LifecycleControllers.clear()
+  runtimeTransitions.cancelActive('Editor teardown')
   if (pollTimer !== undefined) {
     window.clearInterval(pollTimer)
     pollTimer = undefined
@@ -3922,12 +3927,7 @@ app.onteardown = async () => {
       failures.push(error)
     }
   }
-  let queueFailure: unknown
-  try {
-    await m7StartCompletion
-  } catch (error) {
-    queueFailure = error
-  }
+  await runtimeTransitions.idle()
   while (m7LifecycleTasks.size > 0) {
     const settled = await Promise.allSettled([...m7LifecycleTasks])
     failures.push(...settled
@@ -3949,14 +3949,6 @@ app.onteardown = async () => {
   runtimeAssetCache.clear()
   m7Bundle = undefined
   const cleanupFailures = m7CleanupFailures.splice(0)
-  const queueFailureIsRecorded = queueFailure !== undefined && (
-    cleanupFailures.includes(queueFailure)
-      || (queueFailure instanceof AggregateError
-        && queueFailure.message === 'Previous Runtime cleanup failed'
-        && queueFailure.errors.length > 0
-        && queueFailure.errors.every(error => cleanupFailures.includes(error)))
-  )
-  if (queueFailure !== undefined && !queueFailureIsRecorded) failures.push(queueFailure)
   failures.push(...cleanupFailures)
   if (failures.length > 0) {
     throw new AggregateError(failures, 'Three.js Editor teardown failed')
@@ -3998,7 +3990,7 @@ fullscreen.addEventListener('click', () => {
 })
 play.addEventListener('click', startGame)
 stop.addEventListener('click', () => {
-  void stopGame().catch(handleStopFailure)
+  void stopGame().catch(handleTransitionFailure)
 })
 activeGrant.addEventListener('click', () => {
   if (m7ActiveRun === undefined || root.dataset.playState !== 'playing') return
@@ -4006,7 +3998,7 @@ activeGrant.addEventListener('click', () => {
   void app.callServerTool({
     name: 'grant_active_runtime_control',
     arguments: { ...m7ActiveRun },
-  }).then(result => {
+  }).then(async result => {
     if (result.isError) throw new Error(resultError(result))
     status.textContent = 'One live validation is authorized for 60 seconds'
   }).catch(error => {
@@ -4328,18 +4320,21 @@ revealSelection.addEventListener('click', () => {
   selectObject(selected)
 })
 
-save.addEventListener('click', () => {
-  if (projectId === undefined || project === undefined || revision === undefined) return
+async function saveProjectPort(
+  context: RuntimeTransitionContext<CommittedRuntime>,
+): Promise<CommittedRuntime> {
+  if (projectId === undefined || project === undefined || revision === undefined) {
+    throw new Error('Project is not ready')
+  }
   if (navigationTab === 'files') {
-    if (activeFile === undefined || fileSummary(activeFile)?.text !== true) return
+    if (activeFile === undefined || fileSummary(activeFile)?.text !== true) {
+      throw new Error('Select a text file before saving')
+    }
     const savedProjectId = projectId
     const savedRevision = revision
     const savedPath = activeFile
-    save.disabled = true
-    root.dataset.sync = 'saving'
-    setEditorDisabled(true)
     status.textContent = `Saving ${savedPath}`
-    void app.callServerTool({
+    const result = await app.callServerTool({
       name: 'apply_project_files',
       arguments: {
         projectId: savedProjectId,
@@ -4350,167 +4345,130 @@ save.addEventListener('click', () => {
           text: fileSource.value,
         }],
       },
-    }).then(async result => {
-      if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-      if (result.isError) {
-        root.dataset.sync = 'dirty'
-        setEditorDisabled(false)
-        await pullLatest()
-        return
-      }
-      const pulled = await app.callServerTool({
-        name: 'pull_project',
-        arguments: { projectId: savedProjectId },
-      })
-      if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-      const snapshot = snapshotFromResult(pulled)
-      if (snapshot === undefined) throw new Error('saved workspace snapshot was not returned')
-      setEditorDisabled(false)
-      clearWorkspaceDraft(savedProjectId)
-      acceptSnapshot(snapshot.project, snapshot.revision, `Saved ${savedPath}`, snapshot.workspace)
-    }).catch(error => {
-      if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-      root.dataset.sync = 'error'
-      save.disabled = false
-      setEditorDisabled(false)
-      status.textContent = error instanceof Error ? error.message : String(error)
     })
-    return
+    if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
+      throw new Error('Project changed while saving')
+    }
+    if (result.isError) throw new Error(resultError(result))
+    const pulled = await app.callServerTool({
+      name: 'pull_project',
+      arguments: { projectId: savedProjectId },
+    })
+    const snapshot = snapshotFromResult(pulled)
+    if (snapshot === undefined) throw new Error('saved workspace snapshot was not returned')
+    clearWorkspaceDraft(savedProjectId)
+    return applySnapshotPort(
+      snapshot.project,
+      snapshot.revision,
+      `Saved ${savedPath}`,
+      snapshot.workspace,
+      'edit',
+      context,
+    )
   }
   if (workspace !== undefined) {
-    if (pendingEditorOperations.length === 0) return
+    if (pendingEditorOperations.length === 0) throw new Error('No Runtime scene edits to save')
     const savedProjectId = projectId
     const savedRevision = revision
     const savedRun = m7ActiveRun
     const operations = [...pendingEditorOperations]
-    save.disabled = true
-    root.dataset.sync = 'saving'
-    setEditorDisabled(true)
     status.textContent = 'Saving Runtime scene edits'
-    void (async () => {
-      if (savedRun === undefined || !m7RunIsCurrent(savedRun)) {
-        throw new Error('Runtime run is not active')
-      }
-      await waitForM7EditorScene(savedRun)
-      if (!savedStateIsCurrent(savedProjectId, savedRevision)) {
-        throw new Error('Project changed while saving Runtime scene edits')
-      }
-      return app.callServerTool({
-        name: 'apply_editor_commands',
-        arguments: {
-          projectId: savedProjectId,
-          baseRevision: savedRevision,
-          runId: savedRun.runId,
-          source: 'human',
-          operations,
-        },
-      })
-    })().then(async result => {
-      if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-      if (result.isError) {
-        root.dataset.sync = 'dirty'
-        setEditorDisabled(false)
-        await pullLatest()
-        return
-      }
-      const committed = record(result.structuredContent)
-      if (typeof committed?.revision !== 'string') {
-        throw new Error('saved Workspace revision was not returned')
-      }
-      const pulled = await app.callServerTool({
-        name: 'pull_project',
-        arguments: { projectId: savedProjectId },
-      })
-      if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-      const snapshot = snapshotFromResult(pulled)
-      if (snapshot === undefined) throw new Error('saved Workspace snapshot was not returned')
-      clearWorkspaceDraft(savedProjectId)
-      if (await trackM7Lifecycle(applyEditorRevision(snapshot, 'saving'))) {
-        status.textContent = 'Saved Runtime scene edits'
-      } else {
-        if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-        setEditorDisabled(false)
-        acceptSnapshot(
-          snapshot.project,
-          snapshot.revision,
-          'Saved Runtime scene edits',
-          snapshot.workspace,
-        )
-      }
-    }).catch(error => {
-      if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-      root.dataset.sync = 'error'
-      save.disabled = false
-      setEditorDisabled(false)
-      status.textContent = error instanceof Error ? error.message : String(error)
+    if (savedRun === undefined || !m7RunIsCurrent(savedRun)) {
+      throw new Error('Runtime run is not active')
+    }
+    await waitForM7EditorScene(savedRun)
+    if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
+      throw new Error('Project changed while saving Runtime scene edits')
+    }
+    const result = await app.callServerTool({
+      name: 'apply_editor_commands',
+      arguments: {
+        projectId: savedProjectId,
+        baseRevision: savedRevision,
+        runId: savedRun.runId,
+        source: 'human',
+        operations,
+      },
     })
-    return
+    if (result.isError) throw new Error(resultError(result))
+    const committed = record(result.structuredContent)
+    if (typeof committed?.revision !== 'string') {
+      throw new Error('saved Workspace revision was not returned')
+    }
+    const pulled = await app.callServerTool({
+      name: 'pull_project',
+      arguments: { projectId: savedProjectId },
+    })
+    if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
+      throw new Error('Project changed while finalizing Runtime scene edits')
+    }
+    const snapshot = snapshotFromResult(pulled)
+    if (snapshot === undefined) throw new Error('saved Workspace snapshot was not returned')
+    clearWorkspaceDraft(savedProjectId)
+    const applied = await applyEditorRevision(snapshot, context, 'saving')
+    if (!applied) {
+      return applySnapshotPort(
+        snapshot.project,
+        snapshot.revision,
+        'Saved Runtime scene edits',
+        snapshot.workspace,
+        'edit',
+        context,
+      )
+    }
+    status.textContent = 'Saved Runtime scene edits'
+    return committedRuntime()
   }
-  if (title.value.trim() === '') return
+  if (title.value.trim() === '') throw new Error('Project title is required')
   const savedProjectId = projectId
   const savedRevision = revision
   const nextProject = serializeProject()
-  const saveWorkspace = workspace !== undefined
-  save.disabled = true
-  root.dataset.sync = 'saving'
-  setEditorDisabled(true)
   status.textContent = 'Saving'
-  void app.callServerTool({
+  const result = await app.callServerTool({
     name: 'push_project',
     arguments: {
       projectId: savedProjectId,
       baseRevision: savedRevision,
       project: nextProject,
     },
-  }).then(async result => {
-    if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-    if (result.isError) {
-      root.dataset.sync = 'dirty'
-      setEditorDisabled(false)
-      await pullLatest()
-      return
-    }
-    const structured = record(result.structuredContent)
-    if (typeof structured?.revision !== 'string') {
-      throw new Error('push_project returned an invalid revision')
-    }
-    if (saveWorkspace) {
-      const pulled = await app.callServerTool({
-        name: 'pull_project',
-        arguments: { projectId: savedProjectId },
-      })
-      const snapshot = snapshotFromResult(pulled)
-      if (snapshot === undefined) throw new Error('saved workspace snapshot was not returned')
-      setEditorDisabled(false)
-      acceptSnapshot(snapshot.project, snapshot.revision, 'Saved', snapshot.workspace)
-      return
-    }
-    project = cloneProject(nextProject)
-    baseOperations = [...(nextProject.editor?.operations ?? [])]
-    pendingOperations = []
-    history = [{
-      project: cloneProject(nextProject),
-      pendingOperations: [],
-      editorOperations: [],
-    }]
-    historyIndex = 0
-    refreshHistoryButtons()
-    setEditorDisabled(false)
-    setClean(structured.revision)
-    status.textContent = 'Saved'
-  }).catch(error => {
-    if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-    root.dataset.sync = 'error'
-    save.disabled = false
-    setEditorDisabled(false)
-    status.textContent = error instanceof Error ? error.message : String(error)
+  })
+  if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
+    throw new Error('Project changed while saving')
+  }
+  if (result.isError) throw new Error(resultError(result))
+  const structured = record(result.structuredContent)
+  if (typeof structured?.revision !== 'string') {
+    throw new Error('push_project returned an invalid revision')
+  }
+  project = cloneProject(nextProject)
+  baseOperations = [...(nextProject.editor?.operations ?? [])]
+  pendingOperations = []
+  history = [{
+    project: cloneProject(nextProject),
+    pendingOperations: [],
+    editorOperations: [],
+  }]
+  historyIndex = 0
+  refreshHistoryButtons()
+  setClean(structured.revision)
+  status.textContent = 'Saved'
+  return committedRuntime()
+}
+
+save.addEventListener('click', () => {
+  void runtimeTransitions.enqueue('save', M7_REQUEST_TIMEOUT, async context => ({
+    phase: 'edit-ready',
+    committed: await saveProjectPort(context),
+    value: undefined,
+  })).catch(error => {
+    if (!tearingDown) status.textContent = runtimeMessage(error).split('\n')[0]
   })
 })
 
 loadExternal.addEventListener('click', () => {
   if (remoteSnapshot === undefined) return
   clearWorkspaceDraft()
-  acceptSnapshot(
+  void adoptSnapshot(
     remoteSnapshot.project,
     remoteSnapshot.revision,
     'Loaded external revision',
@@ -4580,7 +4538,7 @@ saveCopy.addEventListener('click', () => {
       const snapshot = snapshotFromResult(pulled)
       if (snapshot === undefined) throw new Error('saved Workspace revision was not returned')
       clearWorkspaceDraft(savedProjectId)
-      acceptSnapshot(
+      await adoptSnapshot(
         snapshot.project,
         snapshot.revision,
         'Saved local revision',
@@ -4605,7 +4563,7 @@ saveCopy.addEventListener('click', () => {
       newProjectId: nextProjectId,
       project: nextProject,
     },
-  }).then(result => {
+  }).then(async result => {
     if (result.isError) throw new Error(resultError(result))
     const structured = record(result.structuredContent)
     if (typeof structured?.revision !== 'string') {
@@ -4613,7 +4571,7 @@ saveCopy.addEventListener('click', () => {
     }
     projectId = nextProjectId
     root.dataset.projectId = nextProjectId
-    acceptSnapshot(nextProject, structured.revision, `Saved local copy as ${nextProjectId}`)
+    await adoptSnapshot(nextProject, structured.revision, `Saved local copy as ${nextProjectId}`)
   }).catch(error => {
     status.textContent = error instanceof Error ? error.message : String(error)
   }).finally(() => {
@@ -4750,7 +4708,7 @@ function render(timestamp: number): void {
       lifecycle.update?.(runtimeContext(), Math.min(runtimeTimer.getDelta(), 0.1))
     } catch (error) {
       recordRuntimeError(error)
-      void stopGame('Play failed').catch(handleStopFailure)
+      void stopGame('Play failed').catch(handleTransitionFailure)
     }
   } else {
     orbit?.update()
@@ -4839,7 +4797,9 @@ const diagnostics = {
     },
     m7: {
       active: m7ActiveRun !== undefined,
-      lifecyclePending: m7PendingStartController !== undefined || m7LifecycleTasks.size > 0,
+      lifecyclePending: runtimeTransitions.snapshot().operation !== undefined
+        || m7LifecycleTasks.size > 0,
+      lifecycle: runtimeTransitions.snapshot(),
       runId: m7ActiveRun?.runId,
       nonce: m7ActiveRun?.nonce,
       validationRunId: m7ValidationRun?.runId,

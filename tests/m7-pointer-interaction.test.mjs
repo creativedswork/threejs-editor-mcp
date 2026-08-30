@@ -107,7 +107,7 @@ test('keeps the Runtime frame visible while replacing an active run', async () =
   )
   const start = source.slice(
     source.indexOf('async function startM7Runtime('),
-    source.indexOf('function queueM7RuntimeStart('),
+    source.indexOf('function startM7RuntimePort('),
   )
   assert.match(stop, /hideFrame = true/)
   assert.match(stop, /if \(hideFrame\) runtimeFrame\.hidden = true/)
@@ -115,19 +115,14 @@ test('keeps the Runtime frame visible while replacing an active run', async () =
   assert.match(start, /await stopM7Runtime\(false, false\)/)
 })
 
-test('exposes lifecycle work pending after the early editing projection', async () => {
+test('projects readiness from the Runtime transition controller', async () => {
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
-  const start = source.slice(
-    source.indexOf('async function startM7Runtime('),
-    source.indexOf('function queueM7RuntimeStart('),
-  )
-  assert.ok(
-    start.indexOf("root.dataset.playState = mode === 'run' ? 'playing' : 'editing'")
-      < start.indexOf('await publishRuntimeModelContext(run)'),
-  )
+  assert.doesNotMatch(source, /m7StartQueue|m7PendingStartController/)
+  assert.match(source, /new RuntimeTransitionController<CommittedRuntime>/)
+  assert.match(source, /function projectRuntimeUi\(/)
   assert.match(
     source,
-    /lifecyclePending: m7PendingStartController !== undefined \|\| m7LifecycleTasks\.size > 0/,
+    /lifecyclePending: runtimeTransitions\.snapshot\(\)\.operation !== undefined/,
   )
 })
 
@@ -169,6 +164,8 @@ test('keeps an async Runtime setup owned until disposal completes', () => {
 test('binds Runtime commands to exact identity and cancels input before stopping', () => {
   const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
+  assert.match(script, /requestEpoch < eventEpoch/)
+  assert.match(script, /epoch: eventEpoch/)
   assert.match(script, /active\.projectId !== request\.projectId/)
   assert.match(script, /active\.revision !== request\.revision/)
   assert.match(script, /request\.previousRevision !== current\.revision/)

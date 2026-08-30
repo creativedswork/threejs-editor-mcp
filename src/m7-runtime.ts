@@ -21,6 +21,7 @@ export interface WorkspaceEditorState {
 
 export interface M7RuntimeEvent {
   channel: typeof M7_RUNTIME_CHANNEL
+  epoch: number
   projectId: string
   runId: string
   nonce: string
@@ -143,6 +144,7 @@ export function m7BootstrapHtml(): string {
     let restoreAssetFetch
     let eventProjectId
     let eventRevision
+    let eventEpoch = 0
     let logCursor = 0
     const logs = []
     const cancelledHarnessCommands = new Set()
@@ -158,6 +160,7 @@ export function m7BootstrapHtml(): string {
     ) => {
       window.parent.postMessage({
         channel,
+        epoch: eventEpoch,
         projectId,
         runId,
         nonce,
@@ -1188,6 +1191,7 @@ export function m7BootstrapHtml(): string {
     }
     const start = async request => {
       const { runId, nonce } = request
+      if (Number.isSafeInteger(request.epoch)) eventEpoch = request.epoch
       if (typeof request.evidenceToken !== 'string') {
         emit(runId, nonce, 'runtime-error', { message: 'Runtime evidence token is required' })
         return
@@ -1725,6 +1729,13 @@ export function m7BootstrapHtml(): string {
       const request = event.data
       if (!request || request.channel !== channel) return
       const { action, runId, nonce } = request
+      const requestEpoch = Number.isSafeInteger(request.epoch)
+        ? request.epoch
+        : action === 'run'
+          ? 0
+          : eventEpoch
+      if (requestEpoch < eventEpoch) return
+      eventEpoch = requestEpoch
       if (action === 'run') {
         await start(request)
         return
