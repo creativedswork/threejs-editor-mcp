@@ -127,6 +127,18 @@ test('projects readiness from the Runtime transition controller', async () => {
   )
 })
 
+test('keeps external snapshot adoption on the lifecycle deadline', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const pullLatest = source.slice(
+    source.indexOf('async function pullLatest('),
+    source.indexOf('async function loadProject('),
+  )
+  assert.match(
+    pullLatest,
+    /runtimeTransitions\.enqueue\('adopt-snapshot', M7_TRANSITION_TIMEOUT/,
+  )
+})
+
 test('releases every Save path through one finally block', async () => {
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
   const save = source.slice(

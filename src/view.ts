@@ -3807,7 +3807,7 @@ async function pullLatest(timeout = 60_000): Promise<void> {
     if (snapshot === undefined) return
     if (snapshot.revision === revision) return
     const workspaceMode = root.dataset.playState === 'playing' ? 'run' : 'edit'
-    await runtimeTransitions.enqueue('adopt-snapshot', timeout, async context => {
+    await runtimeTransitions.enqueue('adopt-snapshot', M7_TRANSITION_TIMEOUT, async context => {
       if (tearingDown || projectId !== pullProjectId || revision !== pullRevision) {
         return {
           phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',

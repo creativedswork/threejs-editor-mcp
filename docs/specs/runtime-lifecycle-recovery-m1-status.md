@@ -23,12 +23,16 @@ promotion/cache changes, and Phase 3 authoritative Save are excluded.
 | 1. Controller core | `COMMITTED_LOCAL` | `470a40c` | Added the serialized controller, epoch/cancellation/deadline ownership, stable idle barrier, invariants, and focused tests. |
 | 2. Lifecycle integration | `COMMITTED_LOCAL` | `0b1f92c` | Routed Play, Stop, Save, Reload, and external snapshots through the controller; UI and Runtime messages use its snapshot epoch. |
 | 3. Effects and cleanup | `COMMITTED_LOCAL` | `93106e7` | Isolated bounded model-context and diagnostics effects; all primary, quality, and parameter Save paths use one final unlock path. |
+| Fix. External adoption deadline | `COMMITTED_LOCAL` | this commit | Kept `pull_project` on its request timeout while restoring external Runtime adoption to the existing 300-second lifecycle deadline; synchronized the immediate-Save harness sample with the queued controller operation. |
 
 ## Dirty Work Excluded
 
 - `src/view.ts` and `src/server.ts` contain active
   `play-stop-restore-failure` probes that must remain on disk and outside M1
   commits.
+- `src/view.ts`, `.dbg`, and `debug-m1-adopt-snapshot-timeout.md` contain the
+  open `m1-adopt-snapshot-timeout` trace and evidence. They remain on disk
+  outside the Fix commit until user acceptance.
 - Existing changes in M9, stdio, builder, workspaces, server, fixtures,
   reports, `.dbg`, and debug notes are unrelated and remain excluded.
 - `docs/specs/runtime-lifecycle-recovery.md` is an existing untracked design
@@ -40,11 +44,22 @@ promotion/cache changes, and Phase 3 authoritative Save are excluded.
   passed: 20 tests.
 - Targeted TypeScript compilation of `src/view.ts`, `src/m7-runtime.ts`,
   `src/runtime-lifecycle.ts`, and `src/runtime-effects.ts` passed.
-- `node --check tests/m7-browser.mjs` and `git diff --check` passed.
-- Port 3080 had no listening service. The M0 `immediateSaveRace` browser smoke
-  was not run because M1 must not start or reuse the user's service.
+- The Fix reran `tests/m7-pointer-interaction.test.mjs`: 15 tests passed,
+  including the external adoption deadline regression assertion.
+- `node --check tests/m7-browser.mjs`, isolated `pnpm run build`, and
+  `git diff --check` passed.
+- The final isolated `tests/m7-browser.mjs` run used a fresh Formula One
+  fixture and random port `49637`; port 3080 remained untouched. It passed
+  initial open, human livery Save, AI `bodyScale=1.04` adoption, Play, Stop,
+  restart, and immediate Save. Final output recorded `sync=clean`,
+  `revisionChanged=true`, `positionX=0.35`, and `appProblems=[]`.
+- Pre-fix evidence is
+  `.tmp/m1-adopt-pre.xpZEZf/evidence/m7-seed-pre.stderr.log`; post-fix output
+  is `.tmp/m1-adopt-pre.xpZEZf/evidence/m7-final.stdout.log`, with empty test
+  stderr. The outer TRAE sandbox reported Chrome user-profile file access
+  after the test completed; all browser assertions had already passed.
 - Implementation took tens of minutes; the concentrated automated self-test
-  took under one minute of command runtime.
+  took under one minute, while the isolated browser smoke took several minutes.
 
 ## Release Hardening
 
@@ -86,5 +101,6 @@ Failure is any overlapping operation, stale event mutation, Save left in
 `saving`, host effect changing the Runtime phase, or regression in the final
 clean revision and saved transform.
 
-No push, amend, rebase, Phase 2, Phase 3, external repository change, service
-restart, or debug-probe cleanup was performed.
+No push, amend, rebase, Phase 2, Phase 3, external repository change, user
+service restart, or debug-probe cleanup was performed. Isolated hosts used
+random ports and were stopped after each run.

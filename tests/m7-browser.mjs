@@ -217,6 +217,7 @@ try {
   const livery = appFrame.getByRole('checkbox', { name: 'Livery' })
   assert.equal(await livery.isChecked(), false)
 
+  await livery.click({ trial: true, timeout: runtimeReplacementTimeout })
   await livery.check()
   await appFrame.waitForFunction(previous => {
     const metrics = globalThis.__THREE_M7__.metrics()
@@ -394,17 +395,20 @@ try {
           throw new Error('Save button was not found')
         }
         saveButton.click()
-        globalThis.__M0_IMMEDIATE_SAVE_RACE__ = {
-          editingWhileLifecyclePending,
-          dirtyWhileLifecyclePending,
-          saveStartedWhileLifecyclePending: globalThis.__THREE_M7__.metrics(),
-        }
+        queueMicrotask(() => {
+          globalThis.__M0_IMMEDIATE_SAVE_RACE__ = {
+            editingWhileLifecyclePending,
+            dirtyWhileLifecyclePending,
+            saveStartedWhileLifecyclePending: globalThis.__THREE_M7__.metrics(),
+          }
+          void globalThis.__m0SaveStarted()
+        })
       } catch (error) {
         globalThis.__M0_IMMEDIATE_SAVE_RACE__ = {
           error: error instanceof Error ? error.message : String(error),
         }
+        void globalThis.__m0SaveStarted()
       }
-      void globalThis.__m0SaveStarted()
     }, 10)
   }, restarted.runId)
   await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
