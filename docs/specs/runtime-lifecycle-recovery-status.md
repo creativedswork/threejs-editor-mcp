@@ -2,8 +2,10 @@
 
 Updated: 2026-08-30
 Milestone: M0 Characterization
-State: `MILESTONE_CANDIDATE`
-Gate: `AWAITING_ACCEPTANCE`
+State: `ACCEPTED`
+Gate: `NEXT_MILESTONE`
+Accepted: 2026-08-30
+Accepted implementation: `ded1534`
 
 ## Slice Ledger
 
@@ -11,7 +13,7 @@ Gate: `AWAITING_ACCEPTANCE`
 |---|---|---|---|
 | 1. Lifecycle-idle observability | `COMMITTED_LOCAL` | `a5f65cc` | `__THREE_M7__.metrics().m7.lifecyclePending` distinguishes the early `editing` projection from settled Runtime lifecycle work. |
 | 2. Immediate Save race characterization | `COMMITTED_LOCAL` | `0c706d0` | The M7 browser harness delays the Stop restoration model-context response, mutates `VF-26`, and starts Save while `editing` and `lifecyclePending` overlap. |
-| 3. Initial Runtime readiness closeout | `COMMITTED_LOCAL` | This commit | Initial open skips duplicate hidden validation; replacement validation remains intact, and the fresh-profile race smoke passes. |
+| 3. Initial Runtime readiness closeout | `COMMITTED_LOCAL` | `ded1534` | Initial open skips duplicate hidden validation; replacement validation remains intact, and the fresh-profile race smoke passes. |
 
 ## Slice 1
 
@@ -120,8 +122,7 @@ Failure:
 - All pre-existing dirty production changes and debug artifacts remain
   excluded from the closeout commit.
 - No push or other remote operation was performed.
-- The debug session remains open and all evidence is retained pending user
-  acceptance.
+- The accepted M0 debug session, collector, probes, isolated worktrees, and
+  evidence roots were removed after acceptance.
 
-M0 remains a candidate until the user accepts this evidence. M1 has not
-started.
+M0 was accepted on 2026-08-30 at `ded1534`. M1 has not started.
