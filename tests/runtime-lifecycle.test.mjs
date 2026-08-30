@@ -97,6 +97,7 @@ test('settles deadlines as recoverable failures and keeps the queue usable', asy
     command: 'save',
     message: 'Runtime save timed out',
   })
+  assert.equal(controller.snapshot().phase, 'edit-ready')
   await controller.enqueue('reload', 1_000, async () => ({
     phase: 'edit-ready',
     value: undefined,

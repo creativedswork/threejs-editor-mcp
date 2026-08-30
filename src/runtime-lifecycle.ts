@@ -185,7 +185,9 @@ export class RuntimeTransitionController<Runtime> {
     } catch (error) {
       if (this.#snapshot.epoch === epoch) {
         this.#setSnapshot({
-          phase: 'recoverable-failure',
+          phase: command === 'save' && this.#snapshot.committed !== undefined
+            ? 'edit-ready'
+            : 'recoverable-failure',
           epoch,
           ...this.#snapshot.committed === undefined
             ? {}

@@ -374,7 +374,7 @@ try {
     const timer = window.setInterval(() => {
       const metrics = globalThis.__THREE_M7__.metrics()
       if (metrics.playState !== 'editing'
-        || metrics.m7.lifecyclePending !== true
+        || metrics.m7.lifecyclePending !== false
         || metrics.m7.runId === previousRunId
         || !metrics.m7.eventTypes.includes('editor-scene')) return
       window.clearInterval(timer)
@@ -441,7 +441,7 @@ try {
   )
   const overlapPositionX = appFrame.getByRole('spinbutton', { name: 'Position X' })
   assert.equal(dirtyWhileLifecyclePending.playState, 'editing')
-  assert.equal(dirtyWhileLifecyclePending.m7.lifecyclePending, true)
+  assert.equal(dirtyWhileLifecyclePending.m7.lifecyclePending, false)
   assert.equal(dirtyWhileLifecyclePending.sync, 'dirty')
   assert.equal(saveStartedWhileLifecyclePending.playState, 'editing')
   assert.equal(saveStartedWhileLifecyclePending.m7.lifecyclePending, true)

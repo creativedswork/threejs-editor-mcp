@@ -120,10 +120,22 @@ test('projects readiness from the Runtime transition controller', async () => {
   assert.doesNotMatch(source, /m7StartQueue|m7PendingStartController/)
   assert.match(source, /new RuntimeTransitionController<CommittedRuntime>/)
   assert.match(source, /function projectRuntimeUi\(/)
+  assert.match(source, /runtimeEffects\.run\('model-context'/)
   assert.match(
     source,
     /lifecyclePending: runtimeTransitions\.snapshot\(\)\.operation !== undefined/,
   )
+})
+
+test('releases every Save path through one finally block', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const save = source.slice(
+    source.indexOf('async function runSave('),
+    source.indexOf('async function saveProjectPort('),
+  )
+  assert.match(save, /finally \{/)
+  assert.match(save, /root\.dataset\.sync === 'saving'/)
+  assert.match(save, /projectRuntimeUi\(runtimeTransitions\.snapshot\(\)\)/)
 })
 
 test('preserves the last framebuffer until replacement navigation', async () => {

@@ -21,8 +21,8 @@ promotion/cache changes, and Phase 3 authoritative Save are excluded.
 | Slice | State | Commit | Result |
 |---|---|---|---|
 | 1. Controller core | `COMMITTED_LOCAL` | `470a40c` | Added the serialized controller, epoch/cancellation/deadline ownership, stable idle barrier, invariants, and focused tests. |
-| 2. Lifecycle integration | `IMPLEMENTED` | pending local commit | Routed Play, Stop, Save, Reload, and external snapshots through the controller; UI and Runtime messages use its snapshot epoch. |
-| 3. Effects and cleanup | `PENDING` | - | Bounded post-commit effects and one Save cleanup path. |
+| 2. Lifecycle integration | `COMMITTED_LOCAL` | `0b1f92c` | Routed Play, Stop, Save, Reload, and external snapshots through the controller; UI and Runtime messages use its snapshot epoch. |
+| 3. Effects and cleanup | `IMPLEMENTED` | pending local commit | Isolated bounded model-context and diagnostics effects; all primary, quality, and parameter Save paths use one final unlock path. |
 
 ## Dirty Work Excluded
 

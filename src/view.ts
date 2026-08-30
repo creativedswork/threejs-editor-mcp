@@ -38,6 +38,7 @@ import {
   shouldPickAfterPointerGesture,
 } from './m7-runtime.js'
 import { RuntimeAssetCache } from './runtime-asset-cache.js'
+import { RuntimeEffects } from './runtime-effects.js'
 import {
   RuntimeTransitionController,
   type RuntimeLifecycleSnapshot,
@@ -181,6 +182,14 @@ interface CommittedRuntime {
   projectId: string
   revision: string
   run?: M7Run
+}
+
+interface RuntimeDiagnosticsEffect {
+  projectId: string
+  testedRevision: string
+  runId?: string
+  errors: string[]
+  warnings: string[]
 }
 
 interface RuntimeHarnessCommand {
@@ -619,6 +628,10 @@ const expandedObjects = new Set<string>()
 const M7_REQUEST_TIMEOUT = 120_000
 const M7_LIFECYCLE_TIMEOUT = 10_000
 const M7_TRANSITION_TIMEOUT = 300_000
+const runtimeEffects = new RuntimeEffects(M7_LIFECYCLE_TIMEOUT, ({ name, error }) => {
+  recordRuntimeWarning([`${name} unavailable: ${runtimeMessage(error).split('\n')[0]}`])
+})
+let publishedRuntimeIdentity: string | undefined
 const runtimeTransitions = new RuntimeTransitionController<CommittedRuntime>(
   projectRuntimeUi,
 )
@@ -741,6 +754,16 @@ function projectRuntimeUi(snapshot: RuntimeLifecycleSnapshot<CommittedRuntime>):
   else if (snapshot.phase === 'entering-play') status.textContent = 'Entering Play'
   else if (snapshot.phase === 'restoring') status.textContent = 'Restoring edit state'
   else if (snapshot.phase === 'saving') status.textContent = 'Committing revision'
+  const run = snapshot.committed?.run
+  const identity = run === undefined
+    ? undefined
+    : `${run.projectId}:${run.revision}:${run.runId}:${run.nonce}`
+  if ((snapshot.phase === 'edit-ready' || snapshot.phase === 'playing')
+    && run !== undefined
+    && identity !== publishedRuntimeIdentity) {
+    publishedRuntimeIdentity = identity
+    runtimeEffects.run('model-context', signal => publishRuntimeModelContext(run, signal))
+  }
 }
 
 function refreshPlayButtons(): void {
@@ -828,35 +851,50 @@ async function saveRuntimeQuality(tier: string): Promise<void> {
   if (!workspace.qualityTiers.includes(tier)) throw new Error('未知画质档位')
   const savedProjectId = projectId
   const savedRevision = revision
-  root.dataset.sync = 'saving'
-  setEditorDisabled(true)
   runtimeQuality.disabled = true
-  status.textContent = '正在保存画质'
   const nextState = { ...workspaceEditorStateDocument, qualityTier: tier }
-  const result = await app.callServerTool({
-    name: 'apply_project_files',
-    arguments: {
-      projectId: savedProjectId,
-      baseRevision: savedRevision,
-      changes: [{
-        type: 'write',
-        path: WORKSPACE_EDITOR_STATE_PATH,
-        text: `${JSON.stringify(nextState, null, 2)}\n`,
-      }],
-    },
+  await runSave(async context => {
+    status.textContent = '正在保存画质'
+    const result = await app.callServerTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId: savedProjectId,
+        baseRevision: savedRevision,
+        changes: [{
+          type: 'write',
+          path: WORKSPACE_EDITOR_STATE_PATH,
+          text: `${JSON.stringify(nextState, null, 2)}\n`,
+        }],
+      },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
+    })
+    if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
+      throw new Error('Project changed while saving Runtime quality')
+    }
+    if (result.isError) throw new Error(resultError(result))
+    const pulled = await app.callServerTool({
+      name: 'pull_project',
+      arguments: { projectId: savedProjectId },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
+    })
+    const snapshot = snapshotFromResult(pulled)
+    if (snapshot === undefined) throw new Error('未返回已保存的画质版本')
+    workspaceEditorStateDocument = nextState
+    return applySnapshotPort(
+      snapshot.project,
+      snapshot.revision,
+      '画质已保存',
+      snapshot.workspace,
+      'edit',
+      context,
+    )
   })
-  if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-  if (result.isError) throw new Error(resultError(result))
-  const pulled = await app.callServerTool({
-    name: 'pull_project',
-    arguments: { projectId: savedProjectId },
-  })
-  if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-  const snapshot = snapshotFromResult(pulled)
-  if (snapshot === undefined) throw new Error('未返回已保存的画质版本')
-  workspaceEditorStateDocument = nextState
-  setEditorDisabled(false)
-  await adoptSnapshot(snapshot.project, snapshot.revision, '画质已保存', snapshot.workspace)
 }
 
 async function saveWorkspaceParameter(
@@ -871,10 +909,8 @@ async function saveWorkspaceParameter(
   const savedProjectId = projectId
   const savedRevision = revision
   const nextDocument = { ...parameterDocument, [parameter.key]: value }
-  root.dataset.sync = 'saving'
-  setEditorDisabled(true)
-  status.textContent = `Saving ${parameter.label}`
-  try {
+  await runSave(async context => {
+    status.textContent = `Saving ${parameter.label}`
     const result = await app.callServerTool({
       name: 'apply_project_files',
       arguments: {
@@ -886,30 +922,35 @@ async function saveWorkspaceParameter(
           text: `${JSON.stringify(nextDocument, null, 2)}\n`,
         }],
       },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
-    if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
+    if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
+      throw new Error(`Project changed while saving ${parameter.label}`)
+    }
     if (result.isError) throw new Error(resultError(result))
     const pulled = await app.callServerTool({
       name: 'pull_project',
       arguments: { projectId: savedProjectId },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
-    if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
     const snapshot = snapshotFromResult(pulled)
     if (snapshot === undefined) throw new Error('saved parameter snapshot was not returned')
     parameterDocuments.set(parameter.path, nextDocument)
-    setEditorDisabled(false)
-    await adoptSnapshot(
+    return applySnapshotPort(
       snapshot.project,
       snapshot.revision,
       `Saved ${parameter.label}`,
       snapshot.workspace,
+      'edit',
+      context,
     )
-  } catch (error) {
-    if (!savedStateIsCurrent(savedProjectId, savedRevision)) return
-    root.dataset.sync = 'error'
-    setEditorDisabled(false)
-    throw error
-  }
+  })
 }
 
 function renderWorkspaceParameters(): void {
@@ -1336,6 +1377,7 @@ async function restoreWorkspaceDraft(snapshot: RemoteSnapshot): Promise<void> {
 
   restoredDraftOperations = [...draft.editorOperations]
   await runtimeTransitions.idle()
+  await runtimeEffects.idle()
   if (tearingDown || workspace === undefined || project === undefined) return
   const baseline = cloneProject(history[0]?.project ?? project)
   const restored = applyOfficialEditorCommands(
@@ -2106,7 +2148,7 @@ const app = new App(
   { autoResize: true, strict: true },
 )
 
-async function publishRuntimeModelContext(run: M7Run): Promise<void> {
+async function publishRuntimeModelContext(run: M7Run, signal?: AbortSignal): Promise<void> {
   if (app.getHostCapabilities()?.updateModelContext === undefined) return
   await app.updateModelContext({
     content: [{
@@ -2118,9 +2160,25 @@ async function publishRuntimeModelContext(run: M7Run): Promise<void> {
       runtime: run,
     },
   }, {
+    signal,
     timeout: M7_LIFECYCLE_TIMEOUT,
     maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
   })
+}
+
+async function reportRuntimeDiagnostics(
+  diagnostics: RuntimeDiagnosticsEffect,
+  signal: AbortSignal,
+): Promise<void> {
+  const result = await app.callServerTool({
+    name: 'report_diagnostics',
+    arguments: { ...diagnostics },
+  }, {
+    signal,
+    timeout: M7_LIFECYCLE_TIMEOUT,
+    maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+  })
+  if (result.isError) throw new Error(resultError(result))
 }
 
 function setDisplayMode(mode: 'inline' | 'fullscreen'): void {
@@ -3147,7 +3205,6 @@ async function startM7Runtime(
       playingRevision = undefined
       playingRuntimeState = undefined
     }
-    await publishRuntimeModelContext(run)
     status.textContent = mode === 'run'
       ? `${String(build.backend).toUpperCase()} Runtime`
       : `${String(build.backend).toUpperCase()} Edit`
@@ -3412,7 +3469,7 @@ async function stopGamePort(
   context: RuntimeTransitionContext<CommittedRuntime>,
   reason = 'Stopped',
   report = true,
-): Promise<CommittedRuntime> {
+): Promise<{ committed: CommittedRuntime; diagnostics?: RuntimeDiagnosticsEffect }> {
   const stopLoadToken = loadToken
   const stopProjectId = projectId
   const stopWorkspace = workspace
@@ -3426,12 +3483,6 @@ async function stopGamePort(
   const cancellingStart = false
   if (!stopIsCurrent()) throw new Error('Stop transition became stale')
   const testedRevision = playingRevision
-  const diagnosticsRun = stopWorkspace !== undefined
-    && m7ActiveRun !== undefined
-    && m7RunIsCurrent(m7ActiveRun)
-    ? m7ActiveRun
-    : undefined
-  const runId = diagnosticsRun?.runId
   if (stopWorkspace !== undefined) {
     try {
       if (m7ActiveRun !== undefined && !m7RunIsCurrent(m7ActiveRun)) {
@@ -3475,41 +3526,6 @@ async function stopGamePort(
   let finalStatus = runtimeErrors.length === 0
     ? stopWorkspace === undefined ? reason : `${stopWorkspace.backend.toUpperCase()} Edit`
     : `Runtime error: ${runtimeErrors[0]?.split('\n')[0] ?? 'unknown error'}`
-  const shouldReport = report
-    && stopProjectId !== undefined
-    && testedRevision !== undefined
-    && (stopWorkspace === undefined || runId !== undefined)
-  if (shouldReport) {
-    if (!stopIsCurrent()) throw new Error('Stop transition became stale')
-    status.textContent = 'Recording diagnostics'
-    try {
-      if (stopWorkspace !== undefined) {
-        if (diagnosticsRun === undefined) throw new Error('Runtime run is not active')
-        await waitForM7EditorScene(diagnosticsRun)
-        if (!stopIsCurrent()) throw new Error('Stop transition became stale')
-      }
-      const result = await app.callServerTool({
-        name: 'report_diagnostics',
-        arguments: {
-          projectId: stopProjectId,
-          testedRevision,
-          ...runId === undefined ? {} : { runId },
-          errors: runtimeErrors,
-          warnings: runtimeWarnings,
-        },
-      }, {
-        timeout: M7_LIFECYCLE_TIMEOUT,
-        maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
-      })
-      if (!stopIsCurrent()) throw new Error('Stop transition became stale')
-      if (result.isError) throw new Error(resultError(result))
-      if (runtimeErrors.length === 0 && runtimeWarnings.length === 0) {
-        finalStatus = `${reason}; diagnostics recorded`
-      }
-    } catch (error) {
-      finalStatus = `Diagnostics not recorded: ${runtimeMessage(error).split('\n')[0]}`
-    }
-  }
   if (stopWorkspace !== undefined
     && m7ActiveRun !== undefined
     && m7RunIsCurrent(m7ActiveRun)) {
@@ -3529,15 +3545,36 @@ async function stopGamePort(
   playingRuntimeState = undefined
   refreshRuntimeOutput()
   if (root.dataset.sync !== 'conflict') status.textContent = finalStatus
-  return committedRuntime()
+  const committed = committedRuntime()
+  return {
+    committed,
+    ...report && stopProjectId !== undefined && testedRevision !== undefined
+      ? {
+          diagnostics: {
+            projectId: stopProjectId,
+            testedRevision,
+            ...committed.run === undefined ? {} : { runId: committed.run.runId },
+            errors: [...runtimeErrors],
+            warnings: [...runtimeWarnings],
+          },
+        }
+      : {},
+  }
 }
 
 function stopGame(reason = 'Stopped', report = true): Promise<void> {
-  return runtimeTransitions.enqueue('stop', M7_TRANSITION_TIMEOUT, async context => ({
-    phase: 'edit-ready',
-    committed: await stopGamePort(context, reason, report),
-    value: undefined,
-  }))
+  return runtimeTransitions.enqueue('stop', M7_TRANSITION_TIMEOUT, async context => {
+    const stopped = await stopGamePort(context, reason, report)
+    return {
+      phase: 'edit-ready',
+      committed: stopped.committed,
+      value: stopped.diagnostics,
+    }
+  }).then(diagnostics => {
+    if (diagnostics !== undefined) {
+      runtimeEffects.run('diagnostics', signal => reportRuntimeDiagnostics(diagnostics, signal))
+    }
+  })
 }
 
 function handleTransitionFailure(error: unknown): void {
@@ -3688,7 +3725,6 @@ async function applyEditorRevision(
       || !m7RunIsCurrent(nextRun)) {
       throw new Error('Runtime lifecycle changed during revision rollover')
     }
-    await publishRuntimeModelContext(nextRun)
     if (root.dataset.sync === 'clean') {
       status.textContent = 'Updated Editor changes from server'
     }
@@ -4013,10 +4049,7 @@ runtimeDebug.addEventListener('change', () => {
 runtimeQuality.addEventListener('change', () => {
   const tier = runtimeQuality.value
   void saveRuntimeQuality(tier).catch(error => {
-    root.dataset.sync = 'error'
-    setEditorDisabled(false)
     runtimeQuality.value = runtimeQualityTier
-    runtimeQuality.disabled = false
     status.textContent = error instanceof Error ? error.message : String(error)
   })
 })
@@ -4320,6 +4353,28 @@ revealSelection.addEventListener('click', () => {
   selectObject(selected)
 })
 
+async function runSave(
+  saveOperation: (
+    context: RuntimeTransitionContext<CommittedRuntime>,
+  ) => Promise<CommittedRuntime>,
+): Promise<void> {
+  let failed = false
+  try {
+    await runtimeTransitions.enqueue('save', M7_REQUEST_TIMEOUT, async context => ({
+      phase: 'edit-ready',
+      committed: await saveOperation(context),
+      value: undefined,
+    }))
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    if (root.dataset.sync === 'saving') root.dataset.sync = failed ? 'error' : 'clean'
+    projectRuntimeUi(runtimeTransitions.snapshot())
+    if (failed && runtimeTransitions.snapshot().phase === 'edit-ready') save.disabled = false
+  }
+}
+
 async function saveProjectPort(
   context: RuntimeTransitionContext<CommittedRuntime>,
 ): Promise<CommittedRuntime> {
@@ -4345,6 +4400,10 @@ async function saveProjectPort(
           text: fileSource.value,
         }],
       },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
     if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
       throw new Error('Project changed while saving')
@@ -4353,6 +4412,10 @@ async function saveProjectPort(
     const pulled = await app.callServerTool({
       name: 'pull_project',
       arguments: { projectId: savedProjectId },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
     const snapshot = snapshotFromResult(pulled)
     if (snapshot === undefined) throw new Error('saved workspace snapshot was not returned')
@@ -4389,6 +4452,10 @@ async function saveProjectPort(
         source: 'human',
         operations,
       },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
     if (result.isError) throw new Error(resultError(result))
     const committed = record(result.structuredContent)
@@ -4398,6 +4465,10 @@ async function saveProjectPort(
     const pulled = await app.callServerTool({
       name: 'pull_project',
       arguments: { projectId: savedProjectId },
+    }, {
+      signal: context.signal,
+      timeout: M7_REQUEST_TIMEOUT,
+      maxTotalTimeout: M7_REQUEST_TIMEOUT,
     })
     if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
       throw new Error('Project changed while finalizing Runtime scene edits')
@@ -4431,6 +4502,10 @@ async function saveProjectPort(
       baseRevision: savedRevision,
       project: nextProject,
     },
+  }, {
+    signal: context.signal,
+    timeout: M7_REQUEST_TIMEOUT,
+    maxTotalTimeout: M7_REQUEST_TIMEOUT,
   })
   if (!context.isCurrent() || !savedStateIsCurrent(savedProjectId, savedRevision)) {
     throw new Error('Project changed while saving')
@@ -4456,11 +4531,7 @@ async function saveProjectPort(
 }
 
 save.addEventListener('click', () => {
-  void runtimeTransitions.enqueue('save', M7_REQUEST_TIMEOUT, async context => ({
-    phase: 'edit-ready',
-    committed: await saveProjectPort(context),
-    value: undefined,
-  })).catch(error => {
+  void runSave(saveProjectPort).catch(error => {
     if (!tearingDown) status.textContent = runtimeMessage(error).split('\n')[0]
   })
 })
@@ -4473,7 +4544,7 @@ loadExternal.addEventListener('click', () => {
     remoteSnapshot.revision,
     'Loaded external revision',
     remoteSnapshot.workspace,
-  )
+  ).catch(handleTransitionFailure)
 })
 deferExternal.addEventListener('click', () => {
   if (remoteSnapshot === undefined) return
@@ -4797,8 +4868,7 @@ const diagnostics = {
     },
     m7: {
       active: m7ActiveRun !== undefined,
-      lifecyclePending: runtimeTransitions.snapshot().operation !== undefined
-        || m7LifecycleTasks.size > 0,
+      lifecyclePending: runtimeTransitions.snapshot().operation !== undefined,
       lifecycle: runtimeTransitions.snapshot(),
       runId: m7ActiveRun?.runId,
       nonce: m7ActiveRun?.nonce,
