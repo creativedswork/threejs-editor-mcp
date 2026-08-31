@@ -125,6 +125,11 @@ const runtimeIdentitySchema = z.object({
   runId: runIdSchema,
   nonce: nonceSchema,
 })
+const preparedRuntimeRunSchema = runtimeIdentitySchema.extend({
+  buildId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  evidenceToken: nonceSchema,
+  expiresAt: z.string().datetime(),
+})
 const runtimeTargetSchema = z.enum(['active', 'validation'])
 const runtimeOwnerSchema = z.object({
   sessionId: z.string().min(1).max(128),
@@ -1681,6 +1686,59 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       `Three.js project inspection:\n${JSON.stringify(detail)}`,
       detail,
     )
+  })
+
+  registerAppTool(server, 'prepare_runtime_run', {
+    title: 'Prepare Three.js Runtime run',
+    description: 'Prepares an owner-scoped candidate without changing the active Runtime.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      buildId: buildIdSchema.optional(),
+      runId: runIdSchema,
+      nonce: nonceSchema,
+    },
+    outputSchema: preparedRuntimeRunSchema,
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, revision, buildId, runId, nonce }, { signal, _meta }) => {
+    const prepared = await workspaces.prepareRuntimeRun(
+      projectId,
+      revision,
+      buildId,
+      runId,
+      nonce,
+      runtimeOwner(_meta),
+      signal,
+    )
+    return textResult(`Prepared Runtime run ${runId}.`, {
+      ...prepared,
+      expiresAt: new Date(prepared.expiresAt).toISOString(),
+    })
+  })
+
+  registerAppTool(server, 'commit_runtime_run', {
+    title: 'Commit Three.js Runtime run',
+    description: 'Promotes a prepared Runtime only when the expected active identity still matches.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      runId: runIdSchema,
+      nonce: nonceSchema,
+      expectedActive: runtimeIdentitySchema.optional(),
+    },
+    outputSchema: preparedRuntimeRunSchema,
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, revision, runId, nonce, expectedActive }, { signal, _meta }) => {
+    const committed = await workspaces.commitRuntimeRun(
+      { projectId, revision, runId, nonce },
+      expectedActive,
+      runtimeOwner(_meta),
+      signal,
+    )
+    return textResult(`Committed Runtime run ${runId}.`, {
+      ...committed,
+      expiresAt: new Date(committed.expiresAt).toISOString(),
+    })
   })
 
   registerAppTool(server, 'register_runtime_run', {

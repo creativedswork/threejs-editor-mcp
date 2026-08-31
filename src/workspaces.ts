@@ -201,6 +201,11 @@ const activeRuntimeSchema = z.object({
   ownerPid: z.number().int().positive().optional(),
 })
 type ActiveRuntime = z.infer<typeof activeRuntimeSchema>
+export interface PreparedRuntimeRun extends RuntimeIdentity {
+  buildId?: string
+  evidenceToken: string
+  expiresAt: number
+}
 const importedSourceSchema = z.object({
   schemaVersion: z.literal(1),
   root: z.string().min(1),
@@ -630,6 +635,7 @@ export class WorkspaceStore {
   private readonly workspaces = new Map<string, RegisteredWorkspace>()
   private readonly sessionWorkspaceIds = new Set<string>()
   private readonly activeRuntimes = new Map<string, ActiveRuntime>()
+  private readonly preparedRuntimes = new Map<string, PreparedRuntimeRun>()
   private readonly activeRuntimeGrants = new Map<string, ActiveRuntimeGrant>()
   private readonly runtimeCommands = new Map<string, PendingRuntimeCommand>()
   private readonly verifiedResourceObjects = new Map<string, Promise<VerifiedResourceObject>>()
@@ -1343,40 +1349,10 @@ export class WorkspaceStore {
     }
     return this.withLock(projectId, async () => {
       signal?.throwIfAborted()
-      const workspace = this.workspaces.get(projectId)
-      if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
-      const snapshot = await this.loadUnlocked(projectId)
-      if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
-      if (buildId !== undefined) {
-        const expectedBuildId = buildIdFor({
-          projectId,
-          revision,
-          entry: snapshot.manifest.entry,
-          backend: snapshot.manifest.backend,
-          files: [],
-        })
-        const build = await this.readStoredBuild(snapshot.path, buildId)
-        if (buildId !== expectedBuildId
-          || build?.status !== 'ready'
-          || build.projectId !== projectId
-          || build.revision !== revision
-          || build.buildId !== buildId) {
-          throw new Error('Runtime buildId is missing, stale, or not a ready build for this revision')
-        }
-        const directory = this.metadataPath(snapshot.path, 'builds', buildId)
-        const [bundle, sourceMap] = await Promise.all([
-          this.readMetadataFile(snapshot.path, join(directory, 'bundle.js')),
-          this.readMetadataFile(snapshot.path, join(directory, 'bundle.js.map')),
-        ])
-        if (bundle.byteLength !== build.bundleBytes
-          || sourceMap.byteLength !== build.sourceMapBytes) {
-          throw new Error('Runtime build artifacts do not match ready build metadata')
-        }
-      }
-      const activePath = this.metadataPath(
-        snapshot.path,
-        'diagnostics',
-        'active-run.json',
+      const { snapshot, activePath } = await this.validateRuntimeBuild(
+        projectId,
+        revision,
+        buildId,
       )
       const ownerKey = owner === undefined ? undefined : this.runtimeKey(projectId, owner)
       if (ownerKey !== undefined && owner !== undefined) {
@@ -1460,6 +1436,103 @@ export class WorkspaceStore {
         signal.throwIfAborted()
       }
       return evidenceToken
+    })
+  }
+
+  async prepareRuntimeRun(
+    projectId: string,
+    revision: string,
+    buildId: string | undefined,
+    runId: string,
+    nonce: string,
+    owner: RuntimeOwner,
+    signal?: AbortSignal,
+    ttlMs = 30_000,
+  ): Promise<PreparedRuntimeRun> {
+    validateProjectId(projectId)
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
+      throw new Error('prepared Runtime TTL must be a positive integer')
+    }
+    return this.withLock(projectId, async () => {
+      signal?.throwIfAborted()
+      await this.validateRuntimeBuild(projectId, revision, buildId)
+      this.removeExpiredPreparedRuntimes()
+      const prepared = {
+        projectId,
+        revision,
+        buildId,
+        runId,
+        nonce,
+        evidenceToken: randomUUID(),
+        expiresAt: Date.now() + ttlMs,
+      }
+      this.preparedRuntimes.set(this.runtimeKey(projectId, owner), prepared)
+      return prepared
+    })
+  }
+
+  async commitRuntimeRun(
+    candidate: RuntimeIdentity,
+    expectedActive: RuntimeIdentity | undefined,
+    owner: RuntimeOwner,
+    signal?: AbortSignal,
+  ): Promise<PreparedRuntimeRun> {
+    validateProjectId(candidate.projectId)
+    return this.withLock(candidate.projectId, async () => {
+      signal?.throwIfAborted()
+      this.removeExpiredPreparedRuntimes()
+      const key = this.runtimeKey(candidate.projectId, owner)
+      const prepared = this.preparedRuntimes.get(key)
+      if (prepared === undefined || !sameRuntimeIdentity(prepared, candidate)) {
+        throw new Error('prepared Runtime run is missing, expired, or stale')
+      }
+      const active = this.activeRuntimes.get(key)
+      const activeMatches = expectedActive === undefined
+        ? active === undefined
+        : active !== undefined
+          && active.nonce !== undefined
+          && candidate.projectId === expectedActive.projectId
+          && active.revision === expectedActive.revision
+          && active.runId === expectedActive.runId
+          && active.nonce === expectedActive.nonce
+      if (!activeMatches) {
+        throw new Error('active Runtime changed before candidate commit')
+      }
+      const { snapshot, activePath } = await this.validateRuntimeBuild(
+        candidate.projectId,
+        candidate.revision,
+        prepared.buildId,
+      )
+      const previousStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
+      const next = activeRuntimeSchema.parse({
+        revision: prepared.revision,
+        buildId: prepared.buildId,
+        runId: prepared.runId,
+        nonce: prepared.nonce,
+        evidenceToken: prepared.evidenceToken,
+        sessionId: owner.sessionId,
+        connectionGeneration: owner.connectionGeneration,
+        ownerId: this.runtimeOwnerId,
+        ownerPid: process.pid,
+      })
+      await this.writeAtomic(snapshot.path, activePath, canonicalBytes(next))
+      if (signal?.aborted) {
+        if (previousStoredRuntime === undefined) {
+          await this.clearActiveRuntime(snapshot.path, next.revision, next.runId)
+        } else {
+          await this.writeAtomic(
+            snapshot.path,
+            activePath,
+            canonicalBytes(previousStoredRuntime),
+          )
+        }
+        signal.throwIfAborted()
+      }
+      this.rejectRuntimeCommand(key, 'Runtime was replaced')
+      this.activeRuntimeGrants.delete(key)
+      this.activeRuntimes.set(key, next)
+      this.preparedRuntimes.delete(key)
+      return prepared
     })
   }
 
@@ -2152,6 +2225,53 @@ export class WorkspaceStore {
 
   private runtimeKey(projectId: string, owner: RuntimeOwner): string {
     return `${projectId}\0${owner.sessionId}\0${owner.connectionGeneration}`
+  }
+
+  private removeExpiredPreparedRuntimes(now = Date.now()): void {
+    for (const [key, prepared] of this.preparedRuntimes) {
+      if (prepared.expiresAt <= now) this.preparedRuntimes.delete(key)
+    }
+  }
+
+  private async validateRuntimeBuild(
+    projectId: string,
+    revision: string,
+    buildId: string | undefined,
+  ): Promise<{ snapshot: WorkspaceSnapshot; activePath: string }> {
+    const workspace = this.workspaces.get(projectId)
+    if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
+    const snapshot = await this.loadUnlocked(projectId)
+    if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
+    if (buildId !== undefined) {
+      const expectedBuildId = buildIdFor({
+        projectId,
+        revision,
+        entry: snapshot.manifest.entry,
+        backend: snapshot.manifest.backend,
+        files: [],
+      })
+      const build = await this.readStoredBuild(snapshot.path, buildId)
+      if (buildId !== expectedBuildId
+        || build?.status !== 'ready'
+        || build.projectId !== projectId
+        || build.revision !== revision
+        || build.buildId !== buildId) {
+        throw new Error('Runtime buildId is missing, stale, or not a ready build for this revision')
+      }
+      const directory = this.metadataPath(snapshot.path, 'builds', buildId)
+      const [bundle, sourceMap] = await Promise.all([
+        this.readMetadataFile(snapshot.path, join(directory, 'bundle.js')),
+        this.readMetadataFile(snapshot.path, join(directory, 'bundle.js.map')),
+      ])
+      if (bundle.byteLength !== build.bundleBytes
+        || sourceMap.byteLength !== build.sourceMapBytes) {
+        throw new Error('Runtime build artifacts do not match ready build metadata')
+      }
+    }
+    return {
+      snapshot,
+      activePath: this.metadataPath(snapshot.path, 'diagnostics', 'active-run.json'),
+    }
   }
 
   private rejectRuntimeCommand(key: string, reason: string): void {
