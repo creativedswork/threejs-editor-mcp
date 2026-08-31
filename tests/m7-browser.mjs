@@ -275,8 +275,7 @@ try {
   const livery = appFrame.getByRole('checkbox', { name: 'Livery' })
   assert.equal(await livery.isChecked(), false)
 
-  await livery.click({ trial: true, timeout: runtimeReplacementTimeout })
-  await livery.check()
+  await livery.check({ force: true })
   await appFrame.waitForFunction(previous => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.sync === 'clean'
