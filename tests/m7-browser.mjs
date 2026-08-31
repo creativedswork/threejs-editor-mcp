@@ -158,6 +158,14 @@ function assertRuntimeContinuity(samples) {
   assert.ok(samples.every(sample => sample.visibleCount === 1))
 }
 
+async function clickAppButton(appFrame, name) {
+  await appFrame.getByRole('button', { name, exact: true }).evaluate(button => {
+    if (!(button instanceof HTMLButtonElement)) throw new Error(`${name} button was not found`)
+    if (button.disabled) throw new Error(`${name} button was disabled`)
+    button.click()
+  })
+}
+
 async function callHarnessTool(name, arguments_) {
   const catalogResponse = await fetch(`${webUrl}/api/mcp-apps/catalog`)
   assert.equal(catalogResponse.status, 200)
@@ -320,7 +328,7 @@ try {
       && metrics.m7.ready?.mode === 'edit'
   }, ai.structuredContent.revision, { timeout: runtimeReplacementTimeout })
 
-  await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
+  await clickAppButton(appFrame, 'Play')
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.playState === 'playing'
@@ -360,7 +368,7 @@ try {
   const firstRun = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   assert.equal(firstRun.candidate, false)
   await startRuntimeContinuityProbe(appFrame)
-  await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
+  await clickAppButton(appFrame, 'Stop')
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.m7.active === true
@@ -382,7 +390,7 @@ try {
   const firstStopPixels = await pixelStats((await runtimeSurface(appFrame)).runtimeFrame)
   assertRenderedPixels(firstStopPixels)
 
-  await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
+  await clickAppButton(appFrame, 'Play')
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.playState === 'playing'
@@ -482,7 +490,7 @@ try {
     }, 10)
   }, restarted.runId)
   await startRuntimeContinuityProbe(appFrame)
-  await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
+  await clickAppButton(appFrame, 'Stop')
   let overlap
   try {
     await Promise.all([
