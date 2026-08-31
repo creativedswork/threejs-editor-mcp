@@ -118,6 +118,32 @@ test('promotes a hidden candidate before disposing the active Runtime', async ()
   assert.doesNotMatch(start, /stopM7Runtime\(false, false\)/)
 })
 
+test('reuses one validated Runtime artifact for an unchanged revision', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const bundleFor = source.slice(
+    source.indexOf('async function runtimeBundleFor('),
+    source.indexOf('async function stopValidationRuntime('),
+  )
+  const start = source.slice(
+    source.indexOf('async function startM7Runtime('),
+    source.indexOf('function startM7RuntimePort('),
+  )
+  const cacheHit = bundleFor.indexOf('m7Bundle?.projectId === run.projectId')
+  const build = bundleFor.indexOf("name: 'build_project'")
+  assert.ok(cacheHit >= 0)
+  assert.ok(build > cacheHit)
+  assert.match(bundleFor, /buildId: build\.buildId/)
+  assert.match(bundleFor, /validated: false/)
+  assert.match(start, /artifact = await runtimeBundleFor\(run, signal\)/)
+  assert.doesNotMatch(start, /name: 'build_project'/)
+  assert.doesNotMatch(start, /runtimeAssets\(/)
+  assert.match(start, /const validatesArtifact = !artifact\.validated/)
+  assert.match(start, /artifact\.validated = true/)
+  assert.match(source, /buildRequests: m7BuildRequests/)
+  assert.match(source, /assetFetches: m7AssetFetches/)
+  assert.match(source, /validationStarts: m7ValidationStarts/)
+})
+
 test('projects readiness from the Runtime transition controller', async () => {
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
   assert.doesNotMatch(source, /m7StartQueue|m7PendingStartController/)

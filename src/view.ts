@@ -605,13 +605,19 @@ let m7EditorSceneReport: M7EditorSceneReport | undefined
 let m7ValidationRun: M7Run | undefined
 let m7EvidenceToken: string | undefined
 let m7Bundle: {
+  projectId: string
   revision: string
   buildId: string
+  build: Record<string, unknown>
   bundle: string
   backend: 'webgl' | 'webgpu' | 'raw-webgpu'
   assets: RuntimeAsset[]
+  validated: boolean
 } | undefined
 const runtimeAssetCache = new RuntimeAssetCache()
+let m7BuildRequests = 0
+let m7AssetFetches = 0
+let m7ValidationStarts = 0
 let runtimeHarnessPulling = false
 const runtimeHarnessCommands = new Set<string>()
 let restoredDraftOperations: EditorCommandOperation[] = []
@@ -2349,6 +2355,7 @@ async function runtimeAssets(
       const parts: Uint8Array[] = []
       for (let index = 0; index < Number(chunks); index += 1) {
         const uri = `${resourceUri}/${String(index)}`
+        m7AssetFetches += 1
         const result = await app.readServerResource({ uri }, {
           signal,
           timeout: M7_REQUEST_TIMEOUT,
@@ -2684,21 +2691,28 @@ function promoteM7CandidateFrame(candidate: HTMLIFrameElement): HTMLIFrameElemen
   return previous
 }
 
-async function runtimeBundleFor(run: M7Run): Promise<NonNullable<typeof m7Bundle>> {
-  if (m7Bundle?.revision === run.revision) return m7Bundle
+async function runtimeBundleFor(
+  run: M7Run,
+  signal?: AbortSignal,
+): Promise<NonNullable<typeof m7Bundle>> {
+  if (m7Bundle?.projectId === run.projectId
+    && m7Bundle.revision === run.revision) return m7Bundle
+  m7BuildRequests += 1
   const buildResult = await app.callServerTool({
     name: 'build_project',
     arguments: { projectId: run.projectId, revision: run.revision },
   }, {
+    signal,
     timeout: M7_REQUEST_TIMEOUT,
     maxTotalTimeout: M7_REQUEST_TIMEOUT,
   })
   if (buildResult.isError) throw new Error(resultError(buildResult))
   const build = record(buildResult.structuredContent)
+  const backend = build?.backend
   if (build?.status !== 'ready'
     || typeof build.bundleUri !== 'string'
     || typeof build.buildId !== 'string'
-    || (build.backend !== 'webgl' && build.backend !== 'webgpu' && build.backend !== 'raw-webgpu')) {
+    || (backend !== 'webgl' && backend !== 'webgpu' && backend !== 'raw-webgpu')) {
     const diagnostics = Array.isArray(build?.diagnostics) ? build.diagnostics.map(record) : []
     throw new Error(String(
       diagnostics.find(item => item?.severity === 'error')?.message
@@ -2708,17 +2722,22 @@ async function runtimeBundleFor(run: M7Run): Promise<NonNullable<typeof m7Bundle
   const resource = await app.readServerResource({
     uri: build.bundleUri,
   }, {
+    signal,
     timeout: M7_REQUEST_TIMEOUT,
     maxTotalTimeout: M7_REQUEST_TIMEOUT,
   })
-  m7Bundle = {
+  const artifact: NonNullable<typeof m7Bundle> = {
+    projectId: run.projectId,
     revision: run.revision,
     buildId: build.buildId,
+    build,
     bundle: resourceText(resource, build.bundleUri),
-    backend: build.backend,
-    assets: await runtimeAssets(build),
+    backend,
+    assets: await runtimeAssets(build, signal),
+    validated: false,
   }
-  return m7Bundle
+  m7Bundle = artifact
+  return artifact
 }
 
 async function stopValidationRuntime(): Promise<void> {
@@ -3063,89 +3082,31 @@ async function startM7Runtime(
     ?? (previousRun?.projectId === startProjectId ? m7Metrics : undefined)
   const restoredSelectedUuid = restoredRuntimeState?.selectedUuid
   if (token !== m7StartToken) return
-  status.textContent = `Building ${startWorkspace.entry}`
-  let buildResult
-  try {
-    buildResult = await app.callServerTool({
-      name: 'build_project',
-      arguments: { projectId: startProjectId, revision: startRevision },
-    }, {
-      signal,
-      timeout: M7_REQUEST_TIMEOUT,
-      maxTotalTimeout: M7_REQUEST_TIMEOUT,
-    })
-  } catch (error) {
-    if (tearingDown || !runtimeTransitions.isCurrent(token) || signal.aborted) return
-    throw error
-  }
-  if (tearingDown || token !== m7StartToken) return
-  if (buildResult.isError) throw new Error(resultError(buildResult))
-  const build = record(buildResult.structuredContent)
-  const diagnostics = Array.isArray(build?.diagnostics)
-    ? build.diagnostics.map(record).filter(item => item !== undefined)
-    : []
-  if (build?.status !== 'ready') {
-    const first = diagnostics.find(item => item?.severity === 'error')
-    const location = typeof first?.file === 'string'
-      ? `${first.file}`
-        + `${typeof first.line === 'number' ? `:${String(first.line)}` : ''}`
-        + `${typeof first.column === 'number' ? `:${String(first.column)}` : ''}: `
-      : ''
-    throw new Error(`${location}${String(first?.message ?? 'Workspace build failed')}`)
-  }
-  if (typeof build.bundleUri !== 'string'
-    || typeof build.buildId !== 'string'
-    || (build.backend !== 'webgl' && build.backend !== 'webgpu' && build.backend !== 'raw-webgpu')) {
-    throw new Error('build_project returned invalid Runtime metadata')
-  }
-  let bundleResource
-  try {
-    bundleResource = await app.readServerResource({
-      uri: build.bundleUri,
-    }, {
-      signal,
-      timeout: M7_REQUEST_TIMEOUT,
-      maxTotalTimeout: M7_REQUEST_TIMEOUT,
-    })
-  } catch (error) {
-    if (tearingDown || !runtimeTransitions.isCurrent(token) || signal.aborted) return
-    throw error
-  }
-  const bundle = resourceText(bundleResource, build.bundleUri)
-  const assets = await runtimeAssets(build, signal)
-  if (tearingDown || token !== m7StartToken) return
-  const previousBundle = m7Bundle
-  m7Bundle = {
-    revision: startRevision,
-    buildId: build.buildId,
-    bundle,
-    backend: build.backend,
-    assets,
-  }
-  if (m7ActiveRun !== undefined) {
-    try {
-      await ensureValidationRuntime({
-        projectId: startProjectId,
-        revision: startRevision,
-        runId: crypto.randomUUID(),
-        nonce: crypto.randomUUID(),
-      })
-      await stopValidationRuntime()
-    } catch (error) {
-      m7Bundle = previousBundle
-      throw error
-    }
-  }
-  if (tearingDown || token !== m7StartToken) return
-  if (m5ActiveRun !== undefined) await stopIsolatedRuntime()
-  if (tearingDown || token !== m7StartToken) return
-
   const run: M7Run = {
     projectId: startProjectId,
     runId: crypto.randomUUID(),
     nonce: crypto.randomUUID(),
     revision: startRevision,
   }
+  const previousBundle = m7Bundle
+  status.textContent = `Building ${startWorkspace.entry}`
+  let artifact: NonNullable<typeof m7Bundle>
+  try {
+    artifact = await runtimeBundleFor(run, signal)
+  } catch (error) {
+    if (tearingDown || !runtimeTransitions.isCurrent(token) || signal.aborted) return
+    throw error
+  }
+  if (tearingDown || token !== m7StartToken) {
+    m7Bundle = previousBundle
+    return
+  }
+  const validatesArtifact = !artifact.validated
+  if (tearingDown || token !== m7StartToken) return
+  if (m5ActiveRun !== undefined) await stopIsolatedRuntime()
+  if (tearingDown || token !== m7StartToken) return
+
+  const { build, bundle, assets } = artifact
   const candidateFrame = createM7CandidateFrame()
   const starting: M7StartingRun = {
     run,
@@ -3251,6 +3212,10 @@ async function startM7Runtime(
       project as never,
       objects as EditorObjectSnapshot[],
     ) as Project
+    if (validatesArtifact) {
+      artifact.validated = true
+      m7ValidationStarts += 1
+    }
     const committedResult = await app.callServerTool({
       name: 'commit_runtime_run',
       arguments: {
@@ -4971,6 +4936,9 @@ const diagnostics = {
       lastDispose: m7LastDispose,
       messagesAfterStop: m7MessagesAfterStop,
       runtimeFrameVisible: !runtimeFrame.hidden,
+      buildRequests: m7BuildRequests,
+      assetFetches: m7AssetFetches,
+      validationStarts: m7ValidationStarts,
       debugMode: runtimeDebugMode,
     },
   }),

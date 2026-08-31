@@ -100,6 +100,64 @@ async function pixelStats(runtimeFrame) {
   })
 }
 
+function assertRenderedPixels(pixels) {
+  assert.ok(pixels.lit > pixels.sampled * 0.2)
+  assert.ok(pixels.colors > 100)
+  assert.ok(pixels.contrast > pixels.sampled * 0.03)
+}
+
+function runtimeWork(metrics) {
+  return {
+    buildRequests: metrics.buildRequests,
+    assetFetches: metrics.assetFetches,
+    validationStarts: metrics.validationStarts,
+  }
+}
+
+async function startRuntimeContinuityProbe(appFrame) {
+  await appFrame.evaluate(() => {
+    const probe = { stopped: false, samples: [] }
+    globalThis.__M2_RUNTIME_CONTINUITY__ = probe
+    const sample = () => {
+      const frames = [...document.querySelectorAll('iframe.runtime-sandbox')]
+      const visible = frames.filter(frame => {
+        const style = getComputedStyle(frame)
+        const bounds = frame.getBoundingClientRect()
+        return !frame.hidden
+          && style.visibility !== 'hidden'
+          && style.display !== 'none'
+          && bounds.width > 0
+          && bounds.height > 0
+      })
+      probe.samples.push({
+        activeCount: frames.filter(frame => frame.hasAttribute('data-runtime-sandbox')).length,
+        candidateCount: frames.filter(frame => frame.hasAttribute('data-runtime-candidate')).length,
+        visibleCount: visible.length,
+      })
+      if (!probe.stopped) requestAnimationFrame(sample)
+    }
+    sample()
+  })
+}
+
+async function finishRuntimeContinuityProbe(appFrame) {
+  return appFrame.evaluate(async () => {
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const probe = globalThis.__M2_RUNTIME_CONTINUITY__
+    probe.stopped = true
+    delete globalThis.__M2_RUNTIME_CONTINUITY__
+    return probe.samples
+  })
+}
+
+function assertRuntimeContinuity(samples) {
+  assert.ok(samples.length >= 2)
+  assert.ok(samples.some(sample => sample.candidateCount === 1))
+  assert.ok(samples.every(sample => sample.activeCount === 1))
+  assert.ok(samples.every(sample => sample.candidateCount <= 1))
+  assert.ok(samples.every(sample => sample.visibleCount === 1))
+}
+
 async function callHarnessTool(name, arguments_) {
   const catalogResponse = await fetch(`${webUrl}/api/mcp-apps/catalog`)
   assert.equal(catalogResponse.status, 200)
@@ -281,9 +339,7 @@ try {
   assert.equal(finalMetrics.livery, true)
   assert.equal(finalMetrics.bodyScale, 1.04)
   const pixels = await pixelStats(runtimeFrame)
-  assert.ok(pixels.lit > pixels.sampled * 0.2)
-  assert.ok(pixels.colors > 100)
-  assert.ok(pixels.contrast > pixels.sampled * 0.03)
+  assertRenderedPixels(pixels)
   await page.screenshot({
     path: resolve(artifacts, 'm7-p1-final.png'),
     fullPage: false,
@@ -299,6 +355,8 @@ try {
   }
   await appFrame.evaluate(() => globalThis.__THREE_M7__.setM7DebugMode('final'))
   const firstRun = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
+  assert.equal(firstRun.candidate, false)
+  await startRuntimeContinuityProbe(appFrame)
   await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
   await appFrame.waitForFunction(() => {
     const metrics = globalThis.__THREE_M7__.metrics()
@@ -308,10 +366,18 @@ try {
       && metrics.playState === 'editing'
   }, undefined, { timeout: runtimeReplacementTimeout })
   const stopped = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
+  const firstStopContinuity = await finishRuntimeContinuityProbe(appFrame)
+  assertRuntimeContinuity(firstStopContinuity)
   await page.waitForTimeout(300)
   const afterStop = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   assert.ok(afterStop.metrics.frame >= stopped.metrics.frame)
   assert.equal(afterStop.messagesAfterStop, 0)
+  assert.equal(afterStop.candidate, false)
+  assert.notEqual(afterStop.runId, firstRun.runId)
+  assert.equal(afterStop.build.buildId, firstRun.build.buildId)
+  assert.deepEqual(runtimeWork(afterStop), runtimeWork(firstRun))
+  const firstStopPixels = await pixelStats((await runtimeSurface(appFrame)).runtimeFrame)
+  assertRenderedPixels(firstStopPixels)
 
   await appFrame.getByRole('button', { name: 'Play', exact: true }).click()
   await appFrame.waitForFunction(() => {
@@ -323,6 +389,7 @@ try {
   const restarted = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics().m7)
   assert.equal(restarted.ready.rendererCount, 1)
   assert.equal(restarted.build.buildId, firstRun.build.buildId)
+  assert.deepEqual(runtimeWork(restarted), runtimeWork(firstRun))
   await appFrame.evaluate(() => {
     const objectButton = [...document.querySelectorAll('button')]
       .find(button => button.textContent?.trim() === 'VF-26')
@@ -411,6 +478,7 @@ try {
       }
     }, 10)
   }, restarted.runId)
+  await startRuntimeContinuityProbe(appFrame)
   await appFrame.getByRole('button', { name: 'Stop', exact: true }).click()
   let overlap
   try {
@@ -433,6 +501,8 @@ try {
   } finally {
     releaseModelContext()
   }
+  const secondStopContinuity = await finishRuntimeContinuityProbe(appFrame)
+  assertRuntimeContinuity(secondStopContinuity)
   const {
     editingWhileLifecyclePending,
     dirtyWhileLifecyclePending,
@@ -446,10 +516,18 @@ try {
   const overlapPositionX = appFrame.getByRole('spinbutton', { name: 'Position X' })
   assert.equal(dirtyWhileLifecyclePending.playState, 'editing')
   assert.equal(dirtyWhileLifecyclePending.m7.lifecyclePending, false)
+  assert.equal(dirtyWhileLifecyclePending.m7.candidate, false)
+  assert.equal(
+    dirtyWhileLifecyclePending.m7.build.buildId,
+    restarted.build.buildId,
+  )
+  assert.deepEqual(runtimeWork(dirtyWhileLifecyclePending.m7), runtimeWork(restarted))
   assert.equal(dirtyWhileLifecyclePending.sync, 'dirty')
   assert.equal(saveStartedWhileLifecyclePending.playState, 'editing')
   assert.equal(saveStartedWhileLifecyclePending.m7.lifecyclePending, true)
   assert.equal(saveStartedWhileLifecyclePending.sync, 'saving')
+  const secondStopPixels = await pixelStats((await runtimeSurface(appFrame)).runtimeFrame)
+  assertRenderedPixels(secondStopPixels)
   await appFrame.waitForFunction(previousRevision => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.playState === 'editing'
@@ -483,6 +561,11 @@ try {
       rendererCount: restarted.ready.rendererCount,
       cacheBuildId: restarted.build.buildId,
       messagesAfterStop: afterStop.messagesAfterStop,
+      firstStopPixels,
+      secondStopPixels,
+      firstStopContinuity,
+      secondStopContinuity,
+      runtimeWork: runtimeWork(restarted),
     },
     immediateSaveRace: {
       delayedModelContextStatus: delayedModelContext.status,
