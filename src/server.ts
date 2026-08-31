@@ -1697,10 +1697,11 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       buildId: buildIdSchema.optional(),
       runId: runIdSchema,
       nonce: nonceSchema,
+      ttlMs: z.number().int().positive().max(600_000).optional(),
     },
     outputSchema: preparedRuntimeRunSchema,
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, revision, buildId, runId, nonce }, { signal, _meta }) => {
+  }, async ({ projectId, revision, buildId, runId, nonce, ttlMs }, { signal, _meta }) => {
     const prepared = await workspaces.prepareRuntimeRun(
       projectId,
       revision,
@@ -1709,6 +1710,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       nonce,
       runtimeOwner(_meta),
       signal,
+      ttlMs,
     )
     return textResult(`Prepared Runtime run ${runId}.`, {
       ...prepared,

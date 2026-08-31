@@ -3125,6 +3125,7 @@ async function startM7Runtime(
         buildId: build.buildId,
         runId: run.runId,
         nonce: run.nonce,
+        ttlMs: M7_TRANSITION_TIMEOUT + M7_LIFECYCLE_TIMEOUT,
       },
     }, {
       signal,

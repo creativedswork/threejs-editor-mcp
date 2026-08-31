@@ -71,6 +71,12 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
       runId: '44444444-4444-4444-8444-444444444444',
       nonce: '55555555-5555-4555-8555-555555555555',
     }
+    const excessiveLease = await client.callTool({
+      name: 'prepare_runtime_run',
+      arguments: { ...candidate, ttlMs: 600_001 },
+      _meta: ownerMeta,
+    })
+    assert.equal(excessiveLease.isError, true)
     const prepared = await client.callTool({
       name: 'prepare_runtime_run',
       arguments: candidate,
@@ -105,9 +111,14 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
       active.runId,
     )
 
+    const expiring = await client.callTool({
+      name: 'prepare_runtime_run',
+      arguments: { ...candidate, ttlMs: 20 },
+      _meta: ownerMeta,
+    })
     await new Promise(resolve => setTimeout(
       resolve,
-      Math.max(0, Date.parse(prepared.structuredContent.expiresAt) - Date.now() + 20),
+      Math.max(0, Date.parse(expiring.structuredContent.expiresAt) - Date.now() + 20),
     ))
     const expired = await client.callTool({
       name: 'commit_runtime_run',
