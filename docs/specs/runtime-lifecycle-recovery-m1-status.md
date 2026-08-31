@@ -1,10 +1,12 @@
 # Runtime Lifecycle Recovery M1 Status
 
-Updated: 2026-08-30
+Updated: 2026-08-31
 Milestone: M1 Single transition owner
-State: `MILESTONE_CANDIDATE`
-Gate: `AWAITING_ACCEPTANCE`
+State: `ACCEPTED`
+Gate: `NEXT_MILESTONE`
 Base: `bd2bc9`
+Accepted: 2026-08-31
+Accepted implementation: `a101d5a`
 
 ## Scope
 
@@ -23,20 +25,26 @@ promotion/cache changes, and Phase 3 authoritative Save are excluded.
 | 1. Controller core | `COMMITTED_LOCAL` | `470a40c` | Added the serialized controller, epoch/cancellation/deadline ownership, stable idle barrier, invariants, and focused tests. |
 | 2. Lifecycle integration | `COMMITTED_LOCAL` | `0b1f92c` | Routed Play, Stop, Save, Reload, and external snapshots through the controller; UI and Runtime messages use its snapshot epoch. |
 | 3. Effects and cleanup | `COMMITTED_LOCAL` | `93106e7` | Isolated bounded model-context and diagnostics effects; all primary, quality, and parameter Save paths use one final unlock path. |
-| Fix. External adoption deadline | `COMMITTED_LOCAL` | this commit | Kept `pull_project` on its request timeout while restoring external Runtime adoption to the existing 300-second lifecycle deadline; synchronized the immediate-Save harness sample with the queued controller operation. |
+| Fix. External adoption deadline | `COMMITTED_LOCAL` | `a101d5a` | Kept `pull_project` on its request timeout while restoring external Runtime adoption to the existing 300-second lifecycle deadline; synchronized the immediate-Save harness sample with the queued controller operation. |
 
 ## Dirty Work Excluded
 
 - `src/view.ts` and `src/server.ts` contain active
   `play-stop-restore-failure` probes that must remain on disk and outside M1
   commits.
-- `src/view.ts`, `.dbg`, and `debug-m1-adopt-snapshot-timeout.md` contain the
-  open `m1-adopt-snapshot-timeout` trace and evidence. They remain on disk
-  outside the Fix commit until user acceptance.
 - Existing changes in M9, stdio, builder, workspaces, server, fixtures,
   reports, `.dbg`, and debug notes are unrelated and remain excluded.
 - `docs/specs/runtime-lifecycle-recovery.md` is an existing untracked design
   input and remains excluded.
+
+## Acceptance Closeout
+
+- Removed only the `m1-adopt-snapshot-timeout` trace helper and probe regions
+  from `src/view.ts`.
+- Removed that session's debug note, environment file, NDJSON log, and three
+  isolated smoke roots.
+- No matching collector was running. The `frequent-tool-aborts` collector on
+  `127.0.0.1:7777` and all unrelated probes and evidence were left untouched.
 
 ## Concentrated Self-Test
 
@@ -53,11 +61,11 @@ promotion/cache changes, and Phase 3 authoritative Save are excluded.
   initial open, human livery Save, AI `bodyScale=1.04` adoption, Play, Stop,
   restart, and immediate Save. Final output recorded `sync=clean`,
   `revisionChanged=true`, `positionX=0.35`, and `appProblems=[]`.
-- Pre-fix evidence is
-  `.tmp/m1-adopt-pre.xpZEZf/evidence/m7-seed-pre.stderr.log`; post-fix output
-  is `.tmp/m1-adopt-pre.xpZEZf/evidence/m7-final.stdout.log`, with empty test
-  stderr. The outer TRAE sandbox reported Chrome user-profile file access
-  after the test completed; all browser assertions had already passed.
+- Before acceptance cleanup, pre-fix and post-fix evidence was recorded under
+  `.tmp/m1-adopt-pre.xpZEZf/evidence/`; post-fix test stderr was empty. The
+  outer TRAE sandbox reported Chrome user-profile file access after the test
+  completed; all browser assertions had already passed. The isolated evidence
+  root was removed during acceptance closeout.
 - Implementation took tens of minutes; the concentrated automated self-test
   took under one minute, while the isolated browser smoke took several minutes.
 
@@ -85,7 +93,7 @@ Target:
 - Every Save exit settles by its deadline and releases UI controls.
 - M0 immediate-Save behavior remains valid.
 
-The milestone must stop at `MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE`.
+The milestone was accepted and advanced to `ACCEPTED / NEXT_MILESTONE`.
 
 ## Manual Acceptance
 
@@ -101,6 +109,6 @@ Failure is any overlapping operation, stale event mutation, Save left in
 `saving`, host effect changing the Runtime phase, or regression in the final
 clean revision and saved transform.
 
-No push, amend, rebase, Phase 2, Phase 3, external repository change, user
-service restart, or debug-probe cleanup was performed. Isolated hosts used
-random ports and were stopped after each run.
+No push, amend, rebase, Phase 2, Phase 3, external repository change, or user
+service restart was performed. Only the accepted M1 debug session was cleaned;
+isolated hosts used random ports and were stopped after each run.
