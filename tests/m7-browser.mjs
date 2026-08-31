@@ -275,7 +275,11 @@ try {
   const livery = appFrame.getByRole('checkbox', { name: 'Livery' })
   assert.equal(await livery.isChecked(), false)
 
-  await livery.check({ force: true })
+  await livery.evaluate(input => {
+    if (!(input instanceof HTMLInputElement)) throw new Error('Livery input was not found')
+    input.click()
+    if (!input.checked) throw new Error('Livery input did not change')
+  })
   await appFrame.waitForFunction(previous => {
     const metrics = globalThis.__THREE_M7__.metrics()
     return metrics.sync === 'clean'
