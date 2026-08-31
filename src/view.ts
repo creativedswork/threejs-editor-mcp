@@ -226,6 +226,7 @@ interface WorkspaceDraft {
 
 interface M7StartingRun {
   run: M7Run
+  frame: HTMLIFrameElement
   signal: AbortSignal
   runSent: boolean
 }
@@ -477,7 +478,7 @@ function compileLifecycle(source: string): GameLifecycle {
 const root = required<HTMLElement>('[data-three-editor]')
 const viewport = required<HTMLElement>('[data-viewport]')
 const canvas = required<HTMLCanvasElement>('[data-three-canvas]')
-const runtimeFrame = required<HTMLIFrameElement>('[data-runtime-sandbox]')
+let runtimeFrame = required<HTMLIFrameElement>('[data-runtime-sandbox]')
 const validationFrame = required<HTMLIFrameElement>('[data-validation-runtime]')
 const title = required<HTMLInputElement>('[data-title]')
 const revisionOutput = required<HTMLOutputElement>('[data-revision]')
@@ -1775,14 +1776,17 @@ function updateRuntimeMirror(
   if (refresh) renderHierarchy()
 }
 
-function acceptRuntimeEditorScene(objects: EditorObjectSnapshot[], run: M7Run): void {
+function acceptRuntimeEditorScene(
+  objects: EditorObjectSnapshot[],
+  run: M7Run,
+  projected?: Project,
+): void {
   if (tearingDown
     || project === undefined
     || revision === undefined
     || projectId !== run.projectId
     || revision !== run.revision) return
-  const projected = editorProjectFromSnapshots(project as never, objects) as Project
-  replaceRuntime(projected)
+  replaceRuntime(projected ?? editorProjectFromSnapshots(project as never, objects) as Project)
   pendingOperations = []
   pendingEditorOperations = []
   const baseline = serializeProject()
@@ -2649,6 +2653,37 @@ function loadM7Frame(
   })
 }
 
+function createM7CandidateFrame(): HTMLIFrameElement {
+  const frameElement = document.createElement('iframe')
+  frameElement.className = 'runtime-sandbox'
+  frameElement.dataset.runtimeCandidate = ''
+  frameElement.title = 'Candidate Three.js runtime'
+  frameElement.setAttribute('sandbox', 'allow-scripts')
+  frameElement.setAttribute('aria-hidden', 'true')
+  frameElement.tabIndex = -1
+  frameElement.style.visibility = 'hidden'
+  frameElement.style.pointerEvents = 'none'
+  runtimeFrame.insertAdjacentElement('afterend', frameElement)
+  return frameElement
+}
+
+function promoteM7CandidateFrame(candidate: HTMLIFrameElement): HTMLIFrameElement {
+  const previous = runtimeFrame
+  previous.removeAttribute('data-runtime-sandbox')
+  previous.setAttribute('aria-hidden', 'true')
+  previous.style.visibility = 'hidden'
+  previous.style.pointerEvents = 'none'
+  delete candidate.dataset.runtimeCandidate
+  candidate.dataset.runtimeSandbox = ''
+  candidate.title = 'Isolated Three.js runtime'
+  candidate.removeAttribute('aria-hidden')
+  candidate.removeAttribute('tabindex')
+  candidate.style.removeProperty('visibility')
+  candidate.style.removeProperty('pointer-events')
+  runtimeFrame = candidate
+  return previous
+}
+
 async function runtimeBundleFor(run: M7Run): Promise<NonNullable<typeof m7Bundle>> {
   if (m7Bundle?.revision === run.revision) return m7Bundle
   const buildResult = await app.callServerTool({
@@ -2964,10 +2999,17 @@ async function waitForM7EditorScene(run: M7Run): Promise<void> {
 
 async function disposeM7Runtime(
   run: M7Run,
-  preserveSurface = false,
+  frameElement: HTMLIFrameElement = runtimeFrame,
 ): Promise<Record<string, unknown> | undefined> {
-  const disposed = waitForM7Event(['disposed'], run, 10_000)
-  postM7Run(run, 'stop', { preserveSurface })
+  const disposed = waitForM7Event(
+    ['disposed'],
+    run,
+    10_000,
+    undefined,
+    undefined,
+    frameElement,
+  )
+  postM7Run(run, 'stop', {}, frameElement)
   const event = await disposed
   m7LastDispose = event.data
   if (typeof event.data?.exampleDisposeError === 'string') {
@@ -2990,7 +3032,7 @@ async function stopM7Runtime(
   }
   const run = m7ActiveRun
   try {
-    return await disposeM7Runtime(run, !hideFrame)
+    return await disposeM7Runtime(run)
   } finally {
     m7DisposedRuns.add(run.runId)
     if (m7ActiveRun === run) {
@@ -3015,8 +3057,10 @@ async function startM7Runtime(
   const startProjectId = projectId
   const startRevision = revision
   const startWorkspace = workspace
+  const previousRun = m7ActiveRun
+  const previousFrame = runtimeFrame
   const previousRuntimeView = record(restoredRuntimeState?.viewState)
-    ?? (m7ActiveRun?.projectId === startProjectId ? m7Metrics : undefined)
+    ?? (previousRun?.projectId === startProjectId ? m7Metrics : undefined)
   const restoredSelectedUuid = restoredRuntimeState?.selectedUuid
   if (token !== m7StartToken) return
   status.textContent = `Building ${startWorkspace.entry}`
@@ -3037,7 +3081,6 @@ async function startM7Runtime(
   if (tearingDown || token !== m7StartToken) return
   if (buildResult.isError) throw new Error(resultError(buildResult))
   const build = record(buildResult.structuredContent)
-  m7Build = build
   const diagnostics = Array.isArray(build?.diagnostics)
     ? build.diagnostics.map(record).filter(item => item !== undefined)
     : []
@@ -3095,33 +3138,26 @@ async function startM7Runtime(
   }
   if (tearingDown || token !== m7StartToken) return
   if (m5ActiveRun !== undefined) await stopIsolatedRuntime()
-  await stopM7Runtime(false, false)
   if (tearingDown || token !== m7StartToken) return
 
-  m7Events = []
-  m7Errors = []
-  m7Ready = undefined
-  m7Metrics = undefined
-  m7MessagesAfterStop = 0
-  m7EditorSceneAccepted = false
   const run: M7Run = {
     projectId: startProjectId,
     runId: crypto.randomUUID(),
     nonce: crypto.randomUUID(),
     revision: startRevision,
   }
-  m7EditorSceneReport = undefined
+  const candidateFrame = createM7CandidateFrame()
   const starting: M7StartingRun = {
     run,
+    frame: candidateFrame,
     signal,
     runSent: false,
   }
   m7StartingRun = starting
-  let registrationStarted = false
+  let committed = false
   try {
-    registrationStarted = true
-    const registered = await app.callServerTool({
-      name: 'register_runtime_run',
+    const preparedResult = await app.callServerTool({
+      name: 'prepare_runtime_run',
       arguments: {
         projectId: startProjectId,
         revision: startRevision,
@@ -3134,23 +3170,32 @@ async function startM7Runtime(
       timeout: M7_LIFECYCLE_TIMEOUT,
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
-    if (registered.isError) throw new Error(resultError(registered))
-    const registration = record(registered.structuredContent)
-    if (typeof registration?.evidenceToken !== 'string') {
-      throw new Error('register_runtime_run returned no Runtime evidence token')
+    if (preparedResult.isError) throw new Error(resultError(preparedResult))
+    const prepared = record(preparedResult.structuredContent)
+    if (typeof prepared?.evidenceToken !== 'string') {
+      throw new Error('prepare_runtime_run returned no Runtime evidence token')
     }
-    m7EvidenceToken = registration.evidenceToken
     if (token !== m7StartToken
       || starting.signal.aborted
       || m7StartingRun !== starting) {
       throw new Error('M7 Runtime start cancelled')
     }
-    await loadM7Frame(starting.signal)
-    const started = waitForM7Event(
+    await loadM7Frame(starting.signal, candidateFrame)
+    const ready = waitForM7Event(
       ['ready', 'runtime-error'],
       run,
       120_000,
       starting.signal,
+      undefined,
+      candidateFrame,
+    )
+    let editorScene = waitForM7Event(
+      ['editor-scene', 'runtime-error'],
+      run,
+      120_000,
+      starting.signal,
+      undefined,
+      candidateFrame,
     )
     postM7Run(run, 'run', {
       bundle,
@@ -3159,47 +3204,82 @@ async function startM7Runtime(
       assets,
       debugMode: runtimeDebugMode,
       mode,
-      evidenceToken: m7EvidenceToken,
+      evidenceToken: prepared.evidenceToken,
       ...previousRuntimeView === undefined ? {} : { viewState: previousRuntimeView },
       ...typeof restoredSelectedUuid === 'string' ? { selectedUuid: restoredSelectedUuid } : {},
-    })
+    }, candidateFrame)
     starting.runSent = true
-    const event = await started
+    const [readyEvent, initialSceneEvent] = await Promise.all([ready, editorScene])
     if (token !== m7StartToken
       || starting.signal.aborted
       || m7StartingRun !== starting) {
       throw new Error('M7 Runtime start cancelled')
     }
-    if (event.type === 'runtime-error') {
-      throw new Error(typeof event.data?.message === 'string'
-        ? event.data.message
+    if (readyEvent.type === 'runtime-error' || initialSceneEvent.type === 'runtime-error') {
+      const failed = readyEvent.type === 'runtime-error' ? readyEvent : initialSceneEvent
+      throw new Error(typeof failed.data?.message === 'string'
+        ? failed.data.message
         : 'Workspace Runtime failed')
     }
-    m7ActiveRun = run
-    m7Ready = event.data ?? {}
-    m7Metrics = event.data ?? {}
+    let sceneEvent = initialSceneEvent
     if (restoredDraftOperations.length > 0) {
-      const restored = waitForM7Event(
+      editorScene = waitForM7Event(
         ['editor-scene', 'runtime-error'],
         run,
         10_000,
         starting.signal,
+        undefined,
+        candidateFrame,
       )
       postM7Run(run, 'apply-draft-operations', {
         operations: restoredDraftOperations,
-      })
-      const restoredEvent = await restored
-      if (restoredEvent.type === 'runtime-error') {
-        throw new Error(typeof restoredEvent.data?.message === 'string'
-          ? restoredEvent.data.message
+      }, candidateFrame)
+      sceneEvent = await editorScene
+      if (sceneEvent.type === 'runtime-error') {
+        throw new Error(typeof sceneEvent.data?.message === 'string'
+          ? sceneEvent.data.message
           : 'Workspace Runtime draft restore failed')
       }
     }
+    const objects = Array.isArray(sceneEvent.data?.objects)
+      ? sceneEvent.data.objects.map(editorObjectSnapshot)
+      : []
+    if (!objects.every(object => object !== undefined) || project === undefined) {
+      throw new Error('Workspace Runtime returned an invalid editor scene')
+    }
+    const projected = editorProjectFromSnapshots(
+      project as never,
+      objects as EditorObjectSnapshot[],
+    ) as Project
+    const committedResult = await app.callServerTool({
+      name: 'commit_runtime_run',
+      arguments: {
+        ...run,
+        ...previousRun === undefined ? {} : { expectedActive: previousRun },
+      },
+    }, {
+      signal,
+      timeout: M7_LIFECYCLE_TIMEOUT,
+      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    })
+    if (committedResult.isError) throw new Error(resultError(committedResult))
+    committed = true
+    m7ActiveRun = run
+    m7EvidenceToken = prepared.evidenceToken
+    m7Build = build
+    m7Events = [initialSceneEvent, readyEvent]
+    m7Errors = []
+    m7Ready = readyEvent.data ?? {}
+    m7Metrics = readyEvent.data ?? {}
+    m7MessagesAfterStop = 0
+    m7EditorSceneAccepted = true
     m7StartingRun = undefined
+    promoteM7CandidateFrame(candidateFrame)
+    acceptRuntimeEditorScene(objects as EditorObjectSnapshot[], run, projected)
     if (mode === 'run') {
       playingProject = serializeProject()
       playingRevision = startRevision
-      playingRuntimeState ??= record(event.data?.editState)
+      playingRuntimeState ??= record(readyEvent.data?.editState)
     } else {
       playingProject = undefined
       playingRevision = undefined
@@ -3208,6 +3288,18 @@ async function startM7Runtime(
     status.textContent = mode === 'run'
       ? `${String(build.backend).toUpperCase()} Runtime`
       : `${String(build.backend).toUpperCase()} Edit`
+    if (previousRun === undefined) {
+      previousFrame.remove()
+    } else {
+      try {
+        await disposeM7Runtime(previousRun, previousFrame)
+      } catch (error) {
+        recordRuntimeWarning([`Previous Runtime cleanup warning: ${runtimeMessage(error)}`])
+      } finally {
+        m7DisposedRuns.add(previousRun.runId)
+        previousFrame.remove()
+      }
+    }
     return run
   } catch (error) {
     const cancelled = token !== m7StartToken
@@ -3215,22 +3307,17 @@ async function startM7Runtime(
       || m7StartingRun !== starting
     if (m7StartingRun === starting) m7StartingRun = undefined
     const cleanupErrors: unknown[] = []
-    if (starting.runSent) {
+    if (!committed && starting.runSent) {
       try {
-        await disposeM7Runtime(run)
+        await disposeM7Runtime(run, candidateFrame)
       } catch (disposeError) {
         cleanupErrors.push(disposeError)
       }
     }
-    m7DisposedRuns.add(run.runId)
-    m7EvidenceToken = undefined
-    runtimeFrame.hidden = true
-    if (registrationStarted) {
-      try {
-        await releaseM7Run(run)
-      } catch (releaseError) {
-        cleanupErrors.push(releaseError)
-      }
+    if (!committed) {
+      m7DisposedRuns.add(run.runId)
+      candidateFrame.remove()
+      m7Bundle = previousBundle
     }
     if (cleanupErrors.length > 0) {
       throw new AggregateError(
@@ -4868,6 +4955,7 @@ const diagnostics = {
     },
     m7: {
       active: m7ActiveRun !== undefined,
+      candidate: m7StartingRun !== undefined,
       lifecyclePending: runtimeTransitions.snapshot().operation !== undefined,
       lifecycle: runtimeTransitions.snapshot(),
       runId: m7ActiveRun?.runId,

@@ -99,20 +99,23 @@ test('waits for canvas layout before creating the WebGL renderer', () => {
   assert.ok(script.includes('starting.cancelLayoutWait?.()'))
 })
 
-test('keeps the Runtime frame visible while replacing an active run', async () => {
+test('promotes a hidden candidate before disposing the active Runtime', async () => {
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
-  const stop = source.slice(
-    source.indexOf('async function stopM7Runtime('),
-    source.indexOf('async function startM7Runtime('),
-  )
   const start = source.slice(
     source.indexOf('async function startM7Runtime('),
     source.indexOf('function startM7RuntimePort('),
   )
-  assert.match(stop, /hideFrame = true/)
-  assert.match(stop, /if \(hideFrame\) runtimeFrame\.hidden = true/)
-  assert.match(start, /if \(m5ActiveRun !== undefined\) await stopIsolatedRuntime\(\)/)
-  assert.match(start, /await stopM7Runtime\(false, false\)/)
+  const candidate = start.indexOf('createM7CandidateFrame()')
+  const ready = start.indexOf('await Promise.all([ready, editorScene])')
+  const commit = start.indexOf("name: 'commit_runtime_run'")
+  const promote = start.indexOf('promoteM7CandidateFrame(candidateFrame)')
+  const dispose = start.indexOf('await disposeM7Runtime(previousRun, previousFrame)')
+  assert.ok(candidate >= 0)
+  assert.ok(ready > candidate)
+  assert.ok(commit > ready)
+  assert.ok(promote > commit)
+  assert.ok(dispose > promote)
+  assert.doesNotMatch(start, /stopM7Runtime\(false, false\)/)
 })
 
 test('projects readiness from the Runtime transition controller', async () => {
@@ -150,19 +153,16 @@ test('releases every Save path through one finally block', async () => {
   assert.match(save, /projectRuntimeUi\(runtimeTransitions\.snapshot\(\)\)/)
 })
 
-test('preserves the last framebuffer until replacement navigation', async () => {
+test('does not rely on preserveSurface during Runtime replacement', async () => {
   const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
-  const preserve = script.indexOf('!preserveSurface')
-  assert.ok(preserve >= 0)
-  assert.ok(script.indexOf('current.renderer.forceContextLoss', preserve) > preserve)
+  assert.match(script, /!preserveSurface/)
   assert.match(
     script,
     /dispose\(runId, nonce, true, request\.preserveSurface === true\)/,
   )
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
-  assert.match(source, /postM7Run\(run, 'stop', \{ preserveSurface \}\)/)
-  assert.match(source, /disposeM7Runtime\(run, !hideFrame\)/)
+  assert.doesNotMatch(source, /postM7Run\(run, 'stop', \{ preserveSurface \}\)/)
 })
 
 test('keeps example cleanup failures non-fatal to Runtime teardown', () => {

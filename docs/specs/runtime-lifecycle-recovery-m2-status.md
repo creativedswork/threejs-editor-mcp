@@ -20,8 +20,8 @@ independent review, release checks, and deployment are excluded.
 
 | Slice | State | Commit | Result |
 |---|---|---|---|
-| 1. Registry prepare/commit | `IMPLEMENTED` | pending | Owner-scoped prepared run with short expiry and active-run CAS; failed or stale commits leave active unchanged. |
-| 2. Candidate Runtime promotion | `PENDING` | pending | Hidden candidate promotion after ready, editor-scene, and registry commit. |
+| 1. Registry prepare/commit | `COMMITTED_LOCAL` | `42c2d4c` | Owner-scoped prepared run with short expiry and active-run CAS; failed or stale commits leave active unchanged. |
+| 2. Candidate Runtime promotion | `IMPLEMENTED` | pending | Hidden candidate promotion after ready, editor-scene, and registry commit; every pre-commit exit disposes only the candidate. |
 | 3. Unchanged Stop cache/reuse | `PENDING` | pending | Reuse immutable build, validation, and asset artifacts. |
 
 ## Concentrated Self-Test
