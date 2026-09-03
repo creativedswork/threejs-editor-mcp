@@ -31,13 +31,6 @@ export interface RuntimeIdentity {
   projection: RuntimeProjection
 }
 
-export interface LegacyRuntimeIdentity {
-  projectId: string
-  revision: string
-  runId: string
-  nonce: string
-}
-
 export type RuntimeProtocolErrorCode =
   | 'ACTIVE_CONFIRMATION_REQUIRED'
   | 'RUNTIME_COMMAND_STATE'
@@ -95,27 +88,6 @@ export function runtimeProtocolErrorMessage(
   return `[${code}] ${detail}`
 }
 
-export function adaptLegacyRuntimeIdentity(
-  identity: LegacyRuntimeIdentity,
-  owner: RuntimeOwner,
-  loadedBuild: RuntimeBuildRef,
-  generation = 0,
-): RuntimeIdentity {
-  return {
-    execution: {
-      projectId: identity.projectId,
-      runId: identity.runId,
-      nonce: identity.nonce,
-      owner,
-    },
-    projection: {
-      workspaceRevision: identity.revision,
-      generation,
-      loadedBuild,
-    },
-  }
-}
-
 export function sameRuntimeOwner(left: RuntimeOwner, right: RuntimeOwner): boolean {
   return left.sessionId === right.sessionId
     && left.connectionGeneration === right.connectionGeneration
@@ -131,23 +103,6 @@ export function sameRuntimeExecution(
     && sameRuntimeOwner(left.owner, right.owner)
 }
 
-export function sameLegacyRuntimeExecution(
-  left: LegacyRuntimeIdentity,
-  right: LegacyRuntimeIdentity,
-): boolean {
-  return left.projectId === right.projectId
-    && left.runId === right.runId
-    && left.nonce === right.nonce
-}
-
-export function sameLegacyRuntimeIdentity(
-  left: LegacyRuntimeIdentity,
-  right: LegacyRuntimeIdentity,
-): boolean {
-  return left.revision === right.revision
-    && sameLegacyRuntimeExecution(left, right)
-}
-
 export function sameRuntimeProjection(
   left: RuntimeProjection,
   right: RuntimeProjection,
@@ -156,6 +111,14 @@ export function sameRuntimeProjection(
     && left.generation === right.generation
     && left.loadedBuild.buildId === right.loadedBuild.buildId
     && left.loadedBuild.sourceRevision === right.loadedBuild.sourceRevision
+}
+
+export function sameRuntimeIdentity(
+  left: RuntimeIdentity,
+  right: RuntimeIdentity,
+): boolean {
+  return sameRuntimeExecution(left.execution, right.execution)
+    && sameRuntimeProjection(left.projection, right.projection)
 }
 
 export function advanceRuntimeProjection(

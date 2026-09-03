@@ -44,9 +44,8 @@ import {
   type RuntimeTransitionContext,
 } from './runtime-lifecycle.js'
 import {
-  sameLegacyRuntimeExecution as sameM7Runtime,
-  sameLegacyRuntimeIdentity as sameM7Run,
   type RuntimeCommandOutcome,
+  type RuntimeIdentity,
 } from './runtime-protocol.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
@@ -138,9 +137,7 @@ interface RemoteSnapshot {
   editorOperations?: EditorCommandOperation[]
   pendingProjection?: {
     transitionId: string
-    projectId: string
-    runId: string
-    nonce: string
+    execution: RuntimeIdentity['execution']
     baseRevision: string
     targetRevision: string
     expectedGeneration: number
@@ -194,6 +191,63 @@ interface M7Run {
   projectionGeneration?: number
 }
 
+function sameM7Runtime(left: M7Run, right: M7Run): boolean {
+  return left.projectId === right.projectId
+    && left.runId === right.runId
+    && left.nonce === right.nonce
+}
+
+function sameM7Run(left: M7Run, right: M7Run): boolean {
+  return left.revision === right.revision && sameM7Runtime(left, right)
+}
+
+function runtimeAddress(run: M7Run): { projectId: string; runtimeRef: string } {
+  if (run.runtimeRef === undefined) throw new Error('Runtime reference is unavailable')
+  return { projectId: run.projectId, runtimeRef: run.runtimeRef }
+}
+
+function runtimeExecution(value: unknown): RuntimeIdentity['execution'] | undefined {
+  const execution = record(value)
+  const owner = record(execution?.owner)
+  if (typeof execution?.projectId !== 'string'
+    || typeof execution.runId !== 'string'
+    || typeof execution.nonce !== 'string'
+    || typeof owner?.sessionId !== 'string'
+    || typeof owner.connectionGeneration !== 'string') return undefined
+  return {
+    projectId: execution.projectId,
+    runId: execution.runId,
+    nonce: execution.nonce,
+    owner: {
+      sessionId: owner.sessionId,
+      connectionGeneration: owner.connectionGeneration,
+    },
+  }
+}
+
+function runtimeIdentity(value: unknown): RuntimeIdentity | undefined {
+  const identity = record(value)
+  const execution = runtimeExecution(identity?.execution)
+  const projection = record(identity?.projection)
+  const loadedBuild = record(projection?.loadedBuild)
+  if (execution === undefined
+    || typeof projection?.workspaceRevision !== 'string'
+    || typeof projection.generation !== 'number'
+    || typeof loadedBuild?.buildId !== 'string'
+    || typeof loadedBuild.sourceRevision !== 'string') return undefined
+  return {
+    execution,
+    projection: {
+      workspaceRevision: projection.workspaceRevision,
+      generation: projection.generation,
+      loadedBuild: {
+        buildId: loadedBuild.buildId,
+        sourceRevision: loadedBuild.sourceRevision,
+      },
+    },
+  }
+}
+
 interface CommittedRuntime {
   projectId: string
   revision: string
@@ -219,7 +273,7 @@ interface RuntimeHarnessCommand {
   kind: 'capture-frame' | 'read-logs' | 'simulate-actions'
   target: 'active' | 'validation'
   runtime: M7Run
-  projectionGeneration: number
+  identity: RuntimeIdentity
   evidenceToken: string
   payload: Record<string, unknown>
   timeoutMs: number
@@ -2197,16 +2251,18 @@ function snapshotFromResult(result: CallToolResult): RemoteSnapshot | undefined 
     throw new Error('pull_project returned invalid Editor operations')
   }
   const pending = record(structured.pendingProjection)
+  const pendingExecution = runtimeExecution(pending?.execution)
   const pendingProjection = pending !== undefined
     && typeof pending.transitionId === 'string'
-    && typeof pending.projectId === 'string'
-    && typeof pending.runId === 'string'
-    && typeof pending.nonce === 'string'
+    && pendingExecution !== undefined
     && typeof pending.baseRevision === 'string'
     && typeof pending.targetRevision === 'string'
     && typeof pending.expectedGeneration === 'number'
     && typeof pending.expiresAt === 'string'
-    ? pending as unknown as NonNullable<RemoteSnapshot['pendingProjection']>
+    ? {
+        ...pending,
+        execution: pendingExecution,
+      } as NonNullable<RemoteSnapshot['pendingProjection']>
     : undefined
   return {
     project: candidate as unknown as Project,
@@ -2893,7 +2949,7 @@ async function settleRuntimeHarnessCommand(
   const settled = await app.callServerTool({
     name: 'settle_runtime_command',
     arguments: {
-      ...command.runtime,
+      ...runtimeAddress(command.runtime),
       commandId: command.commandId,
       outcome,
     },
@@ -2907,11 +2963,12 @@ async function settleRuntimeHarnessCommand(
 async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Promise<void> {
   let targetRun: M7Run
   let targetBuildId: string
+  let targetIdentity: RuntimeIdentity
   try {
     const active = activeRuntime()
     if (active === undefined
       || !sameM7Run(active.run, command.runtime)
-      || active.run.projectionGeneration !== command.projectionGeneration) {
+      || active.run.projectionGeneration !== command.identity.projection.generation) {
       throw new Error('Runtime Harness command targets a stale active run')
     }
     if (command.target === 'validation') {
@@ -2925,14 +2982,29 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
       targetRun = command.runtime
       targetBuildId = active.artifact.buildId
     }
+    targetIdentity = {
+      execution: command.target === 'active'
+        ? command.identity.execution
+        : {
+            ...command.identity.execution,
+            runId: targetRun.runId,
+            nonce: targetRun.nonce,
+          },
+      projection: {
+        ...command.identity.projection,
+        loadedBuild: {
+          buildId: targetBuildId,
+          sourceRevision: command.runtime.revision,
+        },
+      },
+    }
     const startedResult = await app.callServerTool({
       name: 'start_runtime_command',
       arguments: {
-        ...command.runtime,
+        ...runtimeAddress(command.runtime),
         commandId: command.commandId,
         targetRuntime: {
-          ...targetRun,
-          buildId: targetBuildId,
+          ...targetIdentity,
           target: command.target,
         },
       },
@@ -2988,7 +3060,7 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
     monitorBusy = true
     void app.callServerTool({
       name: 'pull_runtime_command',
-      arguments: { ...command.runtime },
+      arguments: runtimeAddress(command.runtime),
     }, {
       timeout: M7_LIFECYCLE_TIMEOUT,
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
@@ -3053,7 +3125,7 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
   try {
     await settleRuntimeHarnessCommand(command, {
       status: 'succeeded',
-      evidence: result,
+      evidence: { ...result, runtime: targetIdentity },
     })
   } catch (error) {
     await settleRuntimeHarnessCommand(command, {
@@ -3073,7 +3145,7 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
   try {
     const result = await app.callServerTool({
       name: 'pull_runtime_command',
-      arguments: { ...run },
+      arguments: runtimeAddress(run),
     }, {
       timeout: M7_LIFECYCLE_TIMEOUT,
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
@@ -3084,25 +3156,35 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
     if (command === undefined
       || typeof command.commandId !== 'string'
       || runtimeHarnessCommands.has(command.commandId)) return
-    const runtime = record(command.runtime)
+    const identity = runtimeIdentity(command.runtime)
     const payload = record(command.payload)
     if ((command.kind !== 'capture-frame'
         && command.kind !== 'read-logs'
         && command.kind !== 'simulate-actions')
       || (command.target !== 'active' && command.target !== 'validation')
-      || runtime === undefined
+      || identity === undefined
       || payload === undefined
-      || typeof command.projectionGeneration !== 'number'
       || typeof command.evidenceToken !== 'string'
       || typeof command.timeoutMs !== 'number') {
       throw new Error('Server returned an invalid Runtime Harness command')
+    }
+    const commandRun: M7Run = {
+      projectId: identity.execution.projectId,
+      revision: identity.projection.workspaceRevision,
+      runId: identity.execution.runId,
+      nonce: identity.execution.nonce,
+      runtimeRef: run.runtimeRef,
+      projectionGeneration: identity.projection.generation,
+    }
+    if (!sameM7Run(commandRun, run)) {
+      throw new Error('Server returned a command for another Runtime')
     }
     const parsed: RuntimeHarnessCommand = {
       commandId: command.commandId,
       kind: command.kind,
       target: command.target,
-      runtime: runtime as unknown as M7Run,
-      projectionGeneration: command.projectionGeneration,
+      runtime: commandRun,
+      identity,
       evidenceToken: command.evidenceToken,
       payload,
       timeoutMs: command.timeoutMs,
@@ -3120,12 +3202,7 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
 async function releaseM7Run(run: M7Run): Promise<void> {
   const result = await app.callServerTool({
     name: 'release_runtime_run',
-    arguments: {
-      projectId: run.projectId,
-      revision: run.revision,
-      runId: run.runId,
-      nonce: run.nonce,
-    },
+    arguments: runtimeAddress(run),
   }, {
     timeout: M7_LIFECYCLE_TIMEOUT,
     maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
@@ -3270,8 +3347,16 @@ async function startM7Runtime(
     })
     if (preparedResult.isError) throw new Error(resultError(preparedResult))
     const prepared = record(preparedResult.structuredContent)
-    if (typeof prepared?.evidenceToken !== 'string') {
-      throw new Error('prepare_runtime_run returned no Runtime evidence token')
+    const preparedIdentity = runtimeIdentity(prepared)
+    if (preparedIdentity === undefined
+      || preparedIdentity.execution.projectId !== run.projectId
+      || preparedIdentity.execution.runId !== run.runId
+      || preparedIdentity.execution.nonce !== run.nonce
+      || preparedIdentity.projection.workspaceRevision !== run.revision
+      || preparedIdentity.projection.loadedBuild.buildId !== build.buildId
+      || typeof prepared?.runtimeRef !== 'string'
+      || typeof prepared.evidenceToken !== 'string') {
+      throw new Error('prepare_runtime_run returned an invalid Runtime candidate')
     }
     starting = { ...starting, evidenceToken: prepared.evidenceToken }
     runtimeCoordinator.setCandidate(token, starting)
@@ -3361,8 +3446,11 @@ async function startM7Runtime(
     const committedResult = await app.callServerTool({
       name: 'commit_runtime_run',
       arguments: {
-        ...run,
-        ...previousRun === undefined ? {} : { expectedActive: previousRun },
+        projectId: run.projectId,
+        runtimeRef: prepared.runtimeRef,
+        ...previousRun?.runtimeRef === undefined
+          ? {}
+          : { expectedActiveRef: previousRun.runtimeRef },
       },
     }, {
       signal,
@@ -3371,15 +3459,16 @@ async function startM7Runtime(
     })
     if (committedResult.isError) throw new Error(resultError(committedResult))
     const registered = record(committedResult.structuredContent)
+    const registeredIdentity = runtimeIdentity(registered)
     if (typeof registered?.runtimeRef !== 'string'
-      || typeof registered.projectionGeneration !== 'number'
+      || registeredIdentity === undefined
       || registered.evidenceToken !== prepared.evidenceToken) {
       throw new Error('commit_runtime_run returned an invalid Runtime registration')
     }
     const committedRun: M7Run = {
       ...run,
       runtimeRef: registered.runtimeRef,
-      projectionGeneration: registered.projectionGeneration,
+      projectionGeneration: registeredIdentity.projection.generation,
     }
     await stopValidationRuntime()
     promoteM7CandidateFrame(candidateFrame)
@@ -3873,9 +3962,9 @@ async function applyEditorRevision(
 
   const run = active.run
   const pending = snapshot.pendingProjection
-  if (pending.projectId !== run.projectId
-    || pending.runId !== run.runId
-    || pending.nonce !== run.nonce
+  if (pending.execution.projectId !== run.projectId
+    || pending.execution.runId !== run.runId
+    || pending.execution.nonce !== run.nonce
     || pending.baseRevision !== run.revision
     || pending.targetRevision !== snapshot.revision
     || pending.expectedGeneration !== (run.projectionGeneration ?? 0)) return false
@@ -3928,10 +4017,8 @@ async function applyEditorRevision(
     const registered = await app.callServerTool({
       name: 'commit_runtime_projection',
       arguments: {
-        projectId: run.projectId,
+        ...runtimeAddress(run),
         transitionId: pending.transitionId,
-        runId: run.runId,
-        nonce: run.nonce,
         revision: snapshot.revision,
       },
     }, {
@@ -3941,17 +4028,18 @@ async function applyEditorRevision(
     })
     if (registered.isError) throw new Error(resultError(registered))
     const registration = record(registered.structuredContent)
+    const registeredIdentity = runtimeIdentity(registration)
     const runtimeRef = registration?.runtimeRef
-    const projectionGeneration = registration?.projectionGeneration
     if (registration?.evidenceToken !== active.evidenceToken
+      || registeredIdentity === undefined
       || typeof runtimeRef !== 'string'
-      || typeof projectionGeneration !== 'number') {
+      || registeredIdentity.projection.workspaceRevision !== snapshot.revision) {
       throw new Error('Runtime projection commit returned an invalid registration')
     }
     nextRun = {
       ...nextRun,
       runtimeRef,
-      projectionGeneration,
+      projectionGeneration: registeredIdentity.projection.generation,
     }
 
     workspace = snapshot.workspace
@@ -4245,7 +4333,7 @@ activeGrant.addEventListener('click', () => {
   activeGrant.disabled = true
   void app.callServerTool({
     name: 'grant_active_runtime_control',
-    arguments: { ...run },
+    arguments: runtimeAddress(run),
   }).then(async result => {
     if (result.isError) throw new Error(resultError(result))
     status.textContent = 'One live validation is authorized for 60 seconds'

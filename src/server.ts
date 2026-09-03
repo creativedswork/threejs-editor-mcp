@@ -120,31 +120,32 @@ const revisionSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const runIdSchema = z.string().uuid()
 const nonceSchema = z.string().uuid()
 const runtimeRefSchema = z.string().uuid()
-const runtimeIdentitySchema = z.object({
-  projectId: projectIdSchema.describe(
-    'Copy exactly from the latest Runtime context supplied by the Editor.',
-  ),
-  revision: revisionSchema.describe(
-    'Copy exactly from the latest Runtime context supplied by the Editor.',
-  ),
-  runId: runIdSchema.describe(
-    'Copy exactly from the latest Runtime context supplied by the Editor. Never generate this UUID.',
-  ),
-  nonce: nonceSchema.describe(
-    'Copy exactly from the latest Runtime context supplied by the Editor. Never generate this UUID.',
-  ),
+const runtimeOwnerSchema = z.object({
+  sessionId: z.string().min(1).max(128),
+  connectionGeneration: z.string().uuid(),
 })
-const runtimeContextIdentitySchema = runtimeIdentitySchema.extend({
-  buildId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  buildRevision: revisionSchema.optional(),
-  projectionGeneration: z.number().int().nonnegative(),
-  runtimeRef: runtimeRefSchema,
+const runtimeIdentitySchema = z.object({
+  execution: z.object({
+    projectId: projectIdSchema,
+    runId: runIdSchema,
+    nonce: nonceSchema,
+    owner: runtimeOwnerSchema,
+  }),
+  projection: z.object({
+    workspaceRevision: revisionSchema,
+    generation: z.number().int().nonnegative(),
+    loadedBuild: z.object({
+      buildId: z.string().regex(/^[a-f0-9]{64}$/),
+      sourceRevision: revisionSchema,
+    }),
+  }),
 })
 const runtimeReferenceSchema = z.object({
   projectId: projectIdSchema,
   runtimeRef: runtimeRefSchema,
 })
-const registeredRuntimeSchema = runtimeContextIdentitySchema.extend({
+const registeredRuntimeSchema = runtimeIdentitySchema.extend({
+  runtimeRef: runtimeRefSchema,
   evidenceToken: nonceSchema,
 })
 const preparedRuntimeRunSchema = registeredRuntimeSchema.extend({
@@ -152,9 +153,7 @@ const preparedRuntimeRunSchema = registeredRuntimeSchema.extend({
 })
 const pendingRuntimeProjectionSchema = z.object({
   transitionId: z.string().uuid(),
-  projectId: projectIdSchema,
-  runId: runIdSchema,
-  nonce: nonceSchema,
+  execution: runtimeIdentitySchema.shape.execution,
   baseRevision: revisionSchema,
   targetRevision: revisionSchema,
   expectedGeneration: z.number().int().nonnegative(),
@@ -173,10 +172,6 @@ const runtimeHarnessTargetSchema = runtimeTargetSchema.default('validation').des
 const activeIntentSchema = z.literal('user-requested').optional().describe(
   'Deprecated compatibility hint. Editor-issued authorization is the sole authority.',
 )
-const runtimeOwnerSchema = z.object({
-  sessionId: z.string().min(1).max(128),
-  connectionGeneration: z.string().uuid(),
-})
 const playerActionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.enum(['pointerMove', 'pointerDown', 'pointerUp', 'click']),
@@ -209,7 +204,6 @@ const playerActionSchema = z.discriminatedUnion('type', [
   }),
 ])
 const runtimeEvidenceIdentitySchema = runtimeIdentitySchema.extend({
-  buildId: z.string().regex(/^[a-f0-9]{64}$/),
   target: runtimeTargetSchema,
 })
 const runtimeLogEntrySchema = z.object({
@@ -1760,7 +1754,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       revision: revisionSchema,
-      buildId: buildIdSchema.optional(),
+      buildId: buildIdSchema,
       runId: runIdSchema,
       nonce: nonceSchema,
       ttlMs: z.number().int().positive().max(600_000).optional(),
@@ -1786,55 +1780,25 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'commit_runtime_run', {
     title: 'Commit Three.js Runtime run',
-    description: 'Promotes a prepared Runtime only when the expected active identity still matches.',
+    description: 'Promotes a prepared Runtime when the expected active reference still matches.',
     inputSchema: {
       projectId: projectIdSchema,
-      revision: revisionSchema,
-      runId: runIdSchema,
-      nonce: nonceSchema,
-      expectedActive: runtimeIdentitySchema.optional(),
+      runtimeRef: runtimeRefSchema,
+      expectedActiveRef: runtimeRefSchema.optional(),
     },
     outputSchema: preparedRuntimeRunSchema,
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, revision, runId, nonce, expectedActive }, { signal, _meta }) => {
+  }, async ({ projectId, runtimeRef, expectedActiveRef }, { signal, _meta }) => {
     const committed = await workspaces.commitRuntimeRun(
-      { projectId, revision, runId, nonce },
-      expectedActive,
+      projectId,
+      runtimeRef,
+      expectedActiveRef,
       runtimeOwner(_meta),
       signal,
     )
-    return textResult(`Committed Runtime run ${runId}.`, {
+    return textResult(`Committed Runtime run ${committed.execution.runId}.`, {
       ...committed,
       expiresAt: new Date(committed.expiresAt).toISOString(),
-    })
-  })
-
-  registerAppTool(server, 'register_runtime_run', {
-    title: 'Register Three.js Runtime run',
-    description: 'Registers the active Runtime identity for one exact Workspace revision.',
-    inputSchema: {
-      projectId: projectIdSchema,
-      revision: revisionSchema,
-      buildId: buildIdSchema.optional(),
-      runId: runIdSchema,
-      nonce: nonceSchema.optional(),
-      previousRevision: revisionSchema.optional(),
-    },
-    outputSchema: registeredRuntimeSchema,
-    _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, revision, buildId, runId, nonce, previousRevision }, { signal, _meta }) => {
-    const registered = await workspaces.registerRuntimeRun(
-      projectId,
-      revision,
-      buildId,
-      runId,
-      nonce,
-      runtimeOwner(_meta, false),
-      previousRevision,
-      signal,
-    )
-    return textResult(`Registered Runtime run ${runId}.`, {
-      ...registered,
     })
   })
 
@@ -1844,18 +1808,21 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       transitionId: z.string().uuid(),
-      runId: runIdSchema,
-      nonce: nonceSchema,
+      runtimeRef: runtimeRefSchema,
       revision: revisionSchema,
     },
     outputSchema: registeredRuntimeSchema,
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, transitionId, runId, nonce, revision }, { signal, _meta }) => {
+  }, async ({
+    projectId,
+    transitionId,
+    runtimeRef,
+    revision,
+  }, { signal, _meta }) => {
     const registered = await workspaces.commitRuntimeProjection(
       projectId,
       transitionId,
-      runId,
-      nonce,
+      runtimeRef,
       revision,
       runtimeOwner(_meta),
       signal,
@@ -1867,32 +1834,21 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'release_runtime_run', {
     title: 'Release Three.js Runtime run',
-    description: 'Releases one exact active Runtime identity during cancellation or teardown.',
-    inputSchema: {
-      projectId: projectIdSchema,
-      revision: revisionSchema,
-      runId: z.string().uuid(),
-      nonce: nonceSchema.optional(),
-    },
+    description: 'Releases one active Runtime reference during cancellation or teardown.',
+    inputSchema: runtimeHarnessAddressShape,
     outputSchema: z.object({
       projectId: projectIdSchema,
-      revision: revisionSchema,
-      runId: z.string().uuid(),
       released: z.boolean(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, revision, runId, nonce }, { _meta }) => {
+  }, async ({ projectId, runtimeRef }, { _meta }) => {
     const released = await workspaces.releaseRuntimeRun(
       projectId,
-      revision,
-      runId,
-      nonce,
-      runtimeOwner(_meta, false),
+      runtimeRef,
+      runtimeOwner(_meta),
     )
-    return textResult(`${released ? 'Released' : 'Ignored stale'} Runtime run ${runId}.`, {
+    return textResult(`${released ? 'Released' : 'Ignored stale'} Runtime.`, {
       projectId,
-      revision,
-      runId,
       released,
     })
   })
@@ -1900,14 +1856,14 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'grant_active_runtime_control', {
     title: 'Grant one active Runtime check',
     description: 'Grants this Harness Session one active Runtime evidence command for 60 seconds.',
-    inputSchema: runtimeIdentitySchema.shape,
+    inputSchema: runtimeHarnessAddressShape,
     outputSchema: z.object({
       expiresAt: z.string().datetime(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async (identity, { _meta }) => {
+  }, async (address, { _meta }) => {
     const expiresAt = await workspaces.grantActiveRuntimeControl(
-      identity,
+      address,
       runtimeOwner(_meta)!,
     )
     return textResult('Granted one active Runtime evidence command.', { expiresAt })
@@ -1916,14 +1872,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'pull_runtime_command', {
     title: 'Pull Runtime Harness command',
     description: 'Returns the current exact Runtime command for this Editor App.',
-    inputSchema: runtimeIdentitySchema.shape,
+    inputSchema: runtimeHarnessAddressShape,
     outputSchema: z.object({
       command: z.object({
         commandId: z.string().uuid(),
         kind: z.enum(['capture-frame', 'read-logs', 'simulate-actions']),
         target: runtimeTargetSchema,
         runtime: runtimeIdentitySchema,
-        projectionGeneration: z.number().int().nonnegative(),
         evidenceToken: nonceSchema,
         payload: z.record(z.string(), z.unknown()),
         timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000),
@@ -1931,9 +1886,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       }).optional(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async (identity, { _meta }) => {
+  }, async (address, { _meta }) => {
     const command = await workspaces.pullRuntimeCommand(
-      identity,
+      address,
       runtimeOwner(_meta)!,
     )
     return textResult(command === undefined
@@ -1947,18 +1902,18 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     title: 'Start Runtime Harness command',
     description: 'Starts the execution deadline after the target Runtime is ready.',
     inputSchema: {
-      ...runtimeIdentitySchema.shape,
+      ...runtimeHarnessAddressShape,
       commandId: z.string().uuid(),
-      targetRuntime: runtimeEvidenceIdentitySchema.optional(),
+      targetRuntime: runtimeEvidenceIdentitySchema,
     },
     outputSchema: z.object({
       commandId: z.string().uuid(),
       expiresAt: z.string().datetime(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ commandId, targetRuntime, ...identity }, { _meta }) => {
+  }, async ({ commandId, targetRuntime, ...address }, { _meta }) => {
     const expiresAt = await workspaces.startRuntimeCommand(
-      identity,
+      address,
       runtimeOwner(_meta)!,
       commandId,
       targetRuntime,
@@ -1969,41 +1924,11 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     })
   })
 
-  registerAppTool(server, 'fail_runtime_command', {
-    title: 'Fail Runtime Harness command',
-    description: 'Settles a pending Runtime command with a typed failure.',
-    inputSchema: {
-      ...runtimeIdentitySchema.shape,
-      commandId: z.string().uuid(),
-      stage: runtimeCommandFailureStageSchema.default('prepare'),
-      code: runtimeCommandFailureCodeSchema.default('TARGET_PREPARATION_FAILED'),
-      message: z.string().min(1).max(2_048),
-    },
-    outputSchema: z.object({
-      commandId: z.string().uuid(),
-      accepted: z.literal(true),
-    }),
-    _meta: { ui: { visibility: ['app'] } },
-  }, async ({ commandId, stage, code, message, ...identity }, { _meta }) => {
-    await workspaces.failRuntimeCommand(
-      identity,
-      runtimeOwner(_meta)!,
-      commandId,
-      message,
-      stage,
-      code,
-    )
-    return textResult(`Failed Runtime Harness command ${commandId}.`, {
-      commandId,
-      accepted: true,
-    })
-  })
-
   registerAppTool(server, 'settle_runtime_command', {
     title: 'Settle Runtime Harness command',
     description: 'Idempotently settles one Runtime Harness command with a typed terminal outcome.',
     inputSchema: {
-      ...runtimeIdentitySchema.shape,
+      ...runtimeHarnessAddressShape,
       commandId: z.string().uuid(),
       outcome: runtimeCommandOutcomeSchema,
     },
@@ -2012,40 +1937,14 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       accepted: z.literal(true),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ commandId, outcome, ...identity }, { _meta }) => {
+  }, async ({ commandId, outcome, ...address }, { _meta }) => {
     await workspaces.settleRuntimeCommand(
-      identity,
+      address,
       runtimeOwner(_meta)!,
       commandId,
       outcome,
     )
     return textResult(`Settled Runtime Harness command ${commandId}.`, {
-      commandId,
-      accepted: true,
-    })
-  })
-
-  registerAppTool(server, 'report_runtime_evidence', {
-    title: 'Report Runtime Harness evidence',
-    description: 'Returns bounded evidence for one exact pending Runtime command.',
-    inputSchema: {
-      ...runtimeIdentitySchema.shape,
-      commandId: z.string().uuid(),
-      result: runtimeEvidenceSchema,
-    },
-    outputSchema: z.object({
-      commandId: z.string().uuid(),
-      accepted: z.literal(true),
-    }),
-    _meta: { ui: { visibility: ['app'] } },
-  }, async ({ commandId, result, ...identity }, { _meta }) => {
-    await workspaces.reportRuntimeEvidence(
-      identity,
-      runtimeOwner(_meta)!,
-      commandId,
-      result,
-    )
-    return textResult(`Accepted Runtime Harness evidence ${result.evidenceId}.`, {
       commandId,
       accepted: true,
     })
@@ -2079,11 +1978,12 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     timeoutMs,
     ...address
   }, { _meta, signal }) => {
+    const owner = runtimeOwner(_meta)!
     void activeIntent
     const evidence = runtimeEvidenceSchema.options[0].parse(
       await workspaces.requestRuntimeCommand(
         address,
-        runtimeOwner(_meta)!,
+        owner,
         'capture-frame',
         target,
         { format, maxWidth, maxHeight, deterministic },
@@ -2128,10 +2028,11 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     ...address
   }, { _meta, signal }) => {
     void activeIntent
+    const owner = runtimeOwner(_meta)!
     const evidence = runtimeEvidenceSchema.options[1].parse(
       await workspaces.requestRuntimeCommand(
         address,
-        runtimeOwner(_meta)!,
+        owner,
         'read-logs',
         target,
         { cursor, level, limit },
@@ -2160,10 +2061,11 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     _meta: { ui: { visibility: ['model', 'app'] } },
   }, async ({ target, activeIntent, actions, timeoutMs, ...address }, { _meta, signal }) => {
     void activeIntent
+    const owner = runtimeOwner(_meta)!
     const evidence = runtimeEvidenceSchema.options[2].parse(
       await workspaces.requestRuntimeCommand(
         address,
-        runtimeOwner(_meta)!,
+        owner,
         'simulate-actions',
         target,
         { actions },

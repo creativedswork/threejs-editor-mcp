@@ -66,10 +66,10 @@ import {
   RuntimeProtocolError,
   advanceRuntimeProjection as nextRuntimeProjection,
   runtimeCommandOutcomeMessage,
-  sameLegacyRuntimeExecution,
-  sameLegacyRuntimeIdentity as sameRuntimeIdentity,
+  sameRuntimeExecution,
+  sameRuntimeIdentity,
   sameRuntimeOwner,
-  type LegacyRuntimeIdentity,
+  type RuntimeIdentity,
   type RuntimeCommandFailureCode,
   type RuntimeCommandFailureStage,
   type RuntimeCommandOutcome,
@@ -203,47 +203,46 @@ export const workspaceChangeSchema = z.discriminatedUnion('type', [
     path: workspacePathSchema,
   }),
 ])
-const activeRuntimeSchema = z.object({
-  revision: z.string().regex(/^[a-f0-9]{64}$/),
-  buildId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  buildRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  projectionGeneration: z.number().int().nonnegative().default(0),
-  runtimeRef: z.string().uuid().optional(),
-  runId: z.string().uuid(),
-  nonce: z.string().uuid().optional(),
-  evidenceToken: z.string().uuid().optional(),
-  sessionId: z.string().min(1).max(128).optional(),
-  connectionGeneration: z.string().uuid().optional(),
-  ownerId: z.string().uuid().optional(),
-  ownerPid: z.number().int().positive().optional(),
+const runtimeOwnerSchema = z.object({
+  sessionId: z.string().min(1).max(128),
+  connectionGeneration: z.string().uuid(),
+})
+const runtimeIdentitySchema = z.object({
+  execution: z.object({
+    projectId: z.string().regex(PROJECT_ID),
+    runId: z.string().uuid(),
+    nonce: z.string().uuid(),
+    owner: runtimeOwnerSchema,
+  }),
+  projection: z.object({
+    workspaceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+    generation: z.number().int().nonnegative(),
+    loadedBuild: z.object({
+      buildId: z.string().regex(/^[a-f0-9]{64}$/),
+      sourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+    }),
+  }),
+})
+const activeRuntimeSchema = runtimeIdentitySchema.extend({
+  runtimeRef: z.string().uuid(),
+  evidenceToken: z.string().uuid(),
+  ownerId: z.string().uuid(),
+  ownerPid: z.number().int().positive(),
 })
 type ActiveRuntime = z.infer<typeof activeRuntimeSchema>
-export interface RegisteredRuntime {
-  projectId: string
-  revision: string
-  buildId?: string
-  buildRevision?: string
-  projectionGeneration: number
+export interface RegisteredRuntime extends RuntimeIdentity {
   runtimeRef: string
-  runId: string
-  nonce?: string
   evidenceToken: string
 }
-export type RuntimeContextIdentity = Omit<RegisteredRuntime, 'evidenceToken'>
 export interface PendingRuntimeProjection {
   transitionId: string
-  projectId: string
-  runId: string
-  nonce: string
+  execution: RuntimeIdentity['execution']
   baseRevision: string
   targetRevision: string
   expectedGeneration: number
   expiresAt: number
 }
-export interface PreparedRuntimeRun extends RuntimeIdentity {
-  buildId?: string
-  buildRevision?: string
-  projectionGeneration: number
+export interface PreparedRuntimeRun extends RegisteredRuntime {
   runtimeRef: string
   evidenceToken: string
   expiresAt: number
@@ -350,14 +349,9 @@ export interface WorkspaceProjectCandidate {
   issue?: string
 }
 
-export type RuntimeIdentity = LegacyRuntimeIdentity
-
 export interface RuntimeHarnessAddress {
   projectId: string
-  runtimeRef?: string
-  revision?: string
-  runId?: string
-  nonce?: string
+  runtimeRef: string
 }
 
 export type RuntimeOwner = ProtocolRuntimeOwner
@@ -367,7 +361,6 @@ export interface RuntimeHarnessCommand {
   kind: 'capture-frame' | 'read-logs' | 'simulate-actions'
   target: 'active' | 'validation'
   runtime: RuntimeIdentity
-  projectionGeneration: number
   evidenceToken: string
   payload: Record<string, unknown>
   timeoutMs: number
@@ -375,7 +368,6 @@ export interface RuntimeHarnessCommand {
 }
 
 export interface RuntimeEvidenceTarget extends RuntimeIdentity {
-  buildId: string
   target: RuntimeHarnessCommand['target']
 }
 
@@ -431,25 +423,38 @@ interface Transaction {
   changes: TransactionChange[]
 }
 
-interface PendingRuntimeCommand {
+interface RuntimeCommandBase {
   command: RuntimeHarnessCommand
   owner: RuntimeOwner
-  phase: 'preparing' | 'executing'
-  targetRuntime?: RuntimeEvidenceTarget
-  legacyTarget?: boolean
+  registryKey: string
   resolve(value: unknown): void
   reject(error: Error): void
-  settlementDeadline?: number
   timer: ReturnType<typeof setTimeout>
   abort?: () => void
 }
 
+interface PreparingRuntimeCommand extends RuntimeCommandBase {
+  phase: 'preparing'
+}
+
+interface ExecutingRuntimeCommand extends RuntimeCommandBase {
+  phase: 'executing'
+  targetRuntime: RuntimeEvidenceTarget
+  settlementDeadline: number
+}
+
 interface SettledRuntimeCommand {
+  phase: 'settled'
   runtime: RuntimeIdentity
   owner: RuntimeOwner
   outcome: RuntimeCommandOutcome
   expiresAt: number
 }
+
+type RuntimeCommandState =
+  | PreparingRuntimeCommand
+  | ExecutingRuntimeCommand
+  | SettledRuntimeCommand
 
 export interface WorkspaceCommitResult {
   snapshot: WorkspaceSnapshot
@@ -459,6 +464,13 @@ export interface WorkspaceCommitResult {
 interface ActiveRuntimeGrant {
   runtime: RuntimeIdentity
   expiresAt: number
+}
+
+interface RuntimeRegistry {
+  active?: ActiveRuntime
+  prepared?: PreparedRuntimeRun
+  pendingProjection?: PendingRuntimeProjection
+  activeGrant?: ActiveRuntimeGrant
 }
 
 type StoredReadyBuild = Omit<ReadyBuild, 'bundle' | 'sourceMap'>
@@ -631,7 +643,6 @@ function sameRuntimeEvidenceTarget(
   right: RuntimeEvidenceTarget,
 ): boolean {
   return sameRuntimeIdentity(left, right)
-    && left.buildId === right.buildId
     && left.target === right.target
 }
 
@@ -694,12 +705,8 @@ export class WorkspaceStore {
   private readonly ready: Promise<void>
   private readonly workspaces = new Map<string, RegisteredWorkspace>()
   private readonly sessionWorkspaceIds = new Set<string>()
-  private readonly activeRuntimes = new Map<string, ActiveRuntime>()
-  private readonly preparedRuntimes = new Map<string, PreparedRuntimeRun>()
-  private readonly pendingRuntimeProjections = new Map<string, PendingRuntimeProjection>()
-  private readonly activeRuntimeGrants = new Map<string, ActiveRuntimeGrant>()
-  private readonly runtimeCommands = new Map<string, PendingRuntimeCommand>()
-  private readonly settledRuntimeCommands = new Map<string, SettledRuntimeCommand>()
+  private readonly runtimeRegistries = new Map<string, RuntimeRegistry>()
+  private readonly runtimeCommands = new Map<string, RuntimeCommandState>()
   private readonly verifiedResourceObjects = new Map<string, Promise<VerifiedResourceObject>>()
   private readonly quota: WorkspaceQuota
 
@@ -1383,8 +1390,9 @@ export class WorkspaceStore {
       if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
       const activeRuntime = owner === undefined
         ? await this.readActiveRuntime(snapshot.path)
-        : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
-      if (activeRuntime?.revision !== revision || activeRuntime.runId !== runId) {
+        : this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
+      if (activeRuntime?.projection.workspaceRevision !== revision
+        || activeRuntime.execution.runId !== runId) {
         throw new Error('runtime run changed before editor scene was reported')
       }
       await this.writeAtomic(
@@ -1395,145 +1403,10 @@ export class WorkspaceStore {
     })
   }
 
-  async registerRuntimeRun(
-    projectId: string,
-    revision: string,
-    buildId: string | undefined,
-    runId: string,
-    nonce?: string,
-    owner?: RuntimeOwner,
-    previousRevision?: string,
-    signal?: AbortSignal,
-  ): Promise<RegisteredRuntime> {
-    validateProjectId(projectId)
-    if ((nonce === undefined) !== (owner === undefined)) {
-      throw new Error('Runtime nonce and owner identity must be provided together')
-    }
-    return this.withLock(projectId, async () => {
-      signal?.throwIfAborted()
-      const { snapshot, activePath } = await this.validateRuntimeBuild(
-        projectId,
-        revision,
-        buildId,
-      )
-      const ownerKey = owner === undefined ? undefined : this.runtimeKey(projectId, owner)
-      if (ownerKey !== undefined && owner !== undefined) {
-        for (const [key, active] of this.activeRuntimes) {
-          if (key === ownerKey
-            || !key.startsWith(`${projectId}\0`)
-            || active.sessionId !== owner.sessionId) continue
-          this.activeRuntimes.delete(key)
-          this.pendingRuntimeProjections.delete(key)
-          this.activeRuntimeGrants.delete(key)
-          this.rejectRuntimeCommand(key, {
-            status: 'cancelled',
-            reason: 'MCP connection generation changed',
-          })
-        }
-      }
-      const previousStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
-      const previousRuntime = ownerKey === undefined
-        ? previousStoredRuntime
-        : this.activeRuntimes.get(ownerKey)
-      const evidenceToken = previousRevision === undefined
-        ? randomUUID()
-        : previousRuntime?.evidenceToken
-      if (evidenceToken === undefined) {
-        throw new Error('runtime evidence token is unavailable for revision rollover')
-      }
-      if (previousRevision !== undefined) {
-        const activeRuntime = previousRuntime
-        if (activeRuntime?.revision !== previousRevision
-          || activeRuntime.runId !== runId) {
-          throw new Error('runtime run changed before its revision was advanced')
-        }
-        if (nonce !== undefined && owner !== undefined) {
-          if (activeRuntime.nonce !== nonce
-            || activeRuntime.sessionId !== owner.sessionId
-            || activeRuntime.connectionGeneration !== owner.connectionGeneration) {
-            throw new Error('runtime run changed before its revision was advanced')
-          }
-        } else if (activeRuntime.nonce !== undefined
-          || activeRuntime.sessionId !== undefined
-          || activeRuntime.connectionGeneration !== undefined) {
-          throw new Error('Runtime revision rollover requires exact owner identity')
-        }
-      }
-      const runtimeKey = ownerKey ?? projectId
-      this.pendingRuntimeProjections.delete(runtimeKey)
-      const projectionGeneration = previousRevision === undefined
-        ? 0
-        : (previousRuntime?.projectionGeneration ?? 0) + 1
-      const buildRevision = buildId === undefined
-        ? previousRuntime?.buildRevision
-          ?? (previousRuntime?.buildId === undefined ? undefined : previousRuntime.revision)
-        : revision
-      this.rejectRuntimeCommand(runtimeKey, {
-        status: 'cancelled',
-        reason: 'Runtime revision changed',
-      })
-      this.activeRuntimeGrants.delete(runtimeKey)
-      const runtimeRef = randomUUID()
-      const activeRuntime = activeRuntimeSchema.parse({
-        revision,
-        buildId: buildId ?? previousRuntime?.buildId,
-        buildRevision,
-        projectionGeneration,
-        runtimeRef,
-        runId,
-        nonce,
-        evidenceToken,
-        sessionId: owner?.sessionId,
-        connectionGeneration: owner?.connectionGeneration,
-        ownerId: this.runtimeOwnerId,
-        ownerPid: process.pid,
-      })
-      if (ownerKey !== undefined) this.activeRuntimes.set(ownerKey, activeRuntime)
-      await this.writeAtomic(
-        snapshot.path,
-        activePath,
-        canonicalBytes(activeRuntime),
-      )
-      if (signal?.aborted) {
-        if (ownerKey !== undefined) {
-          if (previousRuntime === undefined) this.activeRuntimes.delete(ownerKey)
-          else this.activeRuntimes.set(ownerKey, previousRuntime)
-        }
-        const currentStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
-        if (currentStoredRuntime?.revision === revision
-          && currentStoredRuntime.runId === runId
-          && currentStoredRuntime.ownerId === this.runtimeOwnerId
-          && currentStoredRuntime.ownerPid === process.pid) {
-          if (previousStoredRuntime === undefined) {
-            await this.clearActiveRuntime(snapshot.path, revision, runId)
-          } else {
-            await this.writeAtomic(
-              snapshot.path,
-              activePath,
-              canonicalBytes(previousStoredRuntime),
-            )
-          }
-        }
-        signal.throwIfAborted()
-      }
-      return {
-        projectId,
-        revision,
-        buildId: activeRuntime.buildId,
-        buildRevision: activeRuntime.buildRevision,
-        projectionGeneration,
-        runtimeRef,
-        runId,
-        nonce: activeRuntime.nonce,
-        evidenceToken,
-      }
-    })
-  }
-
   async prepareRuntimeRun(
     projectId: string,
     revision: string,
-    buildId: string | undefined,
+    buildId: string,
     runId: string,
     nonce: string,
     owner: RuntimeOwner,
@@ -1548,79 +1421,80 @@ export class WorkspaceStore {
       signal?.throwIfAborted()
       await this.validateRuntimeBuild(projectId, revision, buildId)
       this.removeExpiredPreparedRuntimes()
-      const prepared = {
-        projectId,
-        revision,
-        buildId,
-        buildRevision: buildId === undefined ? undefined : revision,
-        projectionGeneration: 0,
+      const key = this.runtimeKey(projectId, owner)
+      for (const [candidateKey, registry] of this.runtimeRegistries) {
+        if (candidateKey === key
+          || !candidateKey.startsWith(`${projectId}\0`)
+          || registry.active?.execution.owner.sessionId !== owner.sessionId) continue
+        this.runtimeRegistries.delete(candidateKey)
+        this.rejectRuntimeCommand(candidateKey, {
+          status: 'cancelled',
+          reason: 'MCP connection generation changed',
+        })
+      }
+      const prepared: PreparedRuntimeRun = {
+        execution: { projectId, runId, nonce, owner },
+        projection: {
+          workspaceRevision: revision,
+          generation: 0,
+          loadedBuild: { buildId, sourceRevision: revision },
+        },
         runtimeRef: randomUUID(),
-        runId,
-        nonce,
         evidenceToken: randomUUID(),
         expiresAt: Date.now() + ttlMs,
       }
-      this.preparedRuntimes.set(this.runtimeKey(projectId, owner), prepared)
+      const registry = this.runtimeRegistries.get(key) ?? {}
+      this.runtimeRegistries.set(key, { ...registry, prepared })
       return prepared
     })
   }
 
   async commitRuntimeRun(
-    candidate: RuntimeIdentity,
-    expectedActive: RuntimeIdentity | undefined,
+    projectId: string,
+    runtimeRef: string,
+    expectedActiveRef: string | undefined,
     owner: RuntimeOwner,
     signal?: AbortSignal,
   ): Promise<PreparedRuntimeRun> {
-    validateProjectId(candidate.projectId)
-    return this.withLock(candidate.projectId, async () => {
+    validateProjectId(projectId)
+    return this.withLock(projectId, async () => {
       signal?.throwIfAborted()
       this.removeExpiredPreparedRuntimes()
-      const key = this.runtimeKey(candidate.projectId, owner)
-      const prepared = this.preparedRuntimes.get(key)
-      if (prepared === undefined || !sameRuntimeIdentity(prepared, candidate)) {
+      const key = this.runtimeKey(projectId, owner)
+      const registry = this.runtimeRegistries.get(key)
+      if (registry?.prepared === undefined || registry.prepared.runtimeRef !== runtimeRef) {
         throw new Error('prepared Runtime run is missing, expired, or stale')
       }
-      const active = this.activeRuntimes.get(key)
-      const activeMatches = expectedActive === undefined
+      const prepared = registry.prepared
+      const active = registry.active
+      const activeMatches = expectedActiveRef === undefined
         ? active === undefined
-        : active !== undefined
-          && active.nonce !== undefined
-          && sameLegacyRuntimeExecution(
-            {
-              projectId: candidate.projectId,
-              revision: active.revision,
-              runId: active.runId,
-              nonce: active.nonce,
-            },
-            expectedActive,
-          )
+        : active?.runtimeRef === expectedActiveRef
       if (!activeMatches) {
         throw new Error('active Runtime changed before candidate commit')
       }
       const { snapshot, activePath } = await this.validateRuntimeBuild(
-        candidate.projectId,
-        candidate.revision,
-        prepared.buildId,
+        projectId,
+        prepared.projection.workspaceRevision,
+        prepared.projection.loadedBuild.buildId,
       )
       const previousStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
       const next = activeRuntimeSchema.parse({
-        revision: prepared.revision,
-        buildId: prepared.buildId,
-        buildRevision: prepared.buildRevision,
-        projectionGeneration: prepared.projectionGeneration,
+        execution: prepared.execution,
+        projection: prepared.projection,
         runtimeRef: prepared.runtimeRef,
-        runId: prepared.runId,
-        nonce: prepared.nonce,
         evidenceToken: prepared.evidenceToken,
-        sessionId: owner.sessionId,
-        connectionGeneration: owner.connectionGeneration,
         ownerId: this.runtimeOwnerId,
         ownerPid: process.pid,
       })
       await this.writeAtomic(snapshot.path, activePath, canonicalBytes(next))
       if (signal?.aborted) {
         if (previousStoredRuntime === undefined) {
-          await this.clearActiveRuntime(snapshot.path, next.revision, next.runId)
+          await this.clearActiveRuntime(
+            snapshot.path,
+            next.projection.workspaceRevision,
+            next.execution.runId,
+          )
         } else {
           await this.writeAtomic(
             snapshot.path,
@@ -1634,10 +1508,7 @@ export class WorkspaceStore {
         status: 'cancelled',
         reason: 'Runtime was replaced',
       })
-      this.activeRuntimeGrants.delete(key)
-      this.activeRuntimes.set(key, next)
-      this.preparedRuntimes.delete(key)
-      this.pendingRuntimeProjections.delete(key)
+      this.runtimeRegistries.set(key, { active: next })
       return prepared
     })
   }
@@ -1650,10 +1521,11 @@ export class WorkspaceStore {
     validateProjectId(projectId)
     return this.withLock(projectId, async () => {
       const key = this.runtimeKey(projectId, owner)
-      const pending = this.pendingRuntimeProjections.get(key)
-      if (pending === undefined) return undefined
+      const registry = this.runtimeRegistries.get(key)
+      if (registry?.pendingProjection === undefined) return undefined
+      const pending = registry.pendingProjection
       if (pending.expiresAt <= Date.now()) {
-        this.pendingRuntimeProjections.delete(key)
+        delete registry.pendingProjection
         return undefined
       }
       return pending.targetRevision === revision ? { ...pending } : undefined
@@ -1663,8 +1535,7 @@ export class WorkspaceStore {
   async commitRuntimeProjection(
     projectId: string,
     transitionId: string,
-    runId: string,
-    nonce: string,
+    runtimeRef: string,
     revision: string,
     owner: RuntimeOwner,
     signal?: AbortSignal,
@@ -1673,48 +1544,33 @@ export class WorkspaceStore {
     return this.withLock(projectId, async () => {
       signal?.throwIfAborted()
       const key = this.runtimeKey(projectId, owner)
-      const pending = this.pendingRuntimeProjections.get(key)
-      if (pending === undefined
+      const registry = this.runtimeRegistries.get(key)
+      const pending = registry?.pendingProjection
+      if (registry === undefined
+        || pending === undefined
         || pending.expiresAt <= Date.now()
         || pending.transitionId !== transitionId
-        || pending.projectId !== projectId
-        || pending.runId !== runId
-        || pending.nonce !== nonce
+        || pending.execution.projectId !== projectId
         || pending.targetRevision !== revision) {
         if (pending?.expiresAt !== undefined && pending.expiresAt <= Date.now()) {
-          this.pendingRuntimeProjections.delete(key)
+          delete registry?.pendingProjection
         }
         throw new RuntimeProtocolError(
           'RUNTIME_PROJECTION_STALE',
           'Pending Runtime projection is missing, expired, or stale',
         )
       }
-      const active = this.activeRuntimes.get(key)
+      const active = registry.active
       if (active === undefined
-        || active.runId !== runId
-        || active.nonce !== nonce
-        || active.sessionId !== owner.sessionId
-        || active.connectionGeneration !== owner.connectionGeneration) {
+        || active.runtimeRef !== runtimeRef
+        || !sameRuntimeExecution(active.execution, pending.execution)) {
         throw new RuntimeProtocolError(
           'RUNTIME_PROJECTION_STALE',
           'Runtime execution changed before projection commit',
         )
       }
-      if (active.buildId === undefined) {
-        throw new RuntimeProtocolError(
-          'RUNTIME_PROJECTION_STALE',
-          'Active Runtime has no loaded build provenance',
-        )
-      }
       const projection = nextRuntimeProjection(
-        {
-          workspaceRevision: active.revision,
-          generation: active.projectionGeneration,
-          loadedBuild: {
-            buildId: active.buildId,
-            sourceRevision: active.buildRevision ?? active.revision,
-          },
-        },
+        active.projection,
         {
           workspaceRevision: pending.baseRevision,
           generation: pending.expectedGeneration,
@@ -1726,18 +1582,12 @@ export class WorkspaceStore {
         revision,
         undefined,
       )
-      const runtimeRef = randomUUID()
+      const nextRuntimeRef = randomUUID()
       const next = activeRuntimeSchema.parse({
-        revision: projection.workspaceRevision,
-        buildId: projection.loadedBuild.buildId,
-        buildRevision: projection.loadedBuild.sourceRevision,
-        projectionGeneration: projection.generation,
-        runtimeRef,
-        runId,
-        nonce,
+        execution: active.execution,
+        projection,
+        runtimeRef: nextRuntimeRef,
         evidenceToken: active.evidenceToken,
-        sessionId: owner.sessionId,
-        connectionGeneration: owner.connectionGeneration,
         ownerId: this.runtimeOwnerId,
         ownerPid: process.pid,
       })
@@ -1745,63 +1595,29 @@ export class WorkspaceStore {
         status: 'cancelled',
         reason: 'Runtime revision changed',
       })
-      this.activeRuntimeGrants.delete(key)
       await this.writeAtomic(snapshot.path, activePath, canonicalBytes(next))
-      this.activeRuntimes.set(key, next)
-      this.pendingRuntimeProjections.delete(key)
-      return {
-        projectId,
-        revision: next.revision,
-        buildId: next.buildId,
-        buildRevision: next.buildRevision,
-        projectionGeneration: next.projectionGeneration,
-        runtimeRef,
-        runId,
-        nonce,
-        evidenceToken: next.evidenceToken!,
-      }
+      this.runtimeRegistries.set(key, { active: next })
+      return this.registeredRuntime(next)
     })
   }
 
   async releaseRuntimeRun(
     projectId: string,
-    revision: string,
-    runId: string,
-    nonce?: string,
-    owner?: RuntimeOwner,
+    runtimeRef: string,
+    owner: RuntimeOwner,
   ): Promise<boolean> {
     validateProjectId(projectId)
-    if (!/^[a-f0-9]{64}$/.test(revision)) throw new Error('invalid Runtime revision')
     return this.withLock(projectId, async () => {
       const workspace = this.workspaces.get(projectId)
       if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
-      if ((nonce === undefined) !== (owner === undefined)) {
-        throw new Error('Runtime nonce and owner identity must be provided together')
-      }
-      if (nonce !== undefined && owner !== undefined) {
-        await this.assertRuntimeIdentity({
-          projectId,
-          revision,
-          runId,
-          nonce,
-        }, owner)
-      } else {
-        const active = await this.readActiveRuntime(workspace.path, true)
-        if (active?.nonce !== undefined
-          || active?.sessionId !== undefined
-          || active?.connectionGeneration !== undefined) {
-          throw new Error('Exact Runtime owner identity is required')
-        }
-      }
-      const key = owner === undefined ? projectId : this.runtimeKey(projectId, owner)
-      const released = owner === undefined
-        ? await this.clearActiveRuntime(workspace.path, revision, runId)
-        : this.activeRuntimes.delete(key)
-      if (owner !== undefined) {
-        this.pendingRuntimeProjections.delete(key)
-        this.activeRuntimeGrants.delete(key)
-        await this.clearActiveRuntime(workspace.path, revision, runId)
-      }
+      const active = this.resolveRuntimeReference(projectId, runtimeRef, owner)
+      const key = this.runtimeKey(projectId, owner)
+      const released = this.runtimeRegistries.delete(key)
+      await this.clearActiveRuntime(
+        workspace.path,
+        active.projection.workspaceRevision,
+        active.execution.runId,
+      )
       if (released) {
         this.rejectRuntimeCommand(key, {
           status: 'cancelled',
@@ -1815,43 +1631,30 @@ export class WorkspaceStore {
   async runtimeIdentity(
     projectId: string,
     owner: RuntimeOwner,
-  ): Promise<RuntimeContextIdentity | undefined> {
+  ): Promise<RuntimeHarnessAddress | undefined> {
     validateProjectId(projectId)
     return this.withLock(projectId, async () => {
       const workspace = this.workspaces.get(projectId)
       if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
-      const active = this.activeRuntimes.get(this.runtimeKey(projectId, owner))
+      const active = this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
       if (active === undefined
-        || active.nonce === undefined
         || active.runtimeRef === undefined
-        || active.evidenceToken === undefined
-        || active.sessionId !== owner.sessionId
-        || active.connectionGeneration !== owner.connectionGeneration) return undefined
-      return {
-        projectId,
-        revision: active.revision,
-        buildId: active.buildId,
-        buildRevision: active.buildRevision,
-        projectionGeneration: active.projectionGeneration,
-        runtimeRef: active.runtimeRef,
-        runId: active.runId,
-        nonce: active.nonce,
-      }
+        || !sameRuntimeOwner(active.execution.owner, owner)) return undefined
+      return { projectId, runtimeRef: active.runtimeRef }
     })
   }
 
   async grantActiveRuntimeControl(
-    runtime: RuntimeIdentity,
+    address: RuntimeHarnessAddress,
     owner: RuntimeOwner,
   ): Promise<string> {
-    validateProjectId(runtime.projectId)
-    return this.withLock(runtime.projectId, async () => {
-      await this.assertRuntimeIdentity(runtime, owner)
+    validateProjectId(address.projectId)
+    return this.withLock(address.projectId, async () => {
+      const runtime = this.resolveRuntimeReference(address.projectId, address.runtimeRef, owner)
       const expiresAt = Date.now() + 60_000
-      this.activeRuntimeGrants.set(this.runtimeKey(runtime.projectId, owner), {
-        runtime,
-        expiresAt,
-      })
+      const key = this.runtimeKey(runtime.execution.projectId, owner)
+      const registry = this.runtimeRegistries.get(key)!
+      registry.activeGrant = { runtime, expiresAt }
       return new Date(expiresAt).toISOString()
     })
   }
@@ -1873,37 +1676,21 @@ export class WorkspaceStore {
       resolvePending = resolve
       rejectPending = reject
     })
-    let pending: PendingRuntimeCommand | undefined
+    let pending: PreparingRuntimeCommand | undefined
     await this.withLock(address.projectId, async () => {
       signal?.throwIfAborted()
       const workspace = this.workspaces.get(address.projectId)
       if (workspace === undefined) throw new Error(`unknown workspace ${address.projectId}`)
-      let runtime: RuntimeIdentity
-      if (address.runtimeRef !== undefined) {
-        runtime = this.resolveRuntimeReference(address.projectId, address.runtimeRef, owner)
-      } else if (address.revision !== undefined
-        && address.runId !== undefined
-        && address.nonce !== undefined) {
-        runtime = {
-          projectId: address.projectId,
-          revision: address.revision,
-          runId: address.runId,
-          nonce: address.nonce,
-        }
-      } else {
-        throw new RuntimeProtocolError(
-          'RUNTIME_REFERENCE_STALE',
-          'Use runtimeRef from the latest Runtime context supplied by the Editor',
-        )
-      }
-      const active = await this.assertRuntimeIdentity(runtime, owner)
-      const key = this.runtimeKey(runtime.projectId, owner)
-      if (this.runtimeCommands.has(key)) {
+      const runtime = this.resolveRuntimeReference(address.projectId, address.runtimeRef, owner)
+      await this.assertRuntimeIdentity(runtime, owner)
+      const key = this.runtimeKey(runtime.execution.projectId, owner)
+      if (this.activeRuntimeCommand(key) !== undefined) {
         throw new Error('Runtime control lease is busy')
       }
       if (target === 'active') {
-        const grant = this.activeRuntimeGrants.get(key)
-        this.activeRuntimeGrants.delete(key)
+        const registry = this.runtimeRegistries.get(key)!
+        const grant = registry.activeGrant
+        delete registry.activeGrant
         if (grant === undefined
           || grant.expiresAt <= Date.now()
           || !sameRuntimeIdentity(grant.runtime, runtime)) {
@@ -1918,14 +1705,13 @@ export class WorkspaceStore {
         kind,
         target,
         runtime,
-        projectionGeneration: active.projectionGeneration,
         evidenceToken: randomUUID(),
         payload,
         timeoutMs,
       }
       const preparationDeadline = Date.now() + RUNTIME_COMMAND_PREPARATION_TIMEOUT_MS
       const expirePreparation = () => {
-        if (this.runtimeCommands.get(key) !== pending) return
+        if (pending === undefined || this.runtimeCommands.get(command.commandId) !== pending) return
         this.rejectRuntimeCommand(key, {
           status: 'expired',
           stage: 'prepare',
@@ -1935,16 +1721,17 @@ export class WorkspaceStore {
       pending = {
         command,
         owner,
+        registryKey: key,
         phase: 'preparing',
         resolve: resolvePending,
         reject: rejectPending,
         timer,
       }
-      this.runtimeCommands.set(key, pending)
+      this.runtimeCommands.set(command.commandId, pending)
       if (signal !== undefined) {
         const activePending = pending
         activePending.abort = () => {
-          if (this.runtimeCommands.get(key) !== activePending) return
+          if (this.runtimeCommands.get(command.commandId) !== activePending) return
           this.rejectRuntimeCommand(key, {
             status: 'cancelled',
             reason: 'Runtime Harness command cancelled',
@@ -1962,15 +1749,18 @@ export class WorkspaceStore {
   }
 
   async pullRuntimeCommand(
-    runtime: RuntimeIdentity,
+    address: RuntimeHarnessAddress,
     owner: RuntimeOwner,
   ): Promise<RuntimeHarnessCommand | undefined> {
-    validateProjectId(runtime.projectId)
-    return this.withLock(runtime.projectId, async () => {
-      const workspace = this.workspaces.get(runtime.projectId)
-      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
+    validateProjectId(address.projectId)
+    return this.withLock(address.projectId, async () => {
+      const workspace = this.workspaces.get(address.projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${address.projectId}`)
+      const runtime = this.resolveRuntimeReference(address.projectId, address.runtimeRef, owner)
       await this.assertRuntimeIdentity(runtime, owner)
-      const pending = this.runtimeCommands.get(this.runtimeKey(runtime.projectId, owner))
+      const pending = this.activeRuntimeCommand(
+        this.runtimeKey(runtime.execution.projectId, owner),
+      )
       if (pending === undefined) return undefined
       if (!sameRuntimeOwner(pending.owner, owner)
         || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
@@ -1981,66 +1771,58 @@ export class WorkspaceStore {
   }
 
   async startRuntimeCommand(
-    runtime: RuntimeIdentity,
+    address: RuntimeHarnessAddress,
     owner: RuntimeOwner,
     commandId: string,
-    targetRuntime?: RuntimeEvidenceTarget,
+    targetRuntime: RuntimeEvidenceTarget,
   ): Promise<string> {
-    validateProjectId(runtime.projectId)
-    return this.withLock(runtime.projectId, async () => {
-      const active = await this.assertRuntimeIdentity(runtime, owner)
-      const key = this.runtimeKey(runtime.projectId, owner)
-      const pending = this.runtimeCommands.get(key)
+    validateProjectId(address.projectId)
+    return this.withLock(address.projectId, async () => {
+      const runtime = this.resolveRuntimeReference(address.projectId, address.runtimeRef, owner)
+      await this.assertRuntimeIdentity(runtime, owner)
+      const key = this.runtimeKey(runtime.execution.projectId, owner)
+      const pending = this.runtimeCommands.get(commandId)
       if (pending === undefined
-        || pending.command.commandId !== commandId
+        || pending.phase === 'settled'
+        || pending.registryKey !== key
         || !sameRuntimeOwner(pending.owner, owner)
         || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
         throw new Error('Runtime Harness command is stale or foreign')
       }
       if (pending.phase === 'executing') return pending.command.expiresAt!
-      if (active.buildId === undefined) {
-        throw new RuntimeProtocolError(
-          'RUNTIME_COMMAND_STATE',
-          'Active Runtime has no loaded build provenance',
-        )
-      }
-      const target = targetRuntime ?? {
-        ...runtime,
-        buildId: active.buildId,
-        target: pending.command.target,
-      }
-      if (targetRuntime === undefined && active.evidenceToken !== undefined) {
-        pending.command.evidenceToken = active.evidenceToken
-      }
-      if (target.target !== pending.command.target
-        || target.projectId !== runtime.projectId
-        || target.revision !== runtime.revision) {
+      if (targetRuntime.target !== pending.command.target
+        || targetRuntime.execution.projectId !== runtime.execution.projectId
+        || targetRuntime.projection.workspaceRevision
+          !== runtime.projection.workspaceRevision) {
         throw new RuntimeProtocolError(
           'RUNTIME_COMMAND_STATE',
           'Runtime Harness target does not match the pending command',
         )
       }
-      if (target.target === 'active') {
-        if (!sameRuntimeIdentity(target, runtime) || target.buildId !== active.buildId) {
+      if (targetRuntime.target === 'active') {
+        if (!sameRuntimeIdentity(targetRuntime, runtime)) {
           throw new RuntimeProtocolError(
             'RUNTIME_COMMAND_STATE',
             'Active Runtime target changed before command execution',
           )
         }
       } else {
-        if (targetRuntime !== undefined && sameRuntimeIdentity(target, runtime)) {
+        if (sameRuntimeExecution(targetRuntime.execution, runtime.execution)) {
           throw new RuntimeProtocolError(
             'RUNTIME_COMMAND_STATE',
             'Validation Runtime must use an independent execution identity',
           )
         }
-        const workspace = this.workspaces.get(runtime.projectId)
+        const workspace = this.workspaces.get(runtime.execution.projectId)
         const build = workspace === undefined
           ? undefined
-          : await this.readStoredBuild(workspace.path, target.buildId)
+          : await this.readStoredBuild(
+              workspace.path,
+              targetRuntime.projection.loadedBuild.buildId,
+            )
         if (build?.status !== 'ready'
-          || build.projectId !== runtime.projectId
-          || build.revision !== runtime.revision) {
+          || build.projectId !== runtime.execution.projectId
+          || build.revision !== runtime.projection.workspaceRevision) {
           throw new RuntimeProtocolError(
             'RUNTIME_COMMAND_STATE',
             'Validation Runtime target does not use a ready build for this projection',
@@ -2051,35 +1833,41 @@ export class WorkspaceStore {
       const expiresAt = new Date(Date.now() + pending.command.timeoutMs).toISOString()
       const settlementDeadline = runtimeCommandSettlementDeadline(expiresAt)
       pending.command.expiresAt = expiresAt
-      pending.phase = 'executing'
-      pending.targetRuntime = target
-      pending.legacyTarget = targetRuntime === undefined
-      pending.settlementDeadline = settlementDeadline
-      pending.timer = setTimeout(() => {
-        if (this.runtimeCommands.get(key) !== pending) return
-        this.rejectRuntimeCommand(key, {
-          status: 'expired',
-          stage: 'settle',
-        })
-      }, settlementDeadline - Date.now())
+      const executing: ExecutingRuntimeCommand = {
+        ...pending,
+        phase: 'executing',
+        targetRuntime,
+        settlementDeadline,
+        timer: setTimeout(() => {
+          if (this.runtimeCommands.get(commandId) !== executing) return
+          this.rejectRuntimeCommand(key, {
+            status: 'expired',
+            stage: 'settle',
+          })
+        }, settlementDeadline - Date.now()),
+      }
+      this.runtimeCommands.set(commandId, executing)
+      clearTimeout(pending.timer)
       return expiresAt
     })
   }
 
   async settleRuntimeCommand(
-    runtime: RuntimeIdentity,
+    address: RuntimeHarnessAddress,
     owner: RuntimeOwner,
     commandId: string,
     outcome: RuntimeCommandOutcome,
   ): Promise<void> {
-    validateProjectId(runtime.projectId)
-    await this.withLock(runtime.projectId, async () => {
+    validateProjectId(address.projectId)
+    await this.withLock(address.projectId, async () => {
+      const runtime = this.resolveRuntimeReference(address.projectId, address.runtimeRef, owner)
       if (this.runtimeCommandWasSettled(commandId, runtime, owner, outcome)) return
       await this.assertRuntimeIdentity(runtime, owner)
-      const key = this.runtimeKey(runtime.projectId, owner)
-      const pending = this.runtimeCommands.get(key)
+      const key = this.runtimeKey(runtime.execution.projectId, owner)
+      const pending = this.runtimeCommands.get(commandId)
       if (pending === undefined
-        || pending.command.commandId !== commandId
+        || pending.phase === 'settled'
+        || pending.registryKey !== key
         || !sameRuntimeOwner(pending.owner, owner)
         || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
         throw new Error('Runtime Harness result is stale or foreign')
@@ -2097,19 +1885,14 @@ export class WorkspaceStore {
             'Runtime Harness failure stage or code does not match the command phase',
           )
         }
-        this.finishRuntimeCommand(key, outcome)
+        this.finishRuntimeCommand(pending, outcome)
         return
       }
       if (outcome.status === 'cancelled' || outcome.status === 'expired') {
-        this.finishRuntimeCommand(key, outcome)
+        this.finishRuntimeCommand(pending, outcome)
         return
       }
-      const workspace = this.workspaces.get(runtime.projectId)
-      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
-      if (pending.phase !== 'executing'
-        || pending.command.expiresAt === undefined
-        || pending.settlementDeadline === undefined
-        || pending.targetRuntime === undefined) {
+      if (pending.phase !== 'executing' || pending.command.expiresAt === undefined) {
         throw new Error('Runtime Harness command has not started')
       }
       const expiresAt = pending.command.expiresAt
@@ -2132,34 +1915,13 @@ export class WorkspaceStore {
         && 'kind' in result
         ? result.kind
         : undefined
-      const legacyValidationBuild = pending.legacyTarget === true
-        && pending.command.target === 'validation'
-        && typeof evidenceRuntime?.buildId === 'string'
-        ? await this.readStoredBuild(workspace.path, evidenceRuntime.buildId)
-        : undefined
-      const targetMatches = pending.legacyTarget === true
-        && pending.command.target === 'validation'
-        ? evidenceRuntime !== undefined
-          && sameRuntimeIdentity(
-            evidenceRuntime as RuntimeIdentity,
-            pending.targetRuntime,
-          )
-          && evidenceRuntime?.target === 'validation'
-          && legacyValidationBuild?.status === 'ready'
-          && legacyValidationBuild.projectId === runtime.projectId
-          && legacyValidationBuild.revision === runtime.revision
-        : evidenceRuntime !== undefined
-          && sameRuntimeEvidenceTarget(
-            evidenceRuntime as RuntimeEvidenceTarget,
-            pending.targetRuntime,
-          )
+      const targetMatches = evidenceRuntime !== undefined
+        && sameRuntimeEvidenceTarget(
+          evidenceRuntime as RuntimeEvidenceTarget,
+          pending.targetRuntime,
+        )
       if (evidenceToken !== pending.command.evidenceToken
         || evidenceRuntime === undefined
-        || typeof evidenceRuntime.projectId !== 'string'
-        || typeof evidenceRuntime.revision !== 'string'
-        || typeof evidenceRuntime.runId !== 'string'
-        || typeof evidenceRuntime.nonce !== 'string'
-        || typeof evidenceRuntime.buildId !== 'string'
         || (evidenceRuntime.target !== 'active' && evidenceRuntime.target !== 'validation')
         || !targetMatches) {
         throw new Error('Runtime Harness evidence identity is stale or foreign')
@@ -2187,35 +1949,7 @@ export class WorkspaceStore {
             && (evidenceStatus === 'failed' || evidenceStatus === 'cancelled')))) {
         throw new Error('Runtime Harness result missed its execution deadline')
       }
-      this.finishRuntimeCommand(key, outcome)
-    })
-  }
-
-  async failRuntimeCommand(
-    runtime: RuntimeIdentity,
-    owner: RuntimeOwner,
-    commandId: string,
-    message: string,
-    stage: RuntimeCommandFailureStage = 'prepare',
-    code: RuntimeCommandFailureCode = 'TARGET_PREPARATION_FAILED',
-  ): Promise<void> {
-    await this.settleRuntimeCommand(runtime, owner, commandId, {
-      status: 'failed',
-      stage,
-      code,
-      message,
-    })
-  }
-
-  async reportRuntimeEvidence(
-    runtime: RuntimeIdentity,
-    owner: RuntimeOwner,
-    commandId: string,
-    result: unknown,
-  ): Promise<void> {
-    await this.settleRuntimeCommand(runtime, owner, commandId, {
-      status: 'succeeded',
-      evidence: result,
+      this.finishRuntimeCommand(pending, outcome)
     })
   }
 
@@ -2241,10 +1975,10 @@ export class WorkspaceStore {
           : undefined
         const activeRuntime = owner === undefined
           ? await this.readActiveRuntime(snapshot.path)
-          : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
+          : this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
         return runId !== undefined
-          && activeRuntime?.revision === revision
-          && activeRuntime.runId === runId
+          && activeRuntime?.projection.workspaceRevision === revision
+          && activeRuntime.execution.runId === runId
           && (expectedRunId === undefined || runId === expectedRunId)
           ? document
           : undefined
@@ -2276,8 +2010,9 @@ export class WorkspaceStore {
       }
       const activeRuntime = owner === undefined
         ? await this.readActiveRuntime(snapshot.path)
-        : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
-      if (activeRuntime?.revision !== testedRevision || activeRuntime.runId !== runId) {
+        : this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
+      if (activeRuntime?.projection.workspaceRevision !== testedRevision
+        || activeRuntime.execution.runId !== runId) {
         throw new Error('runtime run changed before diagnostics were reported')
       }
       const diagnostics = diagnosticsSchema.parse({
@@ -2310,10 +2045,10 @@ export class WorkspaceStore {
         )).toString('utf8')))
         const activeRuntime = owner === undefined
           ? await this.readActiveRuntime(snapshot.path)
-          : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
-        return activeRuntime?.revision === snapshot.revision
+          : this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
+        return activeRuntime?.projection.workspaceRevision === snapshot.revision
           && diagnostics.testedRevision === snapshot.revision
-          && diagnostics.runId === activeRuntime.runId
+          && diagnostics.runId === activeRuntime.execution.runId
           ? diagnostics
           : undefined
       } catch (error) {
@@ -2357,15 +2092,14 @@ export class WorkspaceStore {
       if (expectedRunId !== undefined) {
         activeRuntime = owner === undefined
           ? await this.readActiveRuntime(current.path)
-          : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
-        if (activeRuntime?.revision !== baseRevision
-          || activeRuntime.runId !== expectedRunId) {
+          : this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
+        if (activeRuntime?.projection.workspaceRevision !== baseRevision
+          || activeRuntime.execution.runId !== expectedRunId) {
           throw new Error('runtime run changed before editor commands were applied')
         }
       }
       const normalized = await this.normalizeChanges(current, changes)
-      if (projectionTtlMs !== undefined
-        && (activeRuntime?.nonce === undefined || activeRuntime.buildId === undefined)) {
+      if (projectionTtlMs !== undefined && activeRuntime === undefined) {
         throw new RuntimeProtocolError(
           'RUNTIME_PROJECTION_STALE',
           'Runtime projection cannot be prepared without an owned active execution',
@@ -2477,18 +2211,21 @@ export class WorkspaceStore {
       if (projectionTtlMs === undefined) return snapshot
       const pendingProjection: PendingRuntimeProjection = {
         transitionId: randomUUID(),
-        projectId,
-        runId: activeRuntime!.runId,
-        nonce: activeRuntime!.nonce!,
+        execution: activeRuntime!.execution,
         baseRevision,
         targetRevision: snapshot.revision,
-        expectedGeneration: activeRuntime!.projectionGeneration,
+        expectedGeneration: activeRuntime!.projection.generation,
         expiresAt: Date.now() + projectionTtlMs,
       }
-      this.pendingRuntimeProjections.set(
-        this.runtimeKey(projectId, owner!),
-        pendingProjection,
-      )
+      const key = this.runtimeKey(projectId, owner!)
+      const registry = this.runtimeRegistries.get(key)
+      if (registry === undefined) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_PROJECTION_STALE',
+          'Runtime registry disappeared before projection preparation',
+        )
+      }
+      registry.pendingProjection = pendingProjection
       return { ...snapshot, pendingProjection }
     })
   }
@@ -2600,17 +2337,14 @@ export class WorkspaceStore {
     runtime: RuntimeIdentity,
     owner: RuntimeOwner,
   ): Promise<ActiveRuntime> {
-    const active = this.activeRuntimes.get(this.runtimeKey(runtime.projectId, owner))
+    const projectId = runtime.execution.projectId
+    const active = this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
     if (active === undefined) {
-      const foreign = [...this.activeRuntimes.entries()].some(([key, candidate]) => (
-        key.startsWith(`${runtime.projectId}\0`)
-        && candidate.nonce !== undefined
-        && sameRuntimeIdentity({
-          projectId: runtime.projectId,
-          revision: candidate.revision,
-          runId: candidate.runId,
-          nonce: candidate.nonce,
-        }, runtime)
+      const foreign = [...this.runtimeRegistries.entries()].some(([key, registry]) => (
+        key.startsWith(`${projectId}\0`)
+        && registry.active?.execution.projectId === projectId
+        && registry.active.execution.runId === runtime.execution.runId
+        && registry.active.execution.nonce === runtime.execution.nonce
       ))
       if (foreign) {
         throw new RuntimeProtocolError(
@@ -2619,25 +2353,13 @@ export class WorkspaceStore {
         )
       }
     }
-    if (active?.nonce === undefined
-      || !sameRuntimeIdentity({
-        projectId: runtime.projectId,
-        revision: active.revision,
-        runId: active.runId,
-        nonce: active.nonce,
-      }, runtime)) {
+    if (active === undefined || !sameRuntimeIdentity(active, runtime)) {
       throw new RuntimeProtocolError(
         'RUNTIME_EXECUTION_STALE',
-        'Runtime identity is stale or incomplete. Copy projectId, revision, runId, and nonce '
-        + 'exactly from the latest Runtime context supplied by the Editor; do not generate replacement UUIDs.',
+        'Runtime identity is stale or incomplete',
       )
     }
-    if (active.sessionId === undefined
-      || active.connectionGeneration === undefined
-      || !sameRuntimeOwner({
-        sessionId: active.sessionId,
-        connectionGeneration: active.connectionGeneration,
-      }, owner)) {
+    if (!sameRuntimeOwner(active.execution.owner, owner)) {
       throw new RuntimeProtocolError(
         'RUNTIME_OWNER_FOREIGN',
         'Runtime belongs to another Harness Session or connection generation',
@@ -2651,23 +2373,16 @@ export class WorkspaceStore {
     runtimeRef: string,
     owner: RuntimeOwner,
   ): RuntimeIdentity {
-    const active = this.activeRuntimes.get(this.runtimeKey(projectId, owner))
+    const active = this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
     if (active === undefined
       || active.runtimeRef !== runtimeRef
-      || active.nonce === undefined
-      || active.sessionId !== owner.sessionId
-      || active.connectionGeneration !== owner.connectionGeneration) {
+      || !sameRuntimeOwner(active.execution.owner, owner)) {
       throw new RuntimeProtocolError(
         'RUNTIME_REFERENCE_STALE',
         'Runtime reference is stale; use the latest Runtime context from the Editor',
       )
     }
-    return {
-      projectId,
-      revision: active.revision,
-      runId: active.runId,
-      nonce: active.nonce,
-    }
+    return { execution: active.execution, projection: active.projection }
   }
 
   private runtimeKey(projectId: string, owner: RuntimeOwner): string {
@@ -2675,9 +2390,36 @@ export class WorkspaceStore {
   }
 
   private removeExpiredPreparedRuntimes(now = Date.now()): void {
-    for (const [key, prepared] of this.preparedRuntimes) {
-      if (prepared.expiresAt <= now) this.preparedRuntimes.delete(key)
+    for (const [key, registry] of this.runtimeRegistries) {
+      if (registry.prepared?.expiresAt !== undefined
+        && registry.prepared.expiresAt <= now) {
+        delete registry.prepared
+      }
+      if (registry.active === undefined
+        && registry.prepared === undefined
+        && registry.pendingProjection === undefined
+        && registry.activeGrant === undefined) {
+        this.runtimeRegistries.delete(key)
+      }
     }
+  }
+
+  private registeredRuntime(active: ActiveRuntime): RegisteredRuntime {
+    return {
+      execution: active.execution,
+      projection: active.projection,
+      runtimeRef: active.runtimeRef,
+      evidenceToken: active.evidenceToken,
+    }
+  }
+
+  private activeRuntimeCommand(
+    registryKey: string,
+  ): PreparingRuntimeCommand | ExecutingRuntimeCommand | undefined {
+    for (const state of this.runtimeCommands.values()) {
+      if (state.phase !== 'settled' && state.registryKey === registryKey) return state
+    }
+    return undefined
   }
 
   private async validateRuntimeBuild(
@@ -2727,10 +2469,10 @@ export class WorkspaceStore {
     owner: RuntimeOwner,
     outcome: RuntimeCommandOutcome,
   ): boolean {
-    const settled = this.settledRuntimeCommands.get(commandId)
-    if (settled === undefined) return false
+    const settled = this.runtimeCommands.get(commandId)
+    if (settled?.phase !== 'settled') return false
     if (settled.expiresAt <= Date.now()) {
-      this.settledRuntimeCommands.delete(commandId)
+      this.runtimeCommands.delete(commandId)
       return false
     }
     if (!sameRuntimeOwner(settled.owner, owner)
@@ -2749,18 +2491,17 @@ export class WorkspaceStore {
   }
 
   private finishRuntimeCommand(
-    key: string,
+    pending: PreparingRuntimeCommand | ExecutingRuntimeCommand,
     outcome: RuntimeCommandOutcome,
   ): void {
-    const pending = this.runtimeCommands.get(key)
-    if (pending === undefined) return
-    this.runtimeCommands.delete(key)
     clearTimeout(pending.timer)
-    if (this.settledRuntimeCommands.size >= 256) {
-      const oldest = this.settledRuntimeCommands.keys().next().value
-      if (oldest !== undefined) this.settledRuntimeCommands.delete(oldest)
+    if (this.runtimeCommands.size >= 256) {
+      const oldest = [...this.runtimeCommands]
+        .find(([, state]) => state.phase === 'settled')?.[0]
+      if (oldest !== undefined) this.runtimeCommands.delete(oldest)
     }
-    this.settledRuntimeCommands.set(pending.command.commandId, {
+    this.runtimeCommands.set(pending.command.commandId, {
+      phase: 'settled',
       runtime: pending.command.runtime,
       owner: pending.owner,
       outcome,
@@ -2774,9 +2515,9 @@ export class WorkspaceStore {
     key: string,
     outcome: Exclude<RuntimeCommandOutcome, { status: 'succeeded' }>,
   ): void {
-    const pending = this.runtimeCommands.get(key)
+    const pending = this.activeRuntimeCommand(key)
     if (pending === undefined) return
-    this.finishRuntimeCommand(key, outcome)
+    this.finishRuntimeCommand(pending, outcome)
   }
 
   private ownsActiveRuntime(activeRuntime: z.infer<typeof activeRuntimeSchema>): boolean {
@@ -3502,8 +3243,8 @@ export class WorkspaceStore {
       if (bytes.length === 0) return false
       const activeRuntime = activeRuntimeSchema.parse(JSON.parse(bytes.toString('utf8')))
       if (!this.ownsActiveRuntime(activeRuntime)
-        || activeRuntime.revision !== revision
-        || activeRuntime.runId !== runId) return false
+        || activeRuntime.projection.workspaceRevision !== revision
+        || activeRuntime.execution.runId !== runId) return false
     } finally {
       await file.close()
     }
