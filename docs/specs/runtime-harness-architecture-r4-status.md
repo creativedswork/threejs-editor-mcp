@@ -1,12 +1,17 @@
 # Runtime Harness Architecture R4 Status
 
-Updated: 2026-09-04T05:07:12+0800
+Updated: 2026-09-04T05:10:27+0800
 Milestone: R4 Simplify Harness authority
-State: `MILESTONE_CANDIDATE`
-Gate: `AWAITING_ACCEPTANCE`
+State: `ACCEPTED`
+Gate: `ACCEPTED`
 Next milestone: R5 Remove legacy paths and harden
 Base: `f2570fcbc82594158d03b81db3df1bf6c32a5cdf`
 Branch: `main`
+
+## Acceptance Decision
+
+On 2026-09-04, the user explicitly accepted the R4 candidate and authorized
+continuous execution of the remaining R milestones before the next report.
 
 ## Scope
 
@@ -142,19 +147,22 @@ command, or conflicting settlement accepted as idempotent.
 
 ## EXECUTION_CHECKPOINT (CLOSED)
 
-- Updated at: 2026-09-04T05:07:12+0800
+- Updated at: 2026-09-04T05:10:27+0800
 - Milestone: R4 Simplify Harness authority
 - Slice: all Slices
-- Phase: milestone-candidate
+- Phase: acceptance-closeout
 - Slice state: `COMMITTED_LOCAL`
 - Completed facts: Slice 1 committed as `60f80f9`; Slice 2 committed as
   `c791edd`; Slice 3 production committed as `ed6cb2b`; Slice 3 focused test
   alignment committed as `fb984fd`. Opaque references, independent validation
   identity, command-bound evidence, one-shot active authorization, and typed
-  idempotent settlement are committed.
-- Repository state: `main` at
-  `fb984fdef0fabb036c390a41f87cfaddefbf35f5`; index empty; mixed dirty and
-  untracked paths listed in Recovered Baseline remain present.
+  idempotent settlement are committed. The user explicitly accepted R4 on
+  2026-09-04 and authorized completion of the remaining R milestones before
+  the next report.
+- Repository state: `main`; candidate implementation is
+  `fb984fdef0fabb036c390a41f87cfaddefbf35f5`; candidate documentation is
+  `b4f284d`; the index was empty before this final STATUS update. The mixed
+  dirty and untracked paths listed in Recovered Baseline remain present.
 - Intended changes: none; R4 implementation and focused verification are
   complete.
 - Explicit exclusions: all items in Explicit Exclusions; especially no M9,
@@ -174,8 +182,8 @@ command, or conflicting settlement accepted as idempotent.
 - Run identity: N/A; R4 uses pure broker/registry/protocol checks and no live
   browser or external Runtime.
 - Continuity constraints: preserve every unrelated dirty hunk and untracked
-  artifact; run the self-test only from an isolated export of exact committed
-  HEAD; stage only this STATUS for candidate closeout.
+  artifact; stage only this STATUS and the master-plan acceptance hunks for
+  closeout.
 - Invalidators: branch or HEAD change, unknown staged content, target hash
   change outside an owned patch, or inability to separate an R4 hunk from
   excluded M9/debug work.
@@ -183,6 +191,7 @@ command, or conflicting settlement accepted as idempotent.
   tests still need their already-dirty opaque-ref alignment reconciled outside
   this isolated closeout. Browser and full repository validation remain
   deferred to Release Hardening.
-- Exact next action: await explicit R4 acceptance; do not edit the master plan
-  or start R5.
-- Stop condition: user accepts R4 or requests an R4 iteration.
+- Exact next action: close the R4 acceptance Owner; R5 is the next/current
+  milestone and requires a new independent Owner.
+- Stop condition: create the docs-only R4 acceptance commit without starting
+  R5 or performing any remote operation.
