@@ -1,13 +1,18 @@
 # Runtime Harness Architecture R3 Status
 
-Updated: 2026-09-04T02:46:48+0800
+Updated: 2026-09-04T02:49:18+0800
 Milestone: R3 Make the coordinator the real owner
-State: `MILESTONE_CANDIDATE`
-Gate: `AWAITING_ACCEPTANCE`
+State: `ACCEPTED`
+Gate: `ACCEPTED`
 Next milestone: R4 Simplify Harness authority
 Base: `98082f6d49c962b91d37027cb59cb16e633aa743`
 Candidate implementation: `85edb8f7f5f8a6e555d334f92f8e2bd78bd2a86a`
 Branch: `main`
+
+## Acceptance Decision
+
+On 2026-09-04, the user explicitly accepted the R3 candidate and authorized
+continuous execution of the remaining R milestones before the next report.
 
 ## Scope
 
@@ -123,10 +128,10 @@ publication from an uncommitted candidate.
 
 ## EXECUTION_CHECKPOINT (CLOSED)
 
-- Updated at: 2026-09-04T02:46:48+0800
+- Updated at: 2026-09-04T02:49:18+0800
 - Milestone: R3 Make the coordinator the real owner
 - Slice: all Slices
-- Phase: milestone-candidate
+- Phase: acceptance-closeout
 - Slice state: `COMMITTED_LOCAL`
 - Completed facts: accepted R2 baseline and mixed dirty tree were verified.
   Slice 1 introduced the immutable coordinator snapshot and CAS/epoch-checked
@@ -136,11 +141,16 @@ publication from an uncommitted candidate.
   focused Bun bundle, exact staged content matched the isolated source, the
   commit was reread, and the index is empty. Slice 3 added the coordinator
   invariant matrix and committed it as `85edb8f`. The committed-HEAD
-  concentrated self-test passed.
-- Repository state: `main` at
-  `85edb8f7f5f8a6e555d334f92f8e2bd78bd2a86a`; index empty; pre-existing
-  tracked and untracked work listed above remains.
-- Intended changes: this STATUS only, for the docs-only candidate commit.
+  concentrated self-test passed. The user explicitly accepted R3 on
+  2026-09-04 and authorized completion of the remaining R milestones before
+  the next report.
+- Repository state: `main`; candidate implementation is
+  `85edb8f7f5f8a6e555d334f92f8e2bd78bd2a86a`; candidate documentation is
+  `b852f9f46b82b10cf9f45e20098a563aaefa8afc`; the index was empty before this
+  final STATUS update. The pre-existing unrelated dirty and untracked paths
+  remain.
+- Intended changes: none; R3 implementation and focused verification are
+  complete.
 - Explicit exclusions: all items in Explicit Exclusions; especially no R4,
   R5, M9, debug-probe, browser, process, port, or remote work.
 - Verification: Slice 1 passed focused Bun import and diff checks. Slice 2
@@ -160,7 +170,7 @@ publication from an uncommitted candidate.
   excluded work.
 - Blockers and risks: no R3 blocker. Real browser lifecycle validation and
   cumulative repository gates remain deferred to Release Hardening.
-- Exact next action: parent records the R3 candidate while continuous R4-R5
-  execution proceeds under fresh Milestone Owners as already authorized.
-- Stop condition: R3 is at `MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE`; this
-  Owner performs no R4/R5/M9 or remote operation.
+- Exact next action: close the R3 acceptance Owner; R4 is the next/current
+  milestone and requires a new independent Owner.
+- Stop condition: create the docs-only R3 acceptance commit without starting
+  R4 or performing any remote operation.
