@@ -1,11 +1,18 @@
 # Runtime Harness Architecture R2 Status
 
-Updated: 2026-09-03T18:04:38Z
+Updated: 2026-09-04T02:14:13+0800
 Milestone: R2 Complete authoritative projection
-State: `MILESTONE_CANDIDATE`
-Gate: `AWAITING_ACCEPTANCE`
+State: `ACCEPTED`
+Gate: `ACCEPTED`
+Next milestone: R3 Coordinator single ownership
 Base: `655cb62f25814f47f88c5bfab21e855dd73bfd9b`
+Candidate implementation: `5c980b15d1989592102540b613e31c8c1425cafa`
 Branch: `main`
+
+## Acceptance Decision
+
+On 2026-09-04, the user explicitly accepted R2 and authorized continuous
+execution of R3-R5 before the next report.
 
 ## Scope
 
@@ -129,22 +136,27 @@ committed revision without compensating browser rollback. Failure is any stale
 registry revision after candidate replacement, a second generation advance for
 one transition, or disposal/rollback of the committed Workspace state.
 
-## EXECUTION_CHECKPOINT
+## EXECUTION_CHECKPOINT (CLOSED)
 
-- Updated at: 2026-09-03T18:04:38Z
+- Updated at: 2026-09-04T02:14:13+0800
 - Milestone: R2 Complete authoritative projection
-- Slice: Milestone self-test
-- Phase: milestone-candidate
+- Slice: all Slices
+- Phase: acceptance-closeout
 - Slice state: `COMMITTED_LOCAL`
 - Completed facts: R1 was accepted at `655cb62`; branch, HEAD, index, dirty
   files, canonical documents, and relevant hashes were verified from disk.
   Slice 1 was committed as `61020fa`, Slice 2 as `7b0273e`, and Slice 3 as
   `5c980b1`; all commits were reread and the index is empty. The Slice 1
   follow-up type diagnostic passed its targeted TypeScript check in Slice 2.
-- Repository state: `main` at `5c980b15d1989592102540b613e31c8c1425cafa`;
-  index empty; the pre-existing unrelated dirty and untracked paths remain.
-- Intended changes: no further implementation is authorized before R2
-  acceptance.
+  The user explicitly accepted R2 on 2026-09-04 and authorized continuous
+  execution of R3-R5 before the next report.
+- Repository state: `main`; candidate implementation is
+  `5c980b15d1989592102540b613e31c8c1425cafa`; acceptance-closeout base is
+  `5b29c1e76726f796279d17e7ebdc64341d32e7a1`; the index was empty before this
+  final STATUS update. The pre-existing unrelated dirty and untracked paths
+  remain.
+- Intended changes: none; R2 implementation and focused verification are
+  complete.
 - Explicit exclusions: all items in the Explicit Exclusions section; no
   process, port, remote, cleanup, or release-hardening operation.
 - Verification: Slice 2 passed `git diff --cached --check`; the Slice 1
@@ -163,7 +175,7 @@ one transition, or disposal/rollback of the committed Workspace state.
 - Blockers and risks: real browser failure injection, full suites, coverage,
   typecheck, lint, production build, and review remain deferred to Release
   Hardening; the `utree flush` report artifact was blocked by sandbox policy.
-- Exact next action: await explicit user acceptance or requested R2 iteration.
-- Stop condition: stop at an ownership ambiguity that cannot be resolved from
-  Git and call-site evidence, or after R2 reaches
-  `MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE`.
+- Exact next action: close the R2 acceptance Owner; R3 is the next/current
+  milestone and requires a new independent Owner.
+- Stop condition: create the docs-only R2 acceptance commit without starting
+  R3 or performing any remote operation.
