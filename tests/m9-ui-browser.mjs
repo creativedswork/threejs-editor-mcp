@@ -218,17 +218,19 @@ function browserProblem(type, text) {
 
 async function addWorkspace() {
   const add = page.getByRole('button', { name: '添加工作区', exact: true })
-  const proceed = page.getByText('继续', { exact: true })
-  if (await proceed.isVisible().catch(() => false)) {
+  const notice = page.getByRole('dialog', { name: '内测声明', exact: true })
+  await notice.waitFor({ state: 'visible', timeout: 10_000 }).catch(() => {})
+  if (await notice.isVisible().catch(() => false)) {
+    const proceed = notice.getByRole('button', { name: '继续', exact: true })
     await proceed.click()
-    await proceed.waitFor({ state: 'hidden' })
+    await notice.waitFor({ state: 'hidden' })
   }
-  await add.click({ timeout: 30_000 })
+  const picker = page.getByRole('dialog', { name: '选择工作区目录' })
+  if (!await picker.isVisible().catch(() => false)) await add.click({ timeout: 30_000 })
   await page.getByRole('button', { name: '编辑路径', exact: true }).click()
   const path = page.getByRole('textbox', { name: '编辑路径', exact: true })
   await path.fill(workspacePath)
   await path.press('Enter')
-  const picker = page.getByRole('dialog', { name: '选择工作区目录' })
   await picker.getByRole('button', { name: '打开', exact: true }).click()
   await picker.waitFor({ state: 'hidden', timeout: 30_000 })
 }
