@@ -270,6 +270,32 @@ const runtimeEvidenceSchema = z.discriminatedUnion('kind', [
     message: z.string().min(1).max(2_048),
   }),
 ])
+const runtimeCommandFailureStageSchema = z.enum(['prepare', 'execute', 'settle'])
+const runtimeCommandFailureCodeSchema = z.enum([
+  'TARGET_PREPARATION_FAILED',
+  'TARGET_EXECUTION_FAILED',
+  'EVIDENCE_REJECTED',
+])
+const runtimeCommandOutcomeSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('succeeded'),
+    evidence: runtimeEvidenceSchema,
+  }),
+  z.object({
+    status: z.literal('failed'),
+    stage: runtimeCommandFailureStageSchema,
+    code: runtimeCommandFailureCodeSchema,
+    message: z.string().min(1).max(2_048),
+  }),
+  z.object({
+    status: z.literal('cancelled'),
+    reason: z.string().min(1).max(2_048),
+  }),
+  z.object({
+    status: z.literal('expired'),
+    stage: runtimeCommandFailureStageSchema,
+  }),
+])
 const buildIdSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const buildDiagnosticSchema = z.object({
   severity: z.enum(['error', 'warning']),
@@ -1944,11 +1970,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   })
 
   registerAppTool(server, 'fail_runtime_command', {
-    title: 'Fail Runtime Harness preparation',
-    description: 'Fails a pending Runtime command when its target Runtime cannot be prepared.',
+    title: 'Fail Runtime Harness command',
+    description: 'Settles a pending Runtime command with a typed failure.',
     inputSchema: {
       ...runtimeIdentitySchema.shape,
       commandId: z.string().uuid(),
+      stage: runtimeCommandFailureStageSchema.default('prepare'),
+      code: runtimeCommandFailureCodeSchema.default('TARGET_PREPARATION_FAILED'),
       message: z.string().min(1).max(2_048),
     },
     outputSchema: z.object({
@@ -1956,14 +1984,42 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       accepted: z.literal(true),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ commandId, message, ...identity }, { _meta }) => {
+  }, async ({ commandId, stage, code, message, ...identity }, { _meta }) => {
     await workspaces.failRuntimeCommand(
       identity,
       runtimeOwner(_meta)!,
       commandId,
       message,
+      stage,
+      code,
     )
     return textResult(`Failed Runtime Harness command ${commandId}.`, {
+      commandId,
+      accepted: true,
+    })
+  })
+
+  registerAppTool(server, 'settle_runtime_command', {
+    title: 'Settle Runtime Harness command',
+    description: 'Idempotently settles one Runtime Harness command with a typed terminal outcome.',
+    inputSchema: {
+      ...runtimeIdentitySchema.shape,
+      commandId: z.string().uuid(),
+      outcome: runtimeCommandOutcomeSchema,
+    },
+    outputSchema: z.object({
+      commandId: z.string().uuid(),
+      accepted: z.literal(true),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ commandId, outcome, ...identity }, { _meta }) => {
+    await workspaces.settleRuntimeCommand(
+      identity,
+      runtimeOwner(_meta)!,
+      commandId,
+      outcome,
+    )
+    return textResult(`Settled Runtime Harness command ${commandId}.`, {
       commandId,
       accepted: true,
     })

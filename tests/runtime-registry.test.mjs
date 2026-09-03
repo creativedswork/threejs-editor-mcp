@@ -60,11 +60,214 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
       runId: '22222222-2222-4222-8222-222222222222',
       nonce: '33333333-3333-4333-8333-333333333333',
     }
-    await client.callTool({
+    const registered = await client.callTool({
       name: 'register_runtime_run',
       arguments: active,
       _meta: ownerMeta,
     })
+    assert.equal(registered.isError, undefined)
+    assert.match(registered.structuredContent.runtimeRef, /^[0-9a-f-]{36}$/)
+    assert.equal(registered.structuredContent.projectionGeneration, 0)
+    assert.equal(registered.structuredContent.buildRevision, revision)
+    const referencePending = client.callTool({
+      name: 'read_runtime_logs',
+      arguments: {
+        projectId: active.projectId,
+        runtimeRef: registered.structuredContent.runtimeRef,
+        target: 'validation',
+        cursor: 0,
+        limit: 1,
+      },
+      _meta: ownerMeta,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const referencePull = await client.callTool({
+      name: 'pull_runtime_command',
+      arguments: active,
+      _meta: ownerMeta,
+    })
+    const referenceCommand = referencePull.structuredContent.command
+    if (referenceCommand === undefined) {
+      const earlyResult = await referencePending
+      assert.fail(`runtimeRef command was not queued: ${JSON.stringify(earlyResult)}`)
+    }
+    assert.equal(referenceCommand.projectionGeneration, 0)
+    assert.match(referenceCommand.evidenceToken, /^[0-9a-f-]{36}$/)
+    assert.notEqual(referenceCommand.evidenceToken, registered.structuredContent.evidenceToken)
+    const validationRuntime = {
+      projectId: active.projectId,
+      revision: active.revision,
+      buildId: active.buildId,
+      runId: '66666666-6666-4666-8666-666666666666',
+      nonce: '77777777-7777-4777-8777-777777777777',
+      target: 'validation',
+    }
+    assert.notEqual(validationRuntime.runId, active.runId)
+    assert.notEqual(validationRuntime.nonce, active.nonce)
+    await client.callTool({
+      name: 'start_runtime_command',
+      arguments: {
+        ...active,
+        commandId: referenceCommand.commandId,
+        targetRuntime: validationRuntime,
+      },
+      _meta: ownerMeta,
+    })
+    const referenceOutcome = {
+      status: 'succeeded',
+      evidence: {
+        kind: 'runtime-logs',
+        runtime: validationRuntime,
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: referenceCommand.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
+      },
+    }
+    const referenceEvidence = await client.callTool({
+      name: 'settle_runtime_command',
+      arguments: {
+        ...active,
+        commandId: referenceCommand.commandId,
+        outcome: referenceOutcome,
+      },
+      _meta: ownerMeta,
+    })
+    const duplicateEvidence = await client.callTool({
+      name: 'settle_runtime_command',
+      arguments: {
+        ...active,
+        commandId: referenceCommand.commandId,
+        outcome: referenceOutcome,
+      },
+      _meta: ownerMeta,
+    })
+    const conflictingEvidence = await client.callTool({
+      name: 'settle_runtime_command',
+      arguments: {
+        ...active,
+        commandId: referenceCommand.commandId,
+        outcome: {
+          status: 'failed',
+          stage: 'settle',
+          code: 'EVIDENCE_REJECTED',
+          message: 'conflicting duplicate',
+        },
+      },
+      _meta: ownerMeta,
+    })
+    const referenceResult = await referencePending
+    assert.equal(referenceEvidence.isError, undefined)
+    assert.equal(duplicateEvidence.isError, undefined)
+    assert.equal(conflictingEvidence.isError, true)
+    assert.match(conflictingEvidence.content[0].text, /RUNTIME_COMMAND_STATE/)
+    assert.equal(referenceResult.isError, undefined)
+
+    const activeWithoutGrant = await client.callTool({
+      name: 'capture_runtime_frame',
+      arguments: {
+        projectId: active.projectId,
+        runtimeRef: registered.structuredContent.runtimeRef,
+        target: 'active',
+        activeIntent: 'user-requested',
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(activeWithoutGrant.isError, true)
+    assert.match(activeWithoutGrant.content[0].text, /ACTIVE_CONFIRMATION_REQUIRED/)
+    const grant = await client.callTool({
+      name: 'grant_active_runtime_control',
+      arguments: active,
+      _meta: ownerMeta,
+    })
+    assert.equal(grant.isError, undefined)
+    const activePending = client.callTool({
+      name: 'read_runtime_logs',
+      arguments: {
+        projectId: active.projectId,
+        runtimeRef: registered.structuredContent.runtimeRef,
+        target: 'active',
+        activeIntent: 'user-requested',
+        cursor: 0,
+        limit: 1,
+      },
+      _meta: ownerMeta,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const activePull = await client.callTool({
+      name: 'pull_runtime_command',
+      arguments: active,
+      _meta: ownerMeta,
+    })
+    const activeCommand = activePull.structuredContent.command
+    assert.notEqual(activeCommand, undefined)
+    await client.callTool({
+      name: 'start_runtime_command',
+      arguments: {
+        ...active,
+        commandId: activeCommand.commandId,
+        targetRuntime: {
+          ...active,
+          target: 'active',
+        },
+      },
+      _meta: ownerMeta,
+    })
+    const activeFailure = {
+      status: 'failed',
+      stage: 'execute',
+      code: 'TARGET_EXECUTION_FAILED',
+      message: 'expected active command failure',
+    }
+    const mismatchedFailure = await client.callTool({
+      name: 'settle_runtime_command',
+      arguments: {
+        ...active,
+        commandId: activeCommand.commandId,
+        outcome: {
+          ...activeFailure,
+          code: 'EVIDENCE_REJECTED',
+        },
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(mismatchedFailure.isError, true)
+    assert.match(mismatchedFailure.content[0].text, /RUNTIME_COMMAND_STATE/)
+    const failed = await client.callTool({
+      name: 'settle_runtime_command',
+      arguments: {
+        ...active,
+        commandId: activeCommand.commandId,
+        outcome: activeFailure,
+      },
+      _meta: ownerMeta,
+    })
+    const duplicateFailure = await client.callTool({
+      name: 'settle_runtime_command',
+      arguments: {
+        ...active,
+        commandId: activeCommand.commandId,
+        outcome: activeFailure,
+      },
+      _meta: ownerMeta,
+    })
+    const activeResult = await activePending
+    assert.equal(failed.isError, undefined)
+    assert.equal(duplicateFailure.isError, undefined)
+    assert.equal(activeResult.isError, true)
+    assert.match(activeResult.content[0].text, /TARGET_EXECUTION_FAILED/)
+    const spentGrant = await client.callTool({
+      name: 'capture_runtime_frame',
+      arguments: {
+        projectId: active.projectId,
+        runtimeRef: registered.structuredContent.runtimeRef,
+        target: 'active',
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(spentGrant.isError, true)
+    assert.match(spentGrant.content[0].text, /ACTIVE_CONFIRMATION_REQUIRED/)
 
     const candidate = {
       ...active,
@@ -83,13 +286,16 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
       _meta: ownerMeta,
     })
     assert.equal(prepared.isError, undefined)
-    assert.equal(
+    assert.deepEqual(
       (await client.callTool({
         name: 'inspect_project',
         arguments: { projectId: 'game' },
         _meta: ownerMeta,
-      })).structuredContent.runtime.runId,
-      active.runId,
+      })).structuredContent.runtime,
+      {
+        projectId: active.projectId,
+        runtimeRef: registered.structuredContent.runtimeRef,
+      },
     )
 
     const stale = await client.callTool({
@@ -102,13 +308,16 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
     })
     assert.equal(stale.isError, true)
     assert.match(stale.content[0].text, /active Runtime changed/)
-    assert.equal(
+    assert.deepEqual(
       (await client.callTool({
         name: 'inspect_project',
         arguments: { projectId: 'game' },
         _meta: ownerMeta,
-      })).structuredContent.runtime.runId,
-      active.runId,
+      })).structuredContent.runtime,
+      {
+        projectId: active.projectId,
+        runtimeRef: registered.structuredContent.runtimeRef,
+      },
     )
 
     const expiring = await client.callTool({
@@ -139,14 +348,65 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
       _meta: ownerMeta,
     })
     assert.equal(committed.isError, undefined)
-    assert.equal(
+    assert.match(committed.structuredContent.runtimeRef, /^[0-9a-f-]{36}$/)
+    assert.equal(committed.structuredContent.projectionGeneration, 0)
+    assert.deepEqual(
       (await client.callTool({
         name: 'inspect_project',
         arguments: { projectId: 'game' },
         _meta: ownerMeta,
-      })).structuredContent.runtime.runId,
-      candidate.runId,
+      })).structuredContent.runtime,
+      {
+        projectId: candidate.projectId,
+        runtimeRef: committed.structuredContent.runtimeRef,
+      },
     )
+
+    const changed = await client.callTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId: 'game',
+        baseRevision: revision,
+        changes: [{
+          type: 'write',
+          path: 'src/main.js',
+          text: 'export default { revision: 2 }\n',
+        }],
+      },
+    })
+    assert.equal(changed.isError, undefined)
+    const advanced = await client.callTool({
+      name: 'advance_runtime_projection',
+      arguments: {
+        projectId: candidate.projectId,
+        runId: candidate.runId,
+        nonce: candidate.nonce,
+        expectedRevision: revision,
+        expectedGeneration: 0,
+        revision: changed.structuredContent.revision,
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(advanced.isError, undefined)
+    assert.equal(advanced.structuredContent.revision, changed.structuredContent.revision)
+    assert.equal(advanced.structuredContent.projectionGeneration, 1)
+    assert.equal(advanced.structuredContent.buildId, active.buildId)
+    assert.equal(advanced.structuredContent.buildRevision, revision)
+    assert.notEqual(
+      advanced.structuredContent.runtimeRef,
+      committed.structuredContent.runtimeRef,
+    )
+    const staleReference = await client.callTool({
+      name: 'capture_runtime_frame',
+      arguments: {
+        projectId: active.projectId,
+        runtimeRef: committed.structuredContent.runtimeRef,
+        target: 'validation',
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(staleReference.isError, true)
+    assert.match(staleReference.content[0].text, /RUNTIME_REFERENCE_STALE/)
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })

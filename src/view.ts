@@ -46,6 +46,7 @@ import {
 import {
   sameLegacyRuntimeExecution as sameM7Runtime,
   sameLegacyRuntimeIdentity as sameM7Run,
+  type RuntimeCommandOutcome,
 } from './runtime-protocol.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
@@ -2881,25 +2882,26 @@ async function ensureValidationRuntime(
   }
 }
 
-async function reportRuntimeHarnessResult(
+async function settleRuntimeHarnessCommand(
   command: RuntimeHarnessCommand,
-  result: Record<string, unknown>,
+  outcome: RuntimeCommandOutcome,
 ): Promise<void> {
-  if (result.evidenceToken !== command.evidenceToken) {
+  if (outcome.status === 'succeeded'
+    && (outcome.evidence as Record<string, unknown>).evidenceToken !== command.evidenceToken) {
     throw new Error('Runtime evidence provenance is invalid')
   }
-  const reported = await app.callServerTool({
-    name: 'report_runtime_evidence',
+  const settled = await app.callServerTool({
+    name: 'settle_runtime_command',
     arguments: {
       ...command.runtime,
       commandId: command.commandId,
-      result,
+      outcome,
     },
   }, {
     timeout: M7_LIFECYCLE_TIMEOUT,
     maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
   })
-  if (reported.isError) throw new Error(resultError(reported))
+  if (settled.isError) throw new Error(resultError(settled))
 }
 
 async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Promise<void> {
@@ -2944,22 +2946,24 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
     }
     command.expiresAt = started.expiresAt
   } catch (error) {
-    await app.callServerTool({
-      name: 'fail_runtime_command',
-      arguments: {
-        ...command.runtime,
-        commandId: command.commandId,
-        message: runtimeMessage(error).slice(0, 2_048),
-      },
-    }, {
-      timeout: M7_LIFECYCLE_TIMEOUT,
-      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    await settleRuntimeHarnessCommand(command, {
+      status: 'failed',
+      stage: 'prepare',
+      code: 'TARGET_PREPARATION_FAILED',
+      message: runtimeMessage(error).slice(0, 2_048),
     }).catch(() => {})
     throw error
   }
   const expiresAt = Date.parse(command.expiresAt)
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-    throw new Error('Runtime Harness command expired')
+    const error = new Error('Runtime Harness command expired')
+    await settleRuntimeHarnessCommand(command, {
+      status: 'failed',
+      stage: 'execute',
+      code: 'TARGET_EXECUTION_FAILED',
+      message: error.message,
+    }).catch(() => {})
+    throw error
   }
   const frameElement = command.target === 'validation'
     ? runtimeCoordinator.snapshot().validation?.frame
@@ -3023,6 +3027,12 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
     event = await response
   } catch (error) {
     cancel()
+    await settleRuntimeHarnessCommand(command, {
+      status: 'failed',
+      stage: 'execute',
+      code: 'TARGET_EXECUTION_FAILED',
+      message: runtimeMessage(error).slice(0, 2_048),
+    }).catch(() => {})
     throw error
   } finally {
     finished = true
@@ -3030,19 +3040,30 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
   }
   const result = record(event.data?.result)
   if (event.type === 'harness-error' || result === undefined) {
-    await reportRuntimeHarnessResult(command, {
-      kind: 'runtime-harness-error',
-      runtime: { ...targetRun, target: command.target },
-      evidenceId: crypto.randomUUID(),
-      evidenceToken: command.evidenceToken,
+    await settleRuntimeHarnessCommand(command, {
       status: 'failed',
+      stage: 'execute',
+      code: 'TARGET_EXECUTION_FAILED',
       message: typeof event.data?.message === 'string'
         ? event.data.message
         : 'Runtime Harness command failed',
     })
     return
   }
-  await reportRuntimeHarnessResult(command, result)
+  try {
+    await settleRuntimeHarnessCommand(command, {
+      status: 'succeeded',
+      evidence: result,
+    })
+  } catch (error) {
+    await settleRuntimeHarnessCommand(command, {
+      status: 'failed',
+      stage: 'settle',
+      code: 'EVIDENCE_REJECTED',
+      message: runtimeMessage(error).slice(0, 2_048),
+    }).catch(() => {})
+    throw error
+  }
 }
 
 async function pullRuntimeHarnessCommand(): Promise<void> {

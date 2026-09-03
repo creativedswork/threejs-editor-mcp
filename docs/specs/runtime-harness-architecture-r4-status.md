@@ -1,6 +1,6 @@
 # Runtime Harness Architecture R4 Status
 
-Updated: 2026-09-04T03:30:00+0800
+Updated: 2026-09-04T03:41:07+0800
 Milestone: R4 Simplify Harness authority
 State: `IMPLEMENTING_SLICES`
 Gate: `AWAITING_ACCEPTANCE`
@@ -25,8 +25,8 @@ fields.
 | Slice | State | Commit | Owned scope |
 |---|---|---|---|
 | 1. Opaque Runtime reference | `COMMITTED` | `60f80f9` | Owner-bound `runtimeRef` issue/resolve/rotation, opaque model context, and preferred ordinary tool schemas; legacy identity remains internal compatibility only. |
-| 2. Validation and active authority | `IMPLEMENTED` | pending | Independent validation execution, command-bound evidence token, typed active confirmation, and one-shot Editor grant consumption. |
-| 3. Typed settlement and invariant matrix | `PENDING` | pending | One preferred typed idempotent settlement operation, legacy report/fail adapters, and focused broker/registry/protocol invariants. |
+| 2. Validation and active authority | `COMMITTED` | `c791edd` | Independent validation execution, command-bound evidence token, typed active confirmation, and one-shot Editor grant consumption. |
+| 3. Typed settlement and invariant matrix | `IMPLEMENTING` | pending | One preferred typed idempotent settlement operation, legacy report/fail adapters, and focused broker/registry/protocol invariants. |
 
 ## Recovered Baseline
 
@@ -58,10 +58,11 @@ fields.
 - Relevant tracked files already contain mixed R4, M9, transport, lifecycle,
   and debug changes. Existing untracked debug notes, collectors, reports,
   fixtures, and Harness browser/page tests are preserved.
-- `tests/fixtures/m6/workspace/world-model.html` and `world-model.png` appeared
-  after the R4 baseline at 03:28. R4 commands wrote only `/tmp` bundle
-  artifacts, no source or test references identify their producer, and their
-  provenance is uncertain. They remain untracked, unstaged, and excluded.
+- `tests/fixtures/m6/workspace/world-model.html`, `world-model.png`, and
+  `world-model-canvas/` appeared after the R4 baseline between 03:28 and
+  03:32. R4 commands wrote only `/tmp` bundle artifacts, no source or test
+  references identify their producer, and their provenance is uncertain.
+  They remain untracked, unstaged, and excluded.
 
 ## Explicit Exclusions
 
@@ -89,28 +90,35 @@ fields.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-04T03:30:00+0800
+- Updated at: 2026-09-04T03:41:07+0800
 - Milestone: R4 Simplify Harness authority
-- Slice: 2. Validation and active authority
-- Phase: commit
-- Slice state: `IMPLEMENTED`
-- Completed facts: Slice 1 committed as `60f80f9`; model-facing Harness tools
-  and Editor context use owner-bound opaque `runtimeRef`, refs rotate on
-  registration and projection changes, and flat identity remains an internal
-  compatibility adapter.
-- Repository state: `main` at `60f80f9`; the index contains only Slice 2
-  hunks in `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and
-  `src/m7-runtime.ts`; mixed dirty and untracked paths remain present.
-- Intended changes: reconcile only independent validation execution identity,
-  per-command evidence tokens, command target binding, typed
-  `ACTIVE_CONFIRMATION_REQUIRED`, and consumption of the existing Editor-issued
-  one-shot active grant.
+- Slice: 3. Typed settlement and invariant matrix
+- Phase: implementation
+- Slice state: `IMPLEMENTING`
+- Completed facts: Slice 1 committed as `60f80f9`; Slice 2 committed as
+  `c791edd`. Opaque references, independent validation identity,
+  command-bound evidence, and one-shot active authorization are committed.
+- Repository state: `main` at `c791edd`; index empty; mixed dirty and
+  untracked paths listed in Recovered Baseline remain present.
+- Intended changes: add one preferred typed `settle_runtime_command`, route
+  App completion through it, retain legacy report/fail adapters, make exact
+  duplicate outcomes idempotent, reject conflicting duplicates, preserve
+  typed timeout/cancellation outcomes, and add the focused invariant matrix.
 - Explicit exclusions: all items in Explicit Exclusions; especially no M9,
   debug-probe, transport, browser, R5 cleanup, process, port, or remote work.
-- Verification: Slice 1 cached diff and exact-blob syntax bundles PASS.
-  Slice 2 `git diff --cached --check` PASS; syntax-only Bun bundles of the
-  exact cached `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and
-  `src/m7-runtime.ts` blobs PASS. Slice 2 pre-edit SHA-256 values:
+- Verification: Slice 1 and Slice 2 cached diff and exact-blob syntax bundles
+  PASS. Slice 3 post-edit SHA-256 values remained stable for more than five
+  seconds: `src/workspaces.ts`
+  `7b37895e8d02f1d64a5904339945ff302127d382db33398a47fd9e999cf1633c`;
+  `src/server.ts`
+  `c58aef628ffe2998bd2cfbe336aefe74035b109642dca4839780b03738971132`;
+  `src/view.ts`
+  `5c9a854d9611d1ac3ab30274dfba40c0b57b7c2aafa2472d532c4336b6bd6878`;
+  `tests/runtime-registry.test.mjs`
+  `185dea2922ac9cf0752820b9e4592848963b6c2aef621a8b6a741a047409abed`;
+  `tests/m1-server.test.mjs`
+  `5c0b03e64ed5c92d0f37b0e1dbd2996831c1f7513e634a9ebb88459eeeb1fa36`.
+  Earlier Slice 2 pre-edit SHA-256 values:
   `src/workspaces.ts`
   `0f06e6b411ec736c6b91315153c1107ecb8ba2cd2d23c8a8ad4ebb9bb66f35a8`;
   `src/server.ts`
@@ -134,8 +142,8 @@ fields.
   excluded M9/debug work.
 - Blockers and risks: mixed files require exact hunk staging; browser and full
   repository validation remain deferred to Release Hardening.
-- Exact next action: stage this STATUS, verify the final cached diff, and
-  create the local Slice 2 atomic commit.
+- Exact next action: stage only typed-settlement and focused-test hunks,
+  verify exact cached sources, and create the local Slice 3 atomic commit.
 - Stop condition: all three Slices committed, concentrated isolated-HEAD R4
   self-test recorded, docs-only candidate committed, then stop at
   `MILESTONE_CANDIDATE` / `AWAITING_ACCEPTANCE`.

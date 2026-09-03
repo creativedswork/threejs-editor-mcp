@@ -99,6 +99,7 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       'pull_runtime_command',
       'start_runtime_command',
       'fail_runtime_command',
+      'settle_runtime_command',
       'report_runtime_evidence',
       'capture_runtime_frame',
       'read_runtime_logs',

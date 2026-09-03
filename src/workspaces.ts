@@ -24,6 +24,7 @@ import {
   resolve,
   sep,
 } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { transform, type Loader } from 'esbuild'
 import { z } from 'zod'
 import {
@@ -64,10 +65,14 @@ import {
 import {
   RuntimeProtocolError,
   advanceRuntimeProjection as nextRuntimeProjection,
+  runtimeCommandOutcomeMessage,
   sameLegacyRuntimeExecution,
   sameLegacyRuntimeIdentity as sameRuntimeIdentity,
   sameRuntimeOwner,
   type LegacyRuntimeIdentity,
+  type RuntimeCommandFailureCode,
+  type RuntimeCommandFailureStage,
+  type RuntimeCommandOutcome,
   type RuntimeOwner as ProtocolRuntimeOwner,
 } from './runtime-protocol.js'
 import {
@@ -439,6 +444,13 @@ interface PendingRuntimeCommand {
   abort?: () => void
 }
 
+interface SettledRuntimeCommand {
+  runtime: RuntimeIdentity
+  owner: RuntimeOwner
+  outcome: RuntimeCommandOutcome
+  expiresAt: number
+}
+
 export interface WorkspaceCommitResult {
   snapshot: WorkspaceSnapshot
   pendingProjection?: PendingRuntimeProjection
@@ -687,6 +699,7 @@ export class WorkspaceStore {
   private readonly pendingRuntimeProjections = new Map<string, PendingRuntimeProjection>()
   private readonly activeRuntimeGrants = new Map<string, ActiveRuntimeGrant>()
   private readonly runtimeCommands = new Map<string, PendingRuntimeCommand>()
+  private readonly settledRuntimeCommands = new Map<string, SettledRuntimeCommand>()
   private readonly verifiedResourceObjects = new Map<string, Promise<VerifiedResourceObject>>()
   private readonly quota: WorkspaceQuota
 
@@ -1412,7 +1425,10 @@ export class WorkspaceStore {
           this.activeRuntimes.delete(key)
           this.pendingRuntimeProjections.delete(key)
           this.activeRuntimeGrants.delete(key)
-          this.rejectRuntimeCommand(key, 'MCP connection generation changed')
+          this.rejectRuntimeCommand(key, {
+            status: 'cancelled',
+            reason: 'MCP connection generation changed',
+          })
         }
       }
       const previousStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
@@ -1452,7 +1468,10 @@ export class WorkspaceStore {
         ? previousRuntime?.buildRevision
           ?? (previousRuntime?.buildId === undefined ? undefined : previousRuntime.revision)
         : revision
-      this.rejectRuntimeCommand(runtimeKey, 'Runtime revision changed')
+      this.rejectRuntimeCommand(runtimeKey, {
+        status: 'cancelled',
+        reason: 'Runtime revision changed',
+      })
       this.activeRuntimeGrants.delete(runtimeKey)
       const runtimeRef = randomUUID()
       const activeRuntime = activeRuntimeSchema.parse({
@@ -1611,7 +1630,10 @@ export class WorkspaceStore {
         }
         signal.throwIfAborted()
       }
-      this.rejectRuntimeCommand(key, 'Runtime was replaced')
+      this.rejectRuntimeCommand(key, {
+        status: 'cancelled',
+        reason: 'Runtime was replaced',
+      })
       this.activeRuntimeGrants.delete(key)
       this.activeRuntimes.set(key, next)
       this.preparedRuntimes.delete(key)
@@ -1719,7 +1741,10 @@ export class WorkspaceStore {
         ownerId: this.runtimeOwnerId,
         ownerPid: process.pid,
       })
-      this.rejectRuntimeCommand(key, 'Runtime revision changed')
+      this.rejectRuntimeCommand(key, {
+        status: 'cancelled',
+        reason: 'Runtime revision changed',
+      })
       this.activeRuntimeGrants.delete(key)
       await this.writeAtomic(snapshot.path, activePath, canonicalBytes(next))
       this.activeRuntimes.set(key, next)
@@ -1777,7 +1802,12 @@ export class WorkspaceStore {
         this.activeRuntimeGrants.delete(key)
         await this.clearActiveRuntime(workspace.path, revision, runId)
       }
-      if (released) this.rejectRuntimeCommand(key, 'Runtime was disposed')
+      if (released) {
+        this.rejectRuntimeCommand(key, {
+          status: 'cancelled',
+          reason: 'Runtime was disposed',
+        })
+      }
       return released
     })
   }
@@ -1896,8 +1926,10 @@ export class WorkspaceStore {
       const preparationDeadline = Date.now() + RUNTIME_COMMAND_PREPARATION_TIMEOUT_MS
       const expirePreparation = () => {
         if (this.runtimeCommands.get(key) !== pending) return
-        this.runtimeCommands.delete(key)
-        rejectPending(new Error('Runtime Harness preparation timed out'))
+        this.rejectRuntimeCommand(key, {
+          status: 'expired',
+          stage: 'prepare',
+        })
       }
       const timer = setTimeout(expirePreparation, preparationDeadline - Date.now())
       pending = {
@@ -1913,9 +1945,10 @@ export class WorkspaceStore {
         const activePending = pending
         activePending.abort = () => {
           if (this.runtimeCommands.get(key) !== activePending) return
-          this.runtimeCommands.delete(key)
-          clearTimeout(activePending.timer)
-          activePending.reject(new Error('Runtime Harness command cancelled'))
+          this.rejectRuntimeCommand(key, {
+            status: 'cancelled',
+            reason: 'Runtime Harness command cancelled',
+          })
         }
         signal.addEventListener('abort', activePending.abort, { once: true })
         if (signal.aborted) activePending.abort()
@@ -2024,43 +2057,24 @@ export class WorkspaceStore {
       pending.settlementDeadline = settlementDeadline
       pending.timer = setTimeout(() => {
         if (this.runtimeCommands.get(key) !== pending) return
-        this.rejectRuntimeCommand(key, 'Runtime Harness command timed out')
+        this.rejectRuntimeCommand(key, {
+          status: 'expired',
+          stage: 'settle',
+        })
       }, settlementDeadline - Date.now())
       return expiresAt
     })
   }
 
-  async failRuntimeCommand(
+  async settleRuntimeCommand(
     runtime: RuntimeIdentity,
     owner: RuntimeOwner,
     commandId: string,
-    message: string,
+    outcome: RuntimeCommandOutcome,
   ): Promise<void> {
     validateProjectId(runtime.projectId)
     await this.withLock(runtime.projectId, async () => {
-      await this.assertRuntimeIdentity(runtime, owner)
-      const key = this.runtimeKey(runtime.projectId, owner)
-      const pending = this.runtimeCommands.get(key)
-      if (pending === undefined
-        || pending.command.commandId !== commandId
-        || !sameRuntimeOwner(pending.owner, owner)
-        || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
-        throw new Error('Runtime Harness command is stale or foreign')
-      }
-      this.rejectRuntimeCommand(key, `Runtime Harness preparation failed: ${message}`)
-    })
-  }
-
-  async reportRuntimeEvidence(
-    runtime: RuntimeIdentity,
-    owner: RuntimeOwner,
-    commandId: string,
-    result: unknown,
-  ): Promise<void> {
-    validateProjectId(runtime.projectId)
-    await this.withLock(runtime.projectId, async () => {
-      const workspace = this.workspaces.get(runtime.projectId)
-      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
+      if (this.runtimeCommandWasSettled(commandId, runtime, owner, outcome)) return
       await this.assertRuntimeIdentity(runtime, owner)
       const key = this.runtimeKey(runtime.projectId, owner)
       const pending = this.runtimeCommands.get(key)
@@ -2070,6 +2084,28 @@ export class WorkspaceStore {
         || !sameRuntimeIdentity(pending.command.runtime, runtime)) {
         throw new Error('Runtime Harness result is stale or foreign')
       }
+      if (outcome.status === 'failed') {
+        const expectedCode = {
+          prepare: 'TARGET_PREPARATION_FAILED',
+          execute: 'TARGET_EXECUTION_FAILED',
+          settle: 'EVIDENCE_REJECTED',
+        } as const satisfies Record<RuntimeCommandFailureStage, RuntimeCommandFailureCode>
+        const expectedPhase = outcome.stage === 'prepare' ? 'preparing' : 'executing'
+        if (outcome.code !== expectedCode[outcome.stage] || pending.phase !== expectedPhase) {
+          throw new RuntimeProtocolError(
+            'RUNTIME_COMMAND_STATE',
+            'Runtime Harness failure stage or code does not match the command phase',
+          )
+        }
+        this.finishRuntimeCommand(key, outcome)
+        return
+      }
+      if (outcome.status === 'cancelled' || outcome.status === 'expired') {
+        this.finishRuntimeCommand(key, outcome)
+        return
+      }
+      const workspace = this.workspaces.get(runtime.projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
       if (pending.phase !== 'executing'
         || pending.command.expiresAt === undefined
         || pending.settlementDeadline === undefined
@@ -2078,6 +2114,7 @@ export class WorkspaceStore {
       }
       const expiresAt = pending.command.expiresAt
       const settlementDeadline = pending.settlementDeadline
+      const result = outcome.evidence
       const evidenceRuntime = result !== null
         && typeof result === 'object'
         && 'runtime' in result
@@ -2137,9 +2174,10 @@ export class WorkspaceStore {
         ? result.status
         : undefined
       if (Date.now() > settlementDeadline) {
-        this.runtimeCommands.delete(key)
-        clearTimeout(pending.timer)
-        pending.reject(new Error('Runtime Harness command timed out'))
+        this.rejectRuntimeCommand(key, {
+          status: 'expired',
+          stage: 'settle',
+        })
         throw new Error('Runtime Harness result missed its settlement deadline')
       }
       // Settlement grace preserves terminal diagnostics, not successful evidence.
@@ -2149,8 +2187,35 @@ export class WorkspaceStore {
             && (evidenceStatus === 'failed' || evidenceStatus === 'cancelled')))) {
         throw new Error('Runtime Harness result missed its execution deadline')
       }
-      this.runtimeCommands.delete(key)
-      pending.resolve(result)
+      this.finishRuntimeCommand(key, outcome)
+    })
+  }
+
+  async failRuntimeCommand(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+    commandId: string,
+    message: string,
+    stage: RuntimeCommandFailureStage = 'prepare',
+    code: RuntimeCommandFailureCode = 'TARGET_PREPARATION_FAILED',
+  ): Promise<void> {
+    await this.settleRuntimeCommand(runtime, owner, commandId, {
+      status: 'failed',
+      stage,
+      code,
+      message,
+    })
+  }
+
+  async reportRuntimeEvidence(
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+    commandId: string,
+    result: unknown,
+  ): Promise<void> {
+    await this.settleRuntimeCommand(runtime, owner, commandId, {
+      status: 'succeeded',
+      evidence: result,
     })
   }
 
@@ -2656,12 +2721,62 @@ export class WorkspaceStore {
     }
   }
 
-  private rejectRuntimeCommand(key: string, reason: string): void {
+  private runtimeCommandWasSettled(
+    commandId: string,
+    runtime: RuntimeIdentity,
+    owner: RuntimeOwner,
+    outcome: RuntimeCommandOutcome,
+  ): boolean {
+    const settled = this.settledRuntimeCommands.get(commandId)
+    if (settled === undefined) return false
+    if (settled.expiresAt <= Date.now()) {
+      this.settledRuntimeCommands.delete(commandId)
+      return false
+    }
+    if (!sameRuntimeOwner(settled.owner, owner)
+      || !sameRuntimeIdentity(settled.runtime, runtime)) {
+      throw new Error('Runtime Harness command is stale or foreign')
+    }
+    if (!isDeepStrictEqual(settled.outcome, outcome)) {
+      throw new RuntimeProtocolError(
+        'RUNTIME_COMMAND_STATE',
+        `Runtime Harness command already settled: ${
+          runtimeCommandOutcomeMessage(settled.outcome)
+        }`,
+      )
+    }
+    return true
+  }
+
+  private finishRuntimeCommand(
+    key: string,
+    outcome: RuntimeCommandOutcome,
+  ): void {
     const pending = this.runtimeCommands.get(key)
     if (pending === undefined) return
     this.runtimeCommands.delete(key)
     clearTimeout(pending.timer)
-    pending.reject(new Error(reason))
+    if (this.settledRuntimeCommands.size >= 256) {
+      const oldest = this.settledRuntimeCommands.keys().next().value
+      if (oldest !== undefined) this.settledRuntimeCommands.delete(oldest)
+    }
+    this.settledRuntimeCommands.set(pending.command.commandId, {
+      runtime: pending.command.runtime,
+      owner: pending.owner,
+      outcome,
+      expiresAt: Date.now() + 60_000,
+    })
+    if (outcome.status === 'succeeded') pending.resolve(outcome.evidence)
+    else pending.reject(new Error(runtimeCommandOutcomeMessage(outcome)))
+  }
+
+  private rejectRuntimeCommand(
+    key: string,
+    outcome: Exclude<RuntimeCommandOutcome, { status: 'succeeded' }>,
+  ): void {
+    const pending = this.runtimeCommands.get(key)
+    if (pending === undefined) return
+    this.finishRuntimeCommand(key, outcome)
   }
 
   private ownsActiveRuntime(activeRuntime: z.infer<typeof activeRuntimeSchema>): boolean {
