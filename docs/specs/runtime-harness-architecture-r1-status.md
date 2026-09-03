@@ -1,10 +1,11 @@
 # Runtime Harness Architecture R1 Status
 
-Updated: 2026-09-03T12:40:27+0800
+Updated: 2026-09-03T12:43:14+0800
 Milestone: R1 Normalize internal Runtime protocol
-State: `IMPLEMENTING_SLICES`
-Gate: `AUTHORIZED`
+State: `MILESTONE_CANDIDATE`
+Gate: `AWAITING_ACCEPTANCE`
 Base: `f821b929cafbb1bda1d41e5a1c693c73be54617f`
+Candidate implementation: `f665b6f69bce001f6bdba5197c05e35f749fe044`
 Branch: `main`
 
 ## Scope
@@ -23,7 +24,7 @@ excluded.
 |---|---|---|---|
 | 1. Protocol types and legacy boundary | `COMMITTED_LOCAL` | `7014b11` | `src/runtime-protocol.ts`, this STATUS |
 | 2. Equality and error mapping migration | `COMMITTED_LOCAL` | `80fab31` | isolated hunks in `src/workspaces.ts` and `src/view.ts`, this STATUS |
-| 3. Pure invariant matrix | `IMPLEMENTED` | pending | `tests/runtime-protocol.test.mjs`, this STATUS |
+| 3. Pure invariant matrix | `COMMITTED_LOCAL` | `f665b6f` | `tests/runtime-protocol.test.mjs`, this STATUS |
 
 ## Recovered Baseline
 
@@ -58,50 +59,64 @@ excluded.
 
 - Full Node tests, browser suites, typecheck, lint, production build, package
   checks, independent review, and soak testing remain deferred.
+- Re-run `pnpm run typecheck`, `pnpm run build`, the complete Node suite, and
+  the Runtime registry/browser paths after the uncommitted R2/R4 work is
+  independently scoped and committed.
+- Review the cumulative protocol consumers once R2-R4 migration is complete;
+  R1 intentionally retains the flat compatibility adapter.
 - R1 self-test is limited to the pure protocol matrix plus `git diff --check`.
 - Risk: R1 helpers are consumed by substantial uncommitted R2/R4 work. Each R1
   commit must be assembled and inspected by exact file or hunk so those changes
   are not captured.
 
-## EXECUTION_CHECKPOINT
+## Concentrated Self-Test
 
-- Updated at: 2026-09-03T12:40:27+0800
+- `node --experimental-strip-types --test tests/runtime-protocol.test.mjs`:
+  PASS, 8 tests, 0 failures, 0 skips, 461 ms reported test duration and 6.99
+  seconds wall time.
+- `git diff --check f821b92..f665b6f`: PASS.
+- Commit-range audit: only this STATUS, `src/runtime-protocol.ts`, the intended
+  hunks in `src/workspaces.ts` and `src/view.ts`, and
+  `tests/runtime-protocol.test.mjs`.
+- Functional implementation and local commit work took roughly 14 minutes;
+  the concentrated self-test took seconds.
+
+## Manual Acceptance
+
+1. Inspect `7014b11`, `80fab31`, and `f665b6f`; require each Slice to contain
+   only its ledger scope.
+2. Run
+   `node --experimental-strip-types --test tests/runtime-protocol.test.mjs`.
+3. Require 8 passing tests covering explicit legacy adaptation, all execution
+   and projection equality coordinates, one-generation projection advance,
+   stale CAS rejection, all terminal outcomes, replay-stable messages, and
+   stable protocol error codes.
+
+Acceptance fails if any R1 commit contains an excluded debug/R2/R4 hunk, if a
+flat identity bypasses the named compatibility boundary in migrated call
+sites, or if any focused invariant fails.
+
+## EXECUTION_CHECKPOINT (CLOSED)
+
+- Updated at: 2026-09-03T12:43:14+0800
 - Milestone: R1 Normalize internal Runtime protocol
-- Slice: 3. Pure invariant matrix
-- Phase: commit
-- Slice state: `IMPLEMENTED`
-- Completed facts: Slice 1 committed locally as `7014b11`; commit readback
-  contains only `src/runtime-protocol.ts` and this STATUS. The protocol file's
-  stable SHA-256 is
-  `22b59976b9daf5e0ea75bf9aef7f0601357c6c1c491cd44cca300b2de8e33157`.
-  Server and client compatibility comparisons now delegate to the centralized
-  helpers. Active-runtime stale and foreign failures now carry stable codes.
-  Slice 2 committed locally as `80fab31`; cached and commit readback excluded
-  all R2/R4/debug hunks. The pure R1 matrix now covers adapter construction,
-  every equality coordinate, projection purity and stale expectations, every
-  terminal outcome, replay determinism, and stable error messages. Its stable
-  SHA-256 is
-  `19b1d668555030a92423cb80002bc45152c138028702cb9d9d2fec3cbbaec940`.
+- Slice: all Slices
+- Phase: awaiting-acceptance
+- Slice state: `COMMITTED_LOCAL`
+- Completed facts: Slices 1-3 are committed as `7014b11`, `80fab31`, and
+  `f665b6f`. The concentrated R1 self-test passed 8/8.
 - Repository state: `/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp`
-  on `main` at `80fab31`; relevant dirty files and exclusions are recorded
-  above; no staged files.
-- Intended changes: expand only `tests/runtime-protocol.test.mjs` into the
-  approved pure constructibility, equality, projection, outcome, and
-  idempotency matrix; update this STATUS.
+  on `main`; candidate implementation is `f665b6f`; the index was empty before
+  this final STATUS update. All pre-existing unrelated changes remain dirty.
+- Intended changes: none; R1 implementation and focused verification are
+  complete.
 - Explicit exclusions: every pre-existing dirty hunk outside the exact R1
   protocol/equality changes; R2/R3/R4/R5 behavior; all debug sessions,
   collectors, probes, logs, reports, fixtures, and evidence; port `7778`;
   push, amend, rebase, PR, release hardening, and cleanup.
-- Verification: baseline and Slice-owned `git diff --check` PASS; direct Node
-  ESM import PASS; Slice 1 targeted
-  `pnpm exec tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext
-  --moduleResolution NodeNext --skipLibCheck src/runtime-protocol.ts` PASS.
-  An earlier targeted TypeScript invocation without `--ignoreConfig` exited
-  with TS5112 before checking source and was corrected without changing scope.
-  Slice 2 targeted TypeScript check of `src/workspaces.ts` and `src/view.ts`
-  PASS after restoring the repository's Node type setting; the first invocation
-  without `--types node` reported only missing Node globals. Slice 3
-  `node --check tests/runtime-protocol.test.mjs` PASS.
+- Verification: focused protocol test PASS 8/8 at `f665b6f`; Slice-targeted
+  TypeScript checks and syntax checks PASS; R1 commit-range `git diff --check`
+  PASS.
 - Evidence paths: this STATUS; `docs/specs/runtime-harness-architecture-audit.md`;
   `src/runtime-protocol.ts`; `tests/runtime-protocol.test.mjs`.
 - Run identity: N/A for pure R1 verification. A read-only
@@ -109,14 +124,10 @@ excluded.
   creation; no process or port was stopped, restarted, or otherwise mutated.
 - Continuity constraints: preserve the recovered dirty tree, all debug
   evidence and processes, and the exact non-R1 index exclusion.
-- Invalidators: HEAD changes unexpectedly; any target hash changes outside the
-  current patch; any pre-existing file becomes staged; or an R1 cached diff
-  contains an excluded hunk.
+- Invalidators: any R1 implementation commit changes, a focused test fails on
+  the candidate commits, or an excluded hunk enters the R1 commit range.
 - Blockers and risks: mixed R2/R4/debug changes remain in
-  `src/workspaces.ts` and `src/view.ts`; they must remain unstaged.
-- Exact next action: explicitly stage `tests/runtime-protocol.test.mjs` and
-  this STATUS, inspect the cached diff, and create the Slice 3 local commit.
-- Stop condition: stop at `AWAITING_ACCEPTANCE` after three local Slice commits,
-  one concentrated self-test, and final checkpoint/report publication; stop
-  earlier only for an ownership ambiguity, concurrent write, failed commit, or
-  scope-changing requirement.
+  `src/workspaces.ts` and `src/view.ts`; full integration confidence is deferred
+  to Release Hardening after those changes have their own ownership boundary.
+- Exact next action: wait for the user's R1 acceptance decision.
+- Stop condition: user selects acceptance, further R1 iteration, or stop.
