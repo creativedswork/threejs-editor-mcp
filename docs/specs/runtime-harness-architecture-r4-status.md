@@ -1,8 +1,8 @@
 # Runtime Harness Architecture R4 Status
 
-Updated: 2026-09-04T03:41:07+0800
+Updated: 2026-09-04T05:07:12+0800
 Milestone: R4 Simplify Harness authority
-State: `IMPLEMENTING_SLICES`
+State: `MILESTONE_CANDIDATE`
 Gate: `AWAITING_ACCEPTANCE`
 Next milestone: R5 Remove legacy paths and harden
 Base: `f2570fcbc82594158d03b81db3df1bf6c32a5cdf`
@@ -26,7 +26,7 @@ fields.
 |---|---|---|---|
 | 1. Opaque Runtime reference | `COMMITTED` | `60f80f9` | Owner-bound `runtimeRef` issue/resolve/rotation, opaque model context, and preferred ordinary tool schemas; legacy identity remains internal compatibility only. |
 | 2. Validation and active authority | `COMMITTED` | `c791edd` | Independent validation execution, command-bound evidence token, typed active confirmation, and one-shot Editor grant consumption. |
-| 3. Typed settlement and invariant matrix | `IMPLEMENTING` | pending | One preferred typed idempotent settlement operation, legacy report/fail adapters, and focused broker/registry/protocol invariants. |
+| 3. Typed settlement and invariant matrix | `COMMITTED` | `ed6cb2b`, `fb984fd` | One preferred typed idempotent settlement operation, legacy report/fail adapters, and focused broker/registry/protocol invariants. |
 
 ## Recovered Baseline
 
@@ -36,6 +36,9 @@ fields.
   `f2570fcbc82594158d03b81db3df1bf6c32a5cdf`.
 - R3 implementation commits: `856a520`, `ed192d4`, `85edb8f`; R3 candidate
   documentation: `b852f9f`.
+- Recovery verified `main` at
+  `fb984fdef0fabb036c390a41f87cfaddefbf35f5`, with direct R4 ancestry
+  `60f80f9` -> `c791edd` -> `ed6cb2b` -> `fb984fd`.
 - Staged state: empty.
 - No repository-local or parent `AGENTS.md` applies to this checkout.
 - Relevant baseline SHA-256 values:
@@ -88,62 +91,98 @@ fields.
 - Run five browser lifecycle cycles and the 50-cycle Snow soak after all R
   milestones are accepted.
 
-## EXECUTION_CHECKPOINT
+## Milestone Self-Test
 
-- Updated at: 2026-09-04T03:41:07+0800
+- Source under test: committed HEAD
+  `fb984fdef0fabb036c390a41f87cfaddefbf35f5`, exported to an isolated
+  temporary snapshot so excluded working-tree changes could not affect the
+  result.
+- Focused server build:
+  `pnpm exec tsdown --config tsdown.config.ts --filter threejs-editor-mcp/server`
+  passed; `tsdown` reported a 105 ms build.
+- Concentrated test used `node --test` with an anchored alternation of
+  `prepared Runtime runs expire and commit with active-run CAS`,
+  `Runtime projection advances only after acknowledgement and recovers by
+  replacement`, and
+  `formats every typed terminal outcome deterministically for replay` against
+  `tests/runtime-registry.test.mjs` and `tests/runtime-protocol.test.mjs`; it
+  passed `3/3` in 17.9 seconds.
+- The selected cases prove opaque refs and command-bound evidence route
+  validation without model-supplied coordinates, active access requires and
+  consumes an Editor grant, identical settlement is idempotent while a
+  conflicting duplicate is rejected, refs rotate with projection/owner
+  changes, projection recovery remains valid, and typed terminal outcomes are
+  deterministic.
+- An initial selector also included two unchanged legacy M8.1 compatibility
+  cases. They failed on stale flat-identity expectations. Their working-tree
+  updates predate this closeout and are explicitly excluded, so no R4 source or
+  test fix was made and the canonical selector was rerun at its committed
+  boundary.
+- Functional implementation took tens of minutes; the canonical focused build
+  and concentrated self-test took under one minute.
+
+## Acceptance
+
+1. Review commits `60f80f9`, `c791edd`, `ed6cb2b`, and `fb984fd`.
+2. Confirm the isolated focused server build and three named R4 tests pass.
+3. Confirm ordinary validation tools use the latest owner-bound `runtimeRef`
+   rather than model-supplied revision, run ID, nonce, or evidence token.
+4. Confirm validation commands receive independent execution identity and a
+   command-bound evidence token.
+5. Confirm active access returns typed confirmation until an Editor-issued
+   one-shot grant is consumed.
+6. Confirm exact duplicate settlement replays successfully while a conflicting
+   duplicate is rejected with typed command state.
+
+Expected result: ordinary validation does not depend on copied or invented
+internal routing coordinates, and every broker command has one deterministic
+terminal outcome. Failure is acceptance of a foreign/stale ref, active access
+without an Editor grant, reuse of registration evidence for a validation
+command, or conflicting settlement accepted as idempotent.
+
+## EXECUTION_CHECKPOINT (CLOSED)
+
+- Updated at: 2026-09-04T05:07:12+0800
 - Milestone: R4 Simplify Harness authority
-- Slice: 3. Typed settlement and invariant matrix
-- Phase: implementation
-- Slice state: `IMPLEMENTING`
+- Slice: all Slices
+- Phase: milestone-candidate
+- Slice state: `COMMITTED_LOCAL`
 - Completed facts: Slice 1 committed as `60f80f9`; Slice 2 committed as
-  `c791edd`. Opaque references, independent validation identity,
-  command-bound evidence, and one-shot active authorization are committed.
-- Repository state: `main` at `c791edd`; index empty; mixed dirty and
+  `c791edd`; Slice 3 production committed as `ed6cb2b`; Slice 3 focused test
+  alignment committed as `fb984fd`. Opaque references, independent validation
+  identity, command-bound evidence, one-shot active authorization, and typed
+  idempotent settlement are committed.
+- Repository state: `main` at
+  `fb984fdef0fabb036c390a41f87cfaddefbf35f5`; index empty; mixed dirty and
   untracked paths listed in Recovered Baseline remain present.
-- Intended changes: add one preferred typed `settle_runtime_command`, route
-  App completion through it, retain legacy report/fail adapters, make exact
-  duplicate outcomes idempotent, reject conflicting duplicates, preserve
-  typed timeout/cancellation outcomes, and add the focused invariant matrix.
+- Intended changes: none; R4 implementation and focused verification are
+  complete.
 - Explicit exclusions: all items in Explicit Exclusions; especially no M9,
   debug-probe, transport, browser, R5 cleanup, process, port, or remote work.
-- Verification: Slice 1 and Slice 2 cached diff and exact-blob syntax bundles
-  PASS. Slice 3 post-edit SHA-256 values remained stable for more than five
-  seconds: `src/workspaces.ts`
-  `7b37895e8d02f1d64a5904339945ff302127d382db33398a47fd9e999cf1633c`;
-  `src/server.ts`
-  `c58aef628ffe2998bd2cfbe336aefe74035b109642dca4839780b03738971132`;
-  `src/view.ts`
-  `5c9a854d9611d1ac3ab30274dfba40c0b57b7c2aafa2472d532c4336b6bd6878`;
-  `tests/runtime-registry.test.mjs`
-  `185dea2922ac9cf0752820b9e4592848963b6c2aef621a8b6a741a047409abed`;
-  `tests/m1-server.test.mjs`
-  `5c0b03e64ed5c92d0f37b0e1dbd2996831c1f7513e634a9ebb88459eeeb1fa36`.
-  Earlier Slice 2 pre-edit SHA-256 values:
-  `src/workspaces.ts`
-  `0f06e6b411ec736c6b91315153c1107ecb8ba2cd2d23c8a8ad4ebb9bb66f35a8`;
-  `src/server.ts`
-  `eab35c998f005d7e0346676a23a1e6605f50d362b7e06060512b0487320db4cc`;
-  `src/view.ts`
-  `7b907df09fe28bc3f2fe54424578b67bd9661fcb0b530a739479d2a28494f69a`;
-  `src/m7-runtime.ts`
-  `15648962f2503ec48bfad3992fa401ffb968222dbc10c6f377c3d9f26793429f`.
-  Post-edit values remained stable after more than five seconds; only
-  `src/workspaces.ts` changed, to
-  `2f10819ed2d0f92de0bdf5cd97c85527b5affcfcb145c23368f9429cb09ad8b4`.
+- Verification: exact commits and direct ancestry verified; index verified
+  empty. Slice 1 and Slice 2 cached diff and exact-blob syntax bundles PASS.
+  Slice 3 commit reread verified the production scope in `ed6cb2b` and focused
+  registry test alignment in `fb984fd`. The isolated focused server build
+  PASS. An initial over-broad selector passed the three committed R4
+  registry/protocol cases but failed two legacy M8.1 compatibility cases whose
+  stale flat-identity expectations were not changed by any R4 commit and whose
+  working-tree updates are explicitly excluded dirty work. No file was
+  changed in response. The canonical isolated committed-HEAD selector passed
+  all three selected R4 cases in 17.9 seconds.
 - Evidence paths: this STATUS, the canonical plan/audit/R2/R3 STATUS files,
   and preserved debug/report artifacts already in the working tree.
 - Run identity: N/A; R4 uses pure broker/registry/protocol checks and no live
   browser or external Runtime.
-- Continuity constraints: preserve every unrelated dirty hunk; stage only
-  exact R4 hunks; re-read and hash each target immediately before edits, then
-  wait at least five seconds and verify the hash and target diff.
+- Continuity constraints: preserve every unrelated dirty hunk and untracked
+  artifact; run the self-test only from an isolated export of exact committed
+  HEAD; stage only this STATUS for candidate closeout.
 - Invalidators: branch or HEAD change, unknown staged content, target hash
   change outside an owned patch, or inability to separate an R4 hunk from
   excluded M9/debug work.
-- Blockers and risks: mixed files require exact hunk staging; browser and full
-  repository validation remain deferred to Release Hardening.
-- Exact next action: stage only typed-settlement and focused-test hunks,
-  verify exact cached sources, and create the local Slice 3 atomic commit.
-- Stop condition: all three Slices committed, concentrated isolated-HEAD R4
-  self-test recorded, docs-only candidate committed, then stop at
-  `MILESTONE_CANDIDATE` / `AWAITING_ACCEPTANCE`.
+- Blockers and risks: no R4 blocker. The unchanged legacy M8.1 compatibility
+  tests still need their already-dirty opaque-ref alignment reconciled outside
+  this isolated closeout. Browser and full repository validation remain
+  deferred to Release Hardening.
+- Exact next action: await explicit R4 acceptance; do not edit the master plan
+  or start R5.
+- Stop condition: user accepts R4 or requests an R4 iteration.
