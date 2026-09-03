@@ -61,7 +61,7 @@
           "type": "tool-call",
           "id": "call_threejs_m9_apply_clouds",
           "name": "mcp__threejs__apply_project_files",
-          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"baseRevision\":\"{{fromRequest:baseRevision=([0-9a-f]{64})}}\",\"changes\":[{\"type\":\"write\",\"path\":\"dev/example-gallery/examples/threejs-volumetric-clouds/weather-volume-clouds/scene.js\",\"text\":\"{{fromRequest:(import \\{[\\s\\S]*?clouds\\.coverage = )0\\.4;}}0.46;{{fromRequest:clouds\\.coverage = 0\\.4;([\\s\\S]*?\\\\n\\};\\\\n)\"\\}\\]}}\"}]}"
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"baseRevision\":\"{{fromRequest:baseRevision=([0-9a-f]{64})}}\",\"changes\":[{\"type\":\"write\",\"path\":\"dev/example-gallery/examples/threejs-volumetric-clouds/weather-volume-clouds/scene.js\",\"text\":\"{{fromRequest:(import \\{[\\s\\S]*?clouds\\.coverage = )0\\.4;}}0.46;{{fromRequest:clouds\\.coverage = 0\\.4;([\\s\\S]*?function loadSTBNTexture\\(\\)[\\s\\S]*?\\\\n\\}\\\\n)\"\\}\\]}}\"}]}"
         }
       },
       { "type": "finish", "reason": { "kind": "tool-calls" } }
