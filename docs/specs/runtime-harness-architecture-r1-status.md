@@ -1,6 +1,6 @@
 # Runtime Harness Architecture R1 Status
 
-Updated: 2026-09-03T12:31:01+0800
+Updated: 2026-09-03T12:34:37+0800
 Milestone: R1 Normalize internal Runtime protocol
 State: `IMPLEMENTING_SLICES`
 Gate: `AUTHORIZED`
@@ -21,8 +21,8 @@ excluded.
 
 | Slice | State | Commit | Owned files |
 |---|---|---|---|
-| 1. Protocol types and legacy boundary | `IMPLEMENTED` | pending | `src/runtime-protocol.ts`, this STATUS |
-| 2. Equality and error mapping migration | `PENDING` | pending | isolated hunks in `src/workspaces.ts` and `src/view.ts`, this STATUS |
+| 1. Protocol types and legacy boundary | `COMMITTED_LOCAL` | `7014b11` | `src/runtime-protocol.ts`, this STATUS |
+| 2. Equality and error mapping migration | `IMPLEMENTED` | pending | isolated hunks in `src/workspaces.ts` and `src/view.ts`, this STATUS |
 | 3. Pure invariant matrix | `PENDING` | pending | `tests/runtime-protocol.test.mjs`, this STATUS |
 
 ## Recovered Baseline
@@ -65,33 +65,37 @@ excluded.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-03T12:31:01+0800
+- Updated at: 2026-09-03T12:34:37+0800
 - Milestone: R1 Normalize internal Runtime protocol
-- Slice: 1. Protocol types and legacy boundary
+- Slice: 2. Equality and error mapping migration
 - Phase: commit
 - Slice state: `IMPLEMENTED`
-- Completed facts: Skill instructions, repository docs, Git state, target
-  files, full target diffs, call sites, and pre-edit hashes were read.
-  `src/runtime-protocol.ts` now defines the normalized identity, build,
-  projection, outcome, error-code, and named legacy-adapter boundary. Its
-  stable post-edit SHA-256 is
+- Completed facts: Slice 1 committed locally as `7014b11`; commit readback
+  contains only `src/runtime-protocol.ts` and this STATUS. The protocol file's
+  stable SHA-256 is
   `22b59976b9daf5e0ea75bf9aef7f0601357c6c1c491cd44cca300b2de8e33157`.
+  Server and client compatibility comparisons now delegate to the centralized
+  helpers. Active-runtime stale and foreign failures now carry stable codes.
 - Repository state: `/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp`
-  on `main` at `f821b92`; relevant dirty files and exclusions are recorded
+  on `main` at `7014b11`; relevant dirty files and exclusions are recorded
   above; no staged files.
-- Intended changes: normalize `src/runtime-protocol.ts` around `ExecutionId`,
-  `RuntimeProjection`, `RuntimeBuildRef`, typed outcomes, and an explicit
-  legacy adapter; update only this STATUS in Slice 1.
+- Intended changes: replace only the pre-existing duplicate legacy identity
+  and owner comparisons in `src/workspaces.ts` and `src/view.ts` with the
+  centralized compatibility helpers; map the pre-existing active-runtime
+  stale and foreign errors to stable protocol codes; update this STATUS.
 - Explicit exclusions: every pre-existing dirty hunk outside the exact R1
   protocol/equality changes; R2/R3/R4/R5 behavior; all debug sessions,
   collectors, probes, logs, reports, fixtures, and evidence; port `7778`;
   push, amend, rebase, PR, release hardening, and cleanup.
 - Verification: baseline and Slice-owned `git diff --check` PASS; direct Node
-  ESM import PASS; targeted
+  ESM import PASS; Slice 1 targeted
   `pnpm exec tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext
   --moduleResolution NodeNext --skipLibCheck src/runtime-protocol.ts` PASS.
   An earlier targeted TypeScript invocation without `--ignoreConfig` exited
   with TS5112 before checking source and was corrected without changing scope.
+  Slice 2 targeted TypeScript check of `src/workspaces.ts` and `src/view.ts`
+  PASS after restoring the repository's Node type setting; the first invocation
+  without `--types node` reported only missing Node globals.
 - Evidence paths: this STATUS; `docs/specs/runtime-harness-architecture-audit.md`;
   `src/runtime-protocol.ts`; `tests/runtime-protocol.test.mjs`.
 - Run identity: N/A for pure R1 verification. A read-only
@@ -104,8 +108,8 @@ excluded.
   contains an excluded hunk.
 - Blockers and risks: mixed R2/R4/debug changes share `src/workspaces.ts` and
   `src/view.ts`; Slice 2 requires exact cached-hunk inspection.
-- Exact next action: explicitly stage `src/runtime-protocol.ts` and this STATUS,
-  inspect the cached diff, and create the Slice 1 local commit.
+- Exact next action: stage only the audited equality/error hunks and this
+  STATUS, inspect the cached patch against `7014b11`, and commit Slice 2.
 - Stop condition: stop at `AWAITING_ACCEPTANCE` after three local Slice commits,
   one concentrated self-test, and final checkpoint/report publication; stop
   earlier only for an ownership ambiguity, concurrent write, failed commit, or

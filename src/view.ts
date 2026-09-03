@@ -44,6 +44,10 @@ import {
   type RuntimeLifecycleSnapshot,
   type RuntimeTransitionContext,
 } from './runtime-lifecycle.js'
+import {
+  sameLegacyRuntimeExecution as sameM7Runtime,
+  sameLegacyRuntimeIdentity as sameM7Run,
+} from './runtime-protocol.js'
 
 type LayoutPreset = 'classic' | 'wide' | 'compact'
 type CameraView = 'broadcast' | 'overhead' | 'courtside'
@@ -2561,16 +2565,6 @@ function waitForM7Event(
     if (signal?.aborted) abort()
     else signal?.addEventListener('abort', abort, { once: true })
   })
-}
-
-function sameM7Runtime(left: M7Run, right: M7Run): boolean {
-  return left.projectId === right.projectId
-    && left.runId === right.runId
-    && left.nonce === right.nonce
-}
-
-function sameM7Run(left: M7Run, right: M7Run): boolean {
-  return left.revision === right.revision && sameM7Runtime(left, right)
 }
 
 function m7RunIsCurrent(run: M7Run): boolean {

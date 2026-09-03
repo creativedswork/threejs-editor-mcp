@@ -62,6 +62,13 @@ import {
   withRuntimeLock as withCrossProcessRuntimeLock,
 } from './runtime-lock.js'
 import {
+  RuntimeProtocolError,
+  sameLegacyRuntimeIdentity as sameRuntimeIdentity,
+  sameRuntimeOwner,
+  type LegacyRuntimeIdentity,
+  type RuntimeOwner as ProtocolRuntimeOwner,
+} from './runtime-protocol.js'
+import {
   createFileBound,
   removeFileBound,
   replaceFileBound,
@@ -308,17 +315,9 @@ export interface WorkspaceProjectCandidate {
   issue?: string
 }
 
-export interface RuntimeIdentity {
-  projectId: string
-  revision: string
-  runId: string
-  nonce: string
-}
+export type RuntimeIdentity = LegacyRuntimeIdentity
 
-export interface RuntimeOwner {
-  sessionId: string
-  connectionGeneration: string
-}
+export type RuntimeOwner = ProtocolRuntimeOwner
 
 export interface RuntimeHarnessCommand {
   commandId: string
@@ -563,17 +562,6 @@ function manifestRevision(manifest: WorkspaceManifest): string {
   return digest(canonicalBytes(manifest))
 }
 
-function sameRuntimeIdentity(left: RuntimeIdentity, right: RuntimeIdentity): boolean {
-  return left.projectId === right.projectId
-    && left.revision === right.revision
-    && left.runId === right.runId
-    && left.nonce === right.nonce
-}
-
-function sameRuntimeOwner(left: RuntimeOwner, right: RuntimeOwner): boolean {
-  return left.sessionId === right.sessionId
-    && left.connectionGeneration === right.connectionGeneration
-}
 
 function defaultWorkspaceConfig(
   kind: WorkspaceKind,
@@ -2202,23 +2190,44 @@ export class WorkspaceStore {
     if (active === undefined) {
       const foreign = [...this.activeRuntimes.entries()].some(([key, candidate]) => (
         key.startsWith(`${runtime.projectId}\0`)
-        && candidate.revision === runtime.revision
-        && candidate.runId === runtime.runId
-        && candidate.nonce === runtime.nonce
+        && candidate.nonce !== undefined
+        && sameRuntimeIdentity({
+          projectId: runtime.projectId,
+          revision: candidate.revision,
+          runId: candidate.runId,
+          nonce: candidate.nonce,
+        }, runtime)
       ))
       if (foreign) {
-        throw new Error('Runtime belongs to another Harness Session or connection generation')
+        throw new RuntimeProtocolError(
+          'RUNTIME_OWNER_FOREIGN',
+          'Runtime belongs to another Harness Session or connection generation',
+        )
       }
     }
-    if (active === undefined
-      || active.revision !== runtime.revision
-      || active.runId !== runtime.runId
-      || active.nonce !== runtime.nonce) {
-      throw new Error('Runtime identity is stale or incomplete')
+    if (active?.nonce === undefined
+      || !sameRuntimeIdentity({
+        projectId: runtime.projectId,
+        revision: active.revision,
+        runId: active.runId,
+        nonce: active.nonce,
+      }, runtime)) {
+      throw new RuntimeProtocolError(
+        'RUNTIME_EXECUTION_STALE',
+        'Runtime identity is stale or incomplete. Copy projectId, revision, runId, and nonce '
+        + 'exactly from the latest Runtime context supplied by the Editor; do not generate replacement UUIDs.',
+      )
     }
-    if (active.sessionId !== owner.sessionId
-      || active.connectionGeneration !== owner.connectionGeneration) {
-      throw new Error('Runtime belongs to another Harness Session or connection generation')
+    if (active.sessionId === undefined
+      || active.connectionGeneration === undefined
+      || !sameRuntimeOwner({
+        sessionId: active.sessionId,
+        connectionGeneration: active.connectionGeneration,
+      }, owner)) {
+      throw new RuntimeProtocolError(
+        'RUNTIME_OWNER_FOREIGN',
+        'Runtime belongs to another Harness Session or connection generation',
+      )
     }
     return active
   }
