@@ -383,7 +383,7 @@ try {
     + 'textarea:enabled[placeholder="给智能体发消息"]',
   )
   await composer.waitFor({ state: 'visible', timeout: 30_000 })
-  const app = await appFrame()
+  let app = await appFrame()
   const initial = await app.evaluate(() => globalThis.__THREE_M7__.metrics())
 
   const quality = app.getByRole('combobox', { name: '画质' })
@@ -428,6 +428,8 @@ try {
   ), 'utf8')
   assert.match(source, /clouds\.coverage = 0\.46;/)
 
+  await page.getByRole('tab', { name: '构建', exact: true }).click()
+  app = await appFrame()
   stage('starting runtime')
   await app.getByRole('button', { name: 'Play', exact: true }).click()
   await app.waitForFunction(() => {
