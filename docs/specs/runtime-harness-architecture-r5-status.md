@@ -1,6 +1,6 @@
 # Runtime Harness Architecture R5 Status
 
-Updated: 2026-09-04T05:48:06+0800
+Updated: 2026-09-04T05:50:37+0800
 Milestone: R5 Remove legacy paths and harden
 State: `IMPLEMENTING_SLICES`
 Gate: `AUTHORIZED`
@@ -33,8 +33,8 @@ broker state machine, and no active legacy lifecycle path.
 | Slice | State | Commit | Owned scope |
 |---|---|---|---|
 | 1. Server/registry legacy removal | `COMMITTED_LOCAL` | `b689567` | `src/runtime-protocol.ts`, exact R5 hunks in `src/server.ts`, `src/workspaces.ts`, and required client contract hunks in `src/view.ts`; this STATUS |
-| 2. Client/Runtime probe removal | `IMPLEMENTED` | pending | Removed temporary production collectors and probe tools from `src/view.ts`, `src/m7-runtime.ts`, `src/server.ts`, and `src/workspaces.ts`; preserved all historical evidence artifacts. |
-| 3. Behavioral invariant cleanup | `PENDING` | pending | Source-regex/legacy assertions replaced or removed in focused test files |
+| 2. Client/Runtime probe removal | `COMMITTED_LOCAL` | `cbb694f` | Removed temporary production collectors and probe tools from `src/view.ts`, `src/m7-runtime.ts`, `src/server.ts`, and `src/workspaces.ts`; preserved all historical evidence artifacts. |
+| 3. Behavioral invariant cleanup | `IMPLEMENTED` | pending | Replaced legacy adapter and flat-RPC assertions with normalized protocol, registry, broker, and tool-inventory behavior in focused tests. |
 
 ## Recovered Baseline
 
@@ -89,28 +89,26 @@ broker state machine, and no active legacy lifecycle path.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-04T05:48:06+0800
+- Updated at: 2026-09-04T05:50:37+0800
 - Milestone: R5 Remove legacy paths and harden
-- Slice: 2. Client/Runtime probe removal
+- Slice: 3. Behavioral invariant cleanup
 - Phase: commit
 - Slice state: `IMPLEMENTED`
-- Completed facts: Slice 1 committed as `b689567` after its exact indexed
-  snapshot passed TypeScript. Production source contains no temporary
-  collector URL, debug probe event, or debug-only App tool; retained `.dbg`,
-  debug notes, reports, logs, screenshots, and browser evidence were not
-  changed.
-- Repository state: `main` at `b689567`; index empty; relevant dirty files are
+- Completed facts: Slice 1 committed as `b689567`; Slice 2 cleanup was recorded
+  as `cbb694f`. Focused tests now construct normalized execution/projection
+  identities, route commands through opaque Runtime references, exercise one
+  typed settlement path, and assert the current tool inventory.
+- Repository state: `main` at `cbb694f`; index empty; relevant dirty files are
   `src/server.ts`, `src/workspaces.ts`, `src/view.ts`, and
   `src/m7-runtime.ts`; unrelated dirty and untracked paths remain excluded.
-- Intended changes: commit only this STATUS update because the probes were
-  uncommitted instrumentation; removing them produces no source delta against
-  the committed Slice 1 candidate.
+- Intended changes: stage only `tests/runtime-protocol.test.mjs`,
+  `tests/runtime-registry.test.mjs`, the exact tool-inventory hunk in
+  `tests/m1-server.test.mjs`, and this STATUS.
 - Explicit exclusions: all items in Explicit Exclusions; preserve every
   unrelated dirty hunk and evidence artifact.
-- Verification: exact indexed Slice 1 snapshot
-  `pnpm exec tsc --noEmit --pretty false` PASS; source search for collector
-  URLs, debug probe events, and debug-only App tools PASS at `b689567` and in
-  the current worktree.
+- Verification: all three Slice 3 test files pass `node --check`; their hashes
+  remained stable across the five-second editor-buffer check; focused source
+  search finds no active legacy adapter or deleted RPC assertion.
 - Evidence paths: this STATUS and the accepted R2/R3/R4 STATUS files.
 - Run identity: N/A; R5 uses pure focused checks and no live browser Runtime.
 - Continuity constraints: edit latest disk content; hash every mixed target
@@ -122,7 +120,7 @@ broker state machine, and no active legacy lifecycle path.
 - Blockers and risks: compatibility tests may encode obsolete behavior and
   must be replaced by current state-machine invariants without broad test
   expansion.
-- Exact next action: commit this Slice 2 STATUS update, then replace legacy and
-  source-regex tests with focused normalized-state invariants.
+- Exact next action: commit Slice 3, then run the one focused R5 self-test from
+  an isolated indexed/committed snapshot.
 - Stop condition: R5 candidate report at `AWAITING_ACCEPTANCE`, or an ownership
   ambiguity that prevents exact-hunk staging.

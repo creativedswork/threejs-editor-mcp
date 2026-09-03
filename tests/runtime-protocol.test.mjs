@@ -2,13 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   RuntimeProtocolError,
-  adaptLegacyRuntimeIdentity,
   advanceRuntimeProjection,
   runtimeCommandOutcomeMessage,
   runtimeProtocolErrorMessage,
-  sameLegacyRuntimeExecution,
-  sameLegacyRuntimeIdentity,
   sameRuntimeExecution,
+  sameRuntimeIdentity,
   sameRuntimeOwner,
   sameRuntimeProjection,
 } from '../src/runtime-protocol.ts'
@@ -34,25 +32,6 @@ const projection = {
   },
 }
 
-const legacyIdentity = {
-  projectId: execution.projectId,
-  revision: projection.workspaceRevision,
-  runId: execution.runId,
-  nonce: execution.nonce,
-}
-
-test('constructs normalized identity only through the legacy adapter boundary', () => {
-  assert.deepEqual(
-    adaptLegacyRuntimeIdentity(
-      legacyIdentity,
-      owner,
-      projection.loadedBuild,
-      projection.generation,
-    ),
-    { execution, projection },
-  )
-})
-
 test('compares every execution identity coordinate', () => {
   assert.equal(sameRuntimeExecution(execution, structuredClone(execution)), true)
   const alternatives = [
@@ -75,13 +54,6 @@ test('compares every execution identity coordinate', () => {
   assert.equal(sameRuntimeOwner(owner, alternatives[3].owner), false)
 })
 
-test('keeps legacy execution equality separate from revision equality', () => {
-  const nextRevision = { ...legacyIdentity, revision: 'c'.repeat(64) }
-
-  assert.equal(sameLegacyRuntimeExecution(legacyIdentity, nextRevision), true)
-  assert.equal(sameLegacyRuntimeIdentity(legacyIdentity, nextRevision), false)
-})
-
 test('compares every projection coordinate', () => {
   assert.equal(sameRuntimeProjection(projection, structuredClone(projection)), true)
   const alternatives = [
@@ -99,6 +71,19 @@ test('compares every projection coordinate', () => {
   for (const alternative of alternatives) {
     assert.equal(sameRuntimeProjection(projection, alternative), false)
   }
+})
+
+test('compares normalized execution and projection as one Runtime identity', () => {
+  const identity = { execution, projection }
+  assert.equal(sameRuntimeIdentity(identity, structuredClone(identity)), true)
+  assert.equal(sameRuntimeIdentity(identity, {
+    execution,
+    projection: { ...projection, generation: 1 },
+  }), false)
+  assert.equal(sameRuntimeIdentity(identity, {
+    execution: { ...execution, runId: '44444444-4444-4444-8444-444444444444' },
+    projection,
+  }), false)
 })
 
 test('advances projection once without mutating execution or build provenance', () => {

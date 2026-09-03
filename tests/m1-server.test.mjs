@@ -93,14 +93,14 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       'create_workspace',
       'open_editor',
       'inspect_project',
-      'register_runtime_run',
+      'prepare_runtime_run',
+      'commit_runtime_run',
+      'commit_runtime_projection',
       'release_runtime_run',
       'grant_active_runtime_control',
       'pull_runtime_command',
       'start_runtime_command',
-      'fail_runtime_command',
       'settle_runtime_command',
-      'report_runtime_evidence',
       'capture_runtime_frame',
       'read_runtime_logs',
       'simulate_player_actions',
@@ -141,7 +141,9 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     )
     assert.deepEqual(byName.get('inspect_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('build_project')?._meta?.ui?.visibility, ['model', 'app'])
-    assert.deepEqual(byName.get('register_runtime_run')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(byName.get('prepare_runtime_run')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(byName.get('commit_runtime_run')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(byName.get('commit_runtime_projection')?._meta?.ui?.visibility, ['app'])
     assert.deepEqual(byName.get('release_runtime_run')?._meta?.ui?.visibility, ['app'])
     assert.deepEqual(byName.get('report_editor_scene')?._meta?.ui?.visibility, ['app'])
     assert.deepEqual(
