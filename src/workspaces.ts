@@ -64,6 +64,7 @@ import {
 import {
   RuntimeProtocolError,
   advanceRuntimeProjection as nextRuntimeProjection,
+  sameLegacyRuntimeExecution,
   sameLegacyRuntimeIdentity as sameRuntimeIdentity,
   sameRuntimeOwner,
   type LegacyRuntimeIdentity,
@@ -1532,10 +1533,15 @@ export class WorkspaceStore {
         ? active === undefined
         : active !== undefined
           && active.nonce !== undefined
-          && candidate.projectId === expectedActive.projectId
-          && active.revision === expectedActive.revision
-          && active.runId === expectedActive.runId
-          && active.nonce === expectedActive.nonce
+          && sameLegacyRuntimeExecution(
+            {
+              projectId: candidate.projectId,
+              revision: active.revision,
+              runId: active.runId,
+              nonce: active.nonce,
+            },
+            expectedActive,
+          )
       if (!activeMatches) {
         throw new Error('active Runtime changed before candidate commit')
       }

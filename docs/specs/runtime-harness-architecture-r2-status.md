@@ -1,6 +1,6 @@
 # Runtime Harness Architecture R2 Status
 
-Updated: 2026-09-03T17:18:57Z
+Updated: 2026-09-03T17:47:39Z
 Milestone: R2 Complete authoritative projection
 State: `IMPLEMENTING_SLICES`
 Gate: `IMPLEMENTING_SLICES`
@@ -22,8 +22,8 @@ failure.
 
 | Slice | State | Commit | Owned scope |
 |---|---|---|---|
-| 1. Projection transaction boundary | `IMPLEMENTED` | pending | Narrow R2 hunks in `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and the `apply-operations` acknowledgement in `src/m7-runtime.ts`; this STATUS |
-| 2. Committed-revision recovery | `PENDING` | pending | Narrow R2 recovery hunks in `src/view.ts`; this STATUS |
+| 1. Projection transaction boundary | `COMMITTED_LOCAL` | `61020fa` | Narrow R2 hunks in `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and the `apply-operations` acknowledgement in `src/m7-runtime.ts`; this STATUS |
+| 2. Committed-revision recovery | `IMPLEMENTING` | pending | Narrow R2 recovery hunks in `src/workspaces.ts` and `src/view.ts`; this STATUS |
 | 3. Projection invariant matrix | `PENDING` | pending | R2-only cases in `tests/runtime-registry.test.mjs`; this STATUS |
 
 ## Recovered Baseline
@@ -90,31 +90,40 @@ failure.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-03T17:18:57Z
+- Updated at: 2026-09-03T17:47:39Z
 - Milestone: R2 Complete authoritative projection
-- Slice: 1. Projection transaction boundary
+- Slice: 2. Committed-revision recovery
 - Phase: commit
 - Slice state: `IMPLEMENTED`
 - Completed facts: R1 was accepted at `655cb62`; branch, HEAD, index, dirty
   files, canonical documents, and relevant hashes were verified from disk.
-  The Workspace commit now creates a pending projection under the same project
-  lock; the iframe echoes its transition ID; the registry advances only after
-  a matching acknowledgement and execution/generation CAS.
-- Repository state: `main` at `655cb62f25814f47f88c5bfab21e855dd73bfd9b`;
-  the index contains only this STATUS and exact R2 hunks in
-  `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and
-  `src/m7-runtime.ts`; all other dirty and untracked paths are excluded.
-- Intended changes: isolate the smallest R2-only locked mutation and pending
-  projection hunks in `src/workspaces.ts`, app-tool plumbing in `src/server.ts`,
-  transition-bound iframe acknowledgement in `src/m7-runtime.ts`, and
-  acknowledgement/CAS orchestration in `src/view.ts`, without taking ownership
-  of whole mixed files.
+  Slice 1 was committed as `61020fa`; its commit was reread and contains only
+  the documented R2 files and hunks. The index is empty. The Slice 1 follow-up
+  type diagnostic was fixed by supplying the required `revision` field when
+  adapting the active record to `LegacyRuntimeIdentity`; execution equality
+  remains intentionally revision-independent.
+- Repository state: `main` at `61020faac8c6118df994d96e4654d148122986cb`;
+  the index contains only this STATUS and the exact Slice 2 hunks in
+  `src/workspaces.ts` and `src/view.ts`; the pre-existing unrelated dirty and
+  untracked paths remain.
+- Intended changes: compare candidate replacement against the stable Runtime
+  execution in `src/workspaces.ts`, and replace only the compensating rollover
+  cleanup in `applyEditorRevision` with recovery from the committed Workspace
+  snapshot in `src/view.ts`. This covers acknowledgement failure, CAS failure,
+  timeout, cancellation, and reconnect without synthesizing a rollback
+  identity. Current SHA-256 values are
+  `0f06e6b411ec736c6b91315153c1107ecb8ba2cd2d23c8a8ad4ebb9bb66f35a8`
+  for `src/workspaces.ts` and
+  `05d948c7ae5d685cce94049853e8b98cae4b734f24b4546534dbfb19755a6008`
+  for `src/view.ts`.
 - Explicit exclusions: all items in the Explicit Exclusions section; no
   process, port, remote, cleanup, or release-hardening operation.
 - Verification: post-edit hashes remained stable after more than five seconds;
-  `git diff --check` and `node --experimental-strip-types --check` passed for
-  the four touched source files. Functional tests remain deferred to the one
-  concentrated R2 self-test.
+  `git diff --check` and TypeScript syntax checks passed. The Slice 1 follow-up
+  Fix passed
+  `pnpm exec tsc --noEmit --skipLibCheck --ignoreConfig --types node --target ES2022 --module NodeNext --moduleResolution NodeNext src/workspaces.ts`
+  at the current `src/workspaces.ts` hash. Functional tests remain deferred to
+  the one concentrated R2 self-test.
 - Evidence paths: this STATUS and the canonical plan/spec documents named in
   the milestone request.
 - Run identity: N/A; no browser or external Runtime smoke is active for R2.
@@ -126,8 +135,8 @@ failure.
   excluded R4/M9/debug work.
 - Blockers and risks: `src/workspaces.ts`, `src/server.ts`, and `src/view.ts`
   contain mixed work; whole-file staging is forbidden.
-- Exact next action: stage only the documented Slice 1 hunks, inspect cached
-  name-status/check/diff, and create the local atomic commit.
+- Exact next action: create the local Slice 2 commit, reread it and the dirty
+  tree, emit `SLICE_REPORT`, then activate Slice 3.
 - Stop condition: stop at an ownership ambiguity that cannot be resolved from
   Git and call-site evidence, or after R2 reaches
   `MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE`.

@@ -32,7 +32,6 @@ import {
   RUNTIME_COMMAND_SETTLEMENT_GRACE_MS,
   WORKSPACE_EDITOR_STATE_PATH,
   m7BootstrapHtml,
-  rolloverCleanupRevisions,
   type M7RuntimeEvent,
   type PointerPickGesture,
   shouldPickAfterPointerGesture,
@@ -3721,8 +3720,6 @@ async function applyEditorRevision(
   let nextRun = { ...run, revision: snapshot.revision }
   const token = context.epoch
   m7StartToken = token
-  let registrationStarted = false
-  let advanced = false
   let runtimeAdvanced = false
   try {
     status.textContent = 'Applying external Editor changes'
@@ -3771,7 +3768,6 @@ async function applyEditorRevision(
       throw new Error('Editor state changed during Runtime revision rollover')
     }
 
-    registrationStarted = true
     const registered = await app.callServerTool({
       name: 'commit_runtime_projection',
       arguments: {
@@ -3794,7 +3790,6 @@ async function applyEditorRevision(
       throw new Error('Runtime projection commit returned an invalid registration')
     }
     nextRun = { ...nextRun, projectionGeneration }
-    advanced = true
 
     workspace = snapshot.workspace
     renderFileTree()
@@ -3816,56 +3811,14 @@ async function applyEditorRevision(
     }
     return true
   } catch (error) {
-    const cleanupErrors: unknown[] = []
-    if (registrationStarted) {
-      if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run) && advanced) {
-        // The Server advances first. Dispose the revision the iframe acknowledged,
-        // then release the Server's next revision as a separate identity.
-        const cleanupRevisions = rolloverCleanupRevisions(
-          run.revision,
-          nextRun.revision,
-          runtimeAdvanced,
-        )
-        const iframeRun = { ...run, revision: cleanupRevisions.iframeRevision }
-        const serverRun = { ...run, revision: cleanupRevisions.serverRevision }
-        m7ActiveRun = iframeRun
-        try {
-          await disposeM7Runtime(iframeRun)
-        } catch (failure) {
-          cleanupErrors.push(failure)
-        }
-        m7DisposedRuns.add(run.runId)
-        if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run)) {
-          m7ActiveRun = undefined
-          m7EvidenceToken = undefined
-          runtimeFrame.hidden = true
-        }
-        try {
-          await releaseM7Run(serverRun)
-        } catch (failure) {
-          cleanupErrors.push(failure)
-        }
-      } else {
-        try {
-          await releaseM7Run(nextRun)
-        } catch (failure) {
-          cleanupErrors.push(failure)
-        }
-      }
+    if (runtimeAdvanced
+      && m7ActiveRun !== undefined
+      && sameM7Runtime(m7ActiveRun, run)) {
+      m7ActiveRun = nextRun
     }
-    if (token === m7StartToken
-      && projectId === run.projectId
-      && revision === nextRun.revision) {
-      setClean(run.revision)
-    }
-    if (projectId === run.projectId && revision === run.revision) {
-    }
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError(
-        [error, ...cleanupErrors],
-        'Runtime revision rollover cleanup failed',
-      )
-    }
+    recordRuntimeWarning([
+      `Runtime projection failed; reloading committed revision: ${runtimeMessage(error)}`,
+    ])
     return false
   }
 }
