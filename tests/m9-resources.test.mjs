@@ -88,6 +88,12 @@ test('M9 keeps large revision assets out of tool text and serves verified chunks
   }
   let client
   let limited
+  const ownerMeta = {
+    'ai.deepseek.dsh/session': {
+      sessionId: 'm9-resources',
+      connectionGeneration: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    },
+  }
   try {
     client = await connect()
     const opened = await client.callTool({
@@ -126,27 +132,43 @@ test('M9 keeps large revision assets out of tool text and serves verified chunks
     assert.match(bundle, /qualityTier:\s*"high"/)
     assert.doesNotMatch(bundle, /data:application\/octet-stream;base64/)
     const forgedRegistration = await client.callTool({
-      name: 'register_runtime_run',
+      name: 'prepare_runtime_run',
       arguments: {
         projectId: 'm9-assets',
         revision,
         buildId: '0'.repeat(64),
         runId: '11111111-2222-4333-8444-555555555555',
+        nonce: '22222222-3333-4444-8555-666666666666',
       },
+      _meta: ownerMeta,
     })
     assert.equal(forgedRegistration.isError, true)
     assert.match(forgedRegistration.content[0].text, /missing, stale, or not a ready build/)
-    const registered = await client.callTool({
-      name: 'register_runtime_run',
+    const prepared = await client.callTool({
+      name: 'prepare_runtime_run',
       arguments: {
         projectId: 'm9-assets',
         revision,
         buildId: built.structuredContent.buildId,
         runId: '11111111-2222-4333-8444-555555555555',
+        nonce: '22222222-3333-4444-8555-666666666666',
       },
+      _meta: ownerMeta,
+    })
+    assert.equal(prepared.isError, undefined)
+    const registered = await client.callTool({
+      name: 'commit_runtime_run',
+      arguments: {
+        projectId: 'm9-assets',
+        runtimeRef: prepared.structuredContent.runtimeRef,
+      },
+      _meta: ownerMeta,
     })
     assert.equal(registered.isError, undefined)
-    assert.equal(registered.structuredContent.buildId, built.structuredContent.buildId)
+    assert.equal(
+      registered.structuredContent.projection.loadedBuild.buildId,
+      built.structuredContent.buildId,
+    )
 
     const metadata = built.structuredContent.assets[0]
     const chunks = []
@@ -187,13 +209,15 @@ test('M9 keeps large revision assets out of tool text and serves verified chunks
     })
     assert.notEqual(advanced.structuredContent.revision, revision)
     const staleRegistration = await client.callTool({
-      name: 'register_runtime_run',
+      name: 'prepare_runtime_run',
       arguments: {
         projectId: 'm9-assets',
         revision: advanced.structuredContent.revision,
         buildId: built.structuredContent.buildId,
         runId: '22222222-3333-4444-8555-666666666666',
+        nonce: '33333333-4444-4555-8666-777777777777',
       },
+      _meta: ownerMeta,
     })
     assert.equal(staleRegistration.isError, true)
     assert.match(staleRegistration.content[0].text, /missing, stale, or not a ready build/)
