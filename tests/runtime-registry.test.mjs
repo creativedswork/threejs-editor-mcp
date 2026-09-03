@@ -350,6 +350,10 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
     assert.equal(committed.isError, undefined)
     assert.match(committed.structuredContent.runtimeRef, /^[0-9a-f-]{36}$/)
     assert.equal(committed.structuredContent.projectionGeneration, 0)
+    assert.notEqual(
+      committed.structuredContent.runtimeRef,
+      registered.structuredContent.runtimeRef,
+    )
     assert.deepEqual(
       (await client.callTool({
         name: 'inspect_project',
@@ -361,46 +365,11 @@ test('prepared Runtime runs expire and commit with active-run CAS', async () => 
         runtimeRef: committed.structuredContent.runtimeRef,
       },
     )
-
-    const changed = await client.callTool({
-      name: 'apply_project_files',
-      arguments: {
-        projectId: 'game',
-        baseRevision: revision,
-        changes: [{
-          type: 'write',
-          path: 'src/main.js',
-          text: 'export default { revision: 2 }\n',
-        }],
-      },
-    })
-    assert.equal(changed.isError, undefined)
-    const advanced = await client.callTool({
-      name: 'advance_runtime_projection',
-      arguments: {
-        projectId: candidate.projectId,
-        runId: candidate.runId,
-        nonce: candidate.nonce,
-        expectedRevision: revision,
-        expectedGeneration: 0,
-        revision: changed.structuredContent.revision,
-      },
-      _meta: ownerMeta,
-    })
-    assert.equal(advanced.isError, undefined)
-    assert.equal(advanced.structuredContent.revision, changed.structuredContent.revision)
-    assert.equal(advanced.structuredContent.projectionGeneration, 1)
-    assert.equal(advanced.structuredContent.buildId, active.buildId)
-    assert.equal(advanced.structuredContent.buildRevision, revision)
-    assert.notEqual(
-      advanced.structuredContent.runtimeRef,
-      committed.structuredContent.runtimeRef,
-    )
     const staleReference = await client.callTool({
       name: 'capture_runtime_frame',
       arguments: {
         projectId: active.projectId,
-        runtimeRef: committed.structuredContent.runtimeRef,
+        runtimeRef: registered.structuredContent.runtimeRef,
         target: 'validation',
       },
       _meta: ownerMeta,
@@ -523,6 +492,10 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
     })
     assert.equal(registered.isError, undefined)
     assert.equal(registered.structuredContent.projectionGeneration, 0)
+    const registeredRuntime = {
+      projectId: active.projectId,
+      runtimeRef: registered.structuredContent.runtimeRef,
+    }
     assert.equal((await reportScene(active, [0, 0, 0])).isError, undefined)
 
     const firstEdit = await applyPosition(active, [1, 0, 0])
@@ -531,7 +504,7 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
     assert.equal(firstPending.baseRevision, initialRevision)
     assert.equal(firstPending.targetRevision, firstEdit.structuredContent.revision)
     assert.equal(firstPending.expectedGeneration, 0)
-    assert.equal((await inspectRuntime(ownerMeta)).revision, initialRevision)
+    assert.deepEqual(await inspectRuntime(ownerMeta), registeredRuntime)
 
     const stale = await client.callTool({
       name: 'commit_runtime_projection',
@@ -546,7 +519,7 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
     })
     assert.equal(stale.isError, true)
     assert.match(stale.content[0].text, /RUNTIME_PROJECTION_STALE/)
-    assert.equal((await inspectRuntime(ownerMeta)).revision, initialRevision)
+    assert.deepEqual(await inspectRuntime(ownerMeta), registeredRuntime)
 
     const advanced = await client.callTool({
       name: 'commit_runtime_projection',
@@ -562,6 +535,14 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
     assert.equal(advanced.isError, undefined)
     assert.equal(advanced.structuredContent.projectionGeneration, 1)
     assert.equal(advanced.structuredContent.revision, firstPending.targetRevision)
+    assert.notEqual(
+      advanced.structuredContent.runtimeRef,
+      registered.structuredContent.runtimeRef,
+    )
+    const advancedRuntime = {
+      projectId: active.projectId,
+      runtimeRef: advanced.structuredContent.runtimeRef,
+    }
     const duplicate = await client.callTool({
       name: 'commit_runtime_projection',
       arguments: {
@@ -574,13 +555,13 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
       _meta: ownerMeta,
     })
     assert.equal(duplicate.isError, true)
-    assert.equal((await inspectRuntime(ownerMeta)).revision, firstPending.targetRevision)
+    assert.deepEqual(await inspectRuntime(ownerMeta), advancedRuntime)
 
     const projected = { ...active, revision: firstPending.targetRevision }
     assert.equal((await reportScene(projected, [1, 0, 0])).isError, undefined)
     const unacknowledgedEdit = await applyPosition(projected, [2, 0, 0])
     const unacknowledged = unacknowledgedEdit.structuredContent.pendingProjection
-    assert.equal((await inspectRuntime(ownerMeta)).revision, projected.revision)
+    assert.deepEqual(await inspectRuntime(ownerMeta), advancedRuntime)
     const unacknowledgedBuild = await client.callTool({
       name: 'build_project',
       arguments: { projectId: 'game', revision: unacknowledged.targetRevision },
@@ -606,7 +587,10 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
       _meta: ownerMeta,
     })
     assert.equal(recovered.isError, undefined)
-    assert.equal((await inspectRuntime(ownerMeta)).revision, unacknowledged.targetRevision)
+    assert.deepEqual(await inspectRuntime(ownerMeta), {
+      projectId: recoveredBeforeCommit.projectId,
+      runtimeRef: recovered.structuredContent.runtimeRef,
+    })
 
     assert.equal(
       (await reportScene(recoveredBeforeCommit, [2, 0, 0])).isError,
@@ -626,6 +610,10 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
       _meta: ownerMeta,
     })
     assert.equal(committedWithoutObservedResponse.isError, undefined)
+    assert.deepEqual(await inspectRuntime(ownerMeta), {
+      projectId: recoveredBeforeCommit.projectId,
+      runtimeRef: committedWithoutObservedResponse.structuredContent.runtimeRef,
+    })
     const ambiguousBuild = await client.callTool({
       name: 'build_project',
       arguments: { projectId: 'game', revision: ambiguous.targetRevision },
@@ -651,7 +639,10 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
       _meta: ownerMeta,
     })
     assert.equal(recoveredFromAmbiguousCommit.isError, undefined)
-    assert.equal((await inspectRuntime(ownerMeta)).revision, ambiguous.targetRevision)
+    assert.deepEqual(await inspectRuntime(ownerMeta), {
+      projectId: recoveredAfterCommit.projectId,
+      runtimeRef: recoveredFromAmbiguousCommit.structuredContent.runtimeRef,
+    })
 
     const reconnected = {
       ...recoveredAfterCommit,
@@ -669,7 +660,10 @@ test('Runtime projection advances only after acknowledgement and recovers by rep
       _meta: reconnectedOwnerMeta,
     })
     assert.equal(reconnectedCommit.isError, undefined)
-    assert.equal((await inspectRuntime(reconnectedOwnerMeta)).revision, ambiguous.targetRevision)
+    assert.deepEqual(await inspectRuntime(reconnectedOwnerMeta), {
+      projectId: reconnected.projectId,
+      runtimeRef: reconnectedCommit.structuredContent.runtimeRef,
+    })
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
