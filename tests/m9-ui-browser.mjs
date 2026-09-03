@@ -432,11 +432,14 @@ try {
       && value.m7?.metrics?.buildId === value.m7?.build?.buildId
   }, undefined, { timeout: 120_000 })
   const running = await app.evaluate(() => globalThis.__THREE_M7__.metrics())
+  const inspected = await callAppTool('inspect_project', {
+    projectId: running.projectId,
+  })
+  assert.equal(inspected.isError, undefined, JSON.stringify(inspected))
+  assert.equal(typeof inspected.structuredContent.runtime?.runtimeRef, 'string')
   const evidence = await callAppTool('capture_runtime_frame', {
     projectId: running.projectId,
-    revision: running.revision,
-    runId: running.m7.runId,
-    nonce: running.m7.nonce,
+    runtimeRef: inspected.structuredContent.runtime.runtimeRef,
     target: 'validation',
     deterministic: true,
     format: 'jpeg',
@@ -444,8 +447,14 @@ try {
     maxHeight: 512,
   })
   assert.equal(evidence.isError, undefined, JSON.stringify(evidence))
-  assert.equal(evidence.structuredContent.runtime.revision, running.revision)
-  assert.equal(evidence.structuredContent.runtime.buildId, running.m7.build.buildId)
+  const evidenceRuntime = evidence.structuredContent.runtime
+  const afterEvidence = await app.evaluate(() => globalThis.__THREE_M7__.metrics())
+  assert.equal(evidenceRuntime.execution.projectId, running.projectId)
+  assert.equal(evidenceRuntime.execution.runId, afterEvidence.m7.validationRunId)
+  assert.equal(evidenceRuntime.execution.nonce, afterEvidence.m7.validationNonce)
+  assert.equal(evidenceRuntime.projection.workspaceRevision, running.revision)
+  assert.equal(evidenceRuntime.projection.loadedBuild.sourceRevision, running.revision)
+  assert.equal(evidenceRuntime.projection.loadedBuild.buildId, running.m7.build.buildId)
   assert.equal(evidence.structuredContent.deterministic, true)
 
   stage('inducing and recovering from WebGL context loss')
