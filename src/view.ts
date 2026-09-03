@@ -218,6 +218,8 @@ interface RuntimeHarnessCommand {
   kind: 'capture-frame' | 'read-logs' | 'simulate-actions'
   target: 'active' | 'validation'
   runtime: M7Run
+  projectionGeneration: number
+  evidenceToken: string
   payload: Record<string, unknown>
   timeoutMs: number
   expiresAt?: string
@@ -2821,21 +2823,22 @@ async function stopValidationRuntime(): Promise<void> {
   await disposed
 }
 
-async function ensureValidationRuntime(anchor: M7Run): Promise<M7Run> {
-  const cached = runtimeCoordinator.snapshot().validation
-  if (cached !== undefined && sameM7Run(cached.run, anchor)) {
-    return cached.run
-  }
+async function ensureValidationRuntime(
+  anchor: M7Run,
+  evidenceToken: string,
+): Promise<{ run: M7Run; buildId: string }> {
   await stopValidationRuntime()
   const artifact = await runtimeBundleFor(anchor)
-  const run: M7Run = { ...anchor }
   const committed = runtimeCoordinator.snapshot().committed
-  const active = committed?.runtime
-  const evidenceToken = active !== undefined
-    && sameM7Run(active.run, anchor)
-    ? active.evidenceToken
-    : crypto.randomUUID()
-  if (evidenceToken === undefined) throw new Error('Runtime evidence token is unavailable')
+  if (committed?.runtime === undefined || !sameM7Run(committed.runtime.run, anchor)) {
+    throw new Error('Validation Runtime anchor became stale')
+  }
+  const run: M7Run = {
+    projectId: anchor.projectId,
+    revision: anchor.revision,
+    runId: crypto.randomUUID(),
+    nonce: crypto.randomUUID(),
+  }
   const validation: M7ValidationRuntime = {
     run,
     frame: validationRuntimeFrame,
@@ -2869,7 +2872,7 @@ async function ensureValidationRuntime(anchor: M7Run): Promise<M7Run> {
         ? event.data.message
         : 'Validation Runtime failed')
     }
-    return run
+    return { run, buildId: artifact.buildId }
   } catch (error) {
     if (runtimeCoordinator.snapshot().validation === validation) {
       runtimeCoordinator.setValidation(committed, undefined)
@@ -2882,9 +2885,7 @@ async function reportRuntimeHarnessResult(
   command: RuntimeHarnessCommand,
   result: Record<string, unknown>,
 ): Promise<void> {
-  const evidenceToken = activeRuntime()?.evidenceToken
-  if (evidenceToken === undefined) throw new Error('Runtime evidence token is unavailable')
-  if (result.evidenceToken !== evidenceToken) {
+  if (result.evidenceToken !== command.evidenceToken) {
     throw new Error('Runtime evidence provenance is invalid')
   }
   const reported = await app.callServerTool({
@@ -2903,19 +2904,35 @@ async function reportRuntimeHarnessResult(
 
 async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Promise<void> {
   let targetRun: M7Run
+  let targetBuildId: string
   try {
     const active = activeRuntime()
-    if (active === undefined || !sameM7Run(active.run, command.runtime)) {
+    if (active === undefined
+      || !sameM7Run(active.run, command.runtime)
+      || active.run.projectionGeneration !== command.projectionGeneration) {
       throw new Error('Runtime Harness command targets a stale active run')
     }
-    targetRun = command.target === 'validation'
-      ? await ensureValidationRuntime(command.runtime)
-      : command.runtime
+    if (command.target === 'validation') {
+      const validation = await ensureValidationRuntime(
+        command.runtime,
+        command.evidenceToken,
+      )
+      targetRun = validation.run
+      targetBuildId = validation.buildId
+    } else {
+      targetRun = command.runtime
+      targetBuildId = active.artifact.buildId
+    }
     const startedResult = await app.callServerTool({
       name: 'start_runtime_command',
       arguments: {
         ...command.runtime,
         commandId: command.commandId,
+        targetRuntime: {
+          ...targetRun,
+          buildId: targetBuildId,
+          target: command.target,
+        },
       },
     }, {
       timeout: M7_LIFECYCLE_TIMEOUT,
@@ -3000,6 +3017,7 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
       kind: command.kind,
       target: command.target,
       expiresAt: command.expiresAt,
+      evidenceToken: command.evidenceToken,
       ...command.payload,
     }, frameElement)
     event = await response
@@ -3016,7 +3034,7 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
       kind: 'runtime-harness-error',
       runtime: { ...targetRun, target: command.target },
       evidenceId: crypto.randomUUID(),
-      evidenceToken: activeRuntime()?.evidenceToken,
+      evidenceToken: command.evidenceToken,
       status: 'failed',
       message: typeof event.data?.message === 'string'
         ? event.data.message
@@ -3053,6 +3071,8 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
       || (command.target !== 'active' && command.target !== 'validation')
       || runtime === undefined
       || payload === undefined
+      || typeof command.projectionGeneration !== 'number'
+      || typeof command.evidenceToken !== 'string'
       || typeof command.timeoutMs !== 'number') {
       throw new Error('Server returned an invalid Runtime Harness command')
     }
@@ -3061,6 +3081,8 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
       kind: command.kind,
       target: command.target,
       runtime: runtime as unknown as M7Run,
+      projectionGeneration: command.projectionGeneration,
+      evidenceToken: command.evidenceToken,
       payload,
       timeoutMs: command.timeoutMs,
     }

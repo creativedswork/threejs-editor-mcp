@@ -576,15 +576,6 @@ function runtimeOwner(
   throw new Error('Harness Session and MCP connection generation are required')
 }
 
-function requireActiveIntent(
-  target: 'active' | 'validation',
-  activeIntent: 'user-requested' | undefined,
-): void {
-  if (target === 'active' && activeIntent !== 'user-requested') {
-    throw new Error('Active Runtime access requires explicit user-requested intent')
-  }
-}
-
 function decodeBase64(value: string): Buffer {
   const bytes = Buffer.from(value, 'base64')
   if (bytes.toString('base64') !== value) throw new Error('asset data is not canonical base64')
@@ -1906,6 +1897,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         kind: z.enum(['capture-frame', 'read-logs', 'simulate-actions']),
         target: runtimeTargetSchema,
         runtime: runtimeIdentitySchema,
+        projectionGeneration: z.number().int().nonnegative(),
+        evidenceToken: nonceSchema,
         payload: z.record(z.string(), z.unknown()),
         timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000),
         expiresAt: z.string().datetime().optional(),
@@ -1930,17 +1923,19 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       ...runtimeIdentitySchema.shape,
       commandId: z.string().uuid(),
+      targetRuntime: runtimeEvidenceIdentitySchema.optional(),
     },
     outputSchema: z.object({
       commandId: z.string().uuid(),
       expiresAt: z.string().datetime(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ commandId, ...identity }, { _meta }) => {
+  }, async ({ commandId, targetRuntime, ...identity }, { _meta }) => {
     const expiresAt = await workspaces.startRuntimeCommand(
       identity,
       runtimeOwner(_meta)!,
       commandId,
+      targetRuntime,
     )
     return textResult(`Started Runtime Harness command ${commandId}.`, {
       commandId,
@@ -2028,7 +2023,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     timeoutMs,
     ...address
   }, { _meta, signal }) => {
-    requireActiveIntent(target, activeIntent)
+    void activeIntent
     const evidence = runtimeEvidenceSchema.options[0].parse(
       await workspaces.requestRuntimeCommand(
         address,
@@ -2076,7 +2071,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     timeoutMs,
     ...address
   }, { _meta, signal }) => {
-    requireActiveIntent(target, activeIntent)
+    void activeIntent
     const evidence = runtimeEvidenceSchema.options[1].parse(
       await workspaces.requestRuntimeCommand(
         address,
@@ -2108,7 +2103,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     outputSchema: runtimeEvidenceSchema.options[2].omit({ evidenceToken: true }),
     _meta: { ui: { visibility: ['model', 'app'] } },
   }, async ({ target, activeIntent, actions, timeoutMs, ...address }, { _meta, signal }) => {
-    requireActiveIntent(target, activeIntent)
+    void activeIntent
     const evidence = runtimeEvidenceSchema.options[2].parse(
       await workspaces.requestRuntimeCommand(
         address,

@@ -362,9 +362,16 @@ export interface RuntimeHarnessCommand {
   kind: 'capture-frame' | 'read-logs' | 'simulate-actions'
   target: 'active' | 'validation'
   runtime: RuntimeIdentity
+  projectionGeneration: number
+  evidenceToken: string
   payload: Record<string, unknown>
   timeoutMs: number
   expiresAt?: string
+}
+
+export interface RuntimeEvidenceTarget extends RuntimeIdentity {
+  buildId: string
+  target: RuntimeHarnessCommand['target']
 }
 
 const RUNTIME_EVIDENCE_KIND = {
@@ -423,6 +430,8 @@ interface PendingRuntimeCommand {
   command: RuntimeHarnessCommand
   owner: RuntimeOwner
   phase: 'preparing' | 'executing'
+  targetRuntime?: RuntimeEvidenceTarget
+  legacyTarget?: boolean
   resolve(value: unknown): void
   reject(error: Error): void
   settlementDeadline?: number
@@ -605,6 +614,14 @@ function manifestRevision(manifest: WorkspaceManifest): string {
   return digest(canonicalBytes(manifest))
 }
 
+function sameRuntimeEvidenceTarget(
+  left: RuntimeEvidenceTarget,
+  right: RuntimeEvidenceTarget,
+): boolean {
+  return sameRuntimeIdentity(left, right)
+    && left.buildId === right.buildId
+    && left.target === right.target
+}
 
 function defaultWorkspaceConfig(
   kind: WorkspaceKind,
@@ -1849,7 +1866,7 @@ export class WorkspaceStore {
           'Use runtimeRef from the latest Runtime context supplied by the Editor',
         )
       }
-      await this.assertRuntimeIdentity(runtime, owner)
+      const active = await this.assertRuntimeIdentity(runtime, owner)
       const key = this.runtimeKey(runtime.projectId, owner)
       if (this.runtimeCommands.has(key)) {
         throw new Error('Runtime control lease is busy')
@@ -1860,7 +1877,10 @@ export class WorkspaceStore {
         if (grant === undefined
           || grant.expiresAt <= Date.now()
           || !sameRuntimeIdentity(grant.runtime, runtime)) {
-          throw new Error('Active Runtime access requires a current user grant from the Editor')
+          throw new RuntimeProtocolError(
+            'ACTIVE_CONFIRMATION_REQUIRED',
+            'Ask the user to authorize one live Runtime check in the Editor, then retry once',
+          )
         }
       }
       const command: RuntimeHarnessCommand = {
@@ -1868,6 +1888,8 @@ export class WorkspaceStore {
         kind,
         target,
         runtime,
+        projectionGeneration: active.projectionGeneration,
+        evidenceToken: randomUUID(),
         payload,
         timeoutMs,
       }
@@ -1929,10 +1951,11 @@ export class WorkspaceStore {
     runtime: RuntimeIdentity,
     owner: RuntimeOwner,
     commandId: string,
+    targetRuntime?: RuntimeEvidenceTarget,
   ): Promise<string> {
     validateProjectId(runtime.projectId)
     return this.withLock(runtime.projectId, async () => {
-      await this.assertRuntimeIdentity(runtime, owner)
+      const active = await this.assertRuntimeIdentity(runtime, owner)
       const key = this.runtimeKey(runtime.projectId, owner)
       const pending = this.runtimeCommands.get(key)
       if (pending === undefined
@@ -1942,11 +1965,62 @@ export class WorkspaceStore {
         throw new Error('Runtime Harness command is stale or foreign')
       }
       if (pending.phase === 'executing') return pending.command.expiresAt!
+      if (active.buildId === undefined) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_COMMAND_STATE',
+          'Active Runtime has no loaded build provenance',
+        )
+      }
+      const target = targetRuntime ?? {
+        ...runtime,
+        buildId: active.buildId,
+        target: pending.command.target,
+      }
+      if (targetRuntime === undefined && active.evidenceToken !== undefined) {
+        pending.command.evidenceToken = active.evidenceToken
+      }
+      if (target.target !== pending.command.target
+        || target.projectId !== runtime.projectId
+        || target.revision !== runtime.revision) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_COMMAND_STATE',
+          'Runtime Harness target does not match the pending command',
+        )
+      }
+      if (target.target === 'active') {
+        if (!sameRuntimeIdentity(target, runtime) || target.buildId !== active.buildId) {
+          throw new RuntimeProtocolError(
+            'RUNTIME_COMMAND_STATE',
+            'Active Runtime target changed before command execution',
+          )
+        }
+      } else {
+        if (targetRuntime !== undefined && sameRuntimeIdentity(target, runtime)) {
+          throw new RuntimeProtocolError(
+            'RUNTIME_COMMAND_STATE',
+            'Validation Runtime must use an independent execution identity',
+          )
+        }
+        const workspace = this.workspaces.get(runtime.projectId)
+        const build = workspace === undefined
+          ? undefined
+          : await this.readStoredBuild(workspace.path, target.buildId)
+        if (build?.status !== 'ready'
+          || build.projectId !== runtime.projectId
+          || build.revision !== runtime.revision) {
+          throw new RuntimeProtocolError(
+            'RUNTIME_COMMAND_STATE',
+            'Validation Runtime target does not use a ready build for this projection',
+          )
+        }
+      }
       clearTimeout(pending.timer)
       const expiresAt = new Date(Date.now() + pending.command.timeoutMs).toISOString()
       const settlementDeadline = runtimeCommandSettlementDeadline(expiresAt)
       pending.command.expiresAt = expiresAt
       pending.phase = 'executing'
+      pending.targetRuntime = target
+      pending.legacyTarget = targetRuntime === undefined
       pending.settlementDeadline = settlementDeadline
       pending.timer = setTimeout(() => {
         if (this.runtimeCommands.get(key) !== pending) return
@@ -1987,7 +2061,7 @@ export class WorkspaceStore {
     await this.withLock(runtime.projectId, async () => {
       const workspace = this.workspaces.get(runtime.projectId)
       if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
-      const active = await this.assertRuntimeIdentity(runtime, owner)
+      await this.assertRuntimeIdentity(runtime, owner)
       const key = this.runtimeKey(runtime.projectId, owner)
       const pending = this.runtimeCommands.get(key)
       if (pending === undefined
@@ -1998,7 +2072,8 @@ export class WorkspaceStore {
       }
       if (pending.phase !== 'executing'
         || pending.command.expiresAt === undefined
-        || pending.settlementDeadline === undefined) {
+        || pending.settlementDeadline === undefined
+        || pending.targetRuntime === undefined) {
         throw new Error('Runtime Harness command has not started')
       }
       const expiresAt = pending.command.expiresAt
@@ -2008,7 +2083,7 @@ export class WorkspaceStore {
         && 'runtime' in result
         && result.runtime !== null
         && typeof result.runtime === 'object'
-        ? result.runtime as Partial<RuntimeIdentity> & { buildId?: string; target?: string }
+        ? result.runtime as Partial<RuntimeEvidenceTarget>
         : undefined
       const evidenceToken = result !== null
         && typeof result === 'object'
@@ -2020,16 +2095,36 @@ export class WorkspaceStore {
         && 'kind' in result
         ? result.kind
         : undefined
-      if (evidenceToken !== active.evidenceToken
+      const legacyValidationBuild = pending.legacyTarget === true
+        && pending.command.target === 'validation'
+        && typeof evidenceRuntime?.buildId === 'string'
+        ? await this.readStoredBuild(workspace.path, evidenceRuntime.buildId)
+        : undefined
+      const targetMatches = pending.legacyTarget === true
+        && pending.command.target === 'validation'
+        ? evidenceRuntime !== undefined
+          && sameRuntimeIdentity(
+            evidenceRuntime as RuntimeIdentity,
+            pending.targetRuntime,
+          )
+          && evidenceRuntime?.target === 'validation'
+          && legacyValidationBuild?.status === 'ready'
+          && legacyValidationBuild.projectId === runtime.projectId
+          && legacyValidationBuild.revision === runtime.revision
+        : evidenceRuntime !== undefined
+          && sameRuntimeEvidenceTarget(
+            evidenceRuntime as RuntimeEvidenceTarget,
+            pending.targetRuntime,
+          )
+      if (evidenceToken !== pending.command.evidenceToken
         || evidenceRuntime === undefined
         || typeof evidenceRuntime.projectId !== 'string'
         || typeof evidenceRuntime.revision !== 'string'
         || typeof evidenceRuntime.runId !== 'string'
         || typeof evidenceRuntime.nonce !== 'string'
         || typeof evidenceRuntime.buildId !== 'string'
-        || !sameRuntimeIdentity(evidenceRuntime as RuntimeIdentity, pending.command.runtime)
-        || evidenceRuntime.buildId !== active.buildId
-        || evidenceRuntime.target !== pending.command.target) {
+        || (evidenceRuntime.target !== 'active' && evidenceRuntime.target !== 'validation')
+        || !targetMatches) {
         throw new Error('Runtime Harness evidence identity is stale or foreign')
       }
       if (evidenceKind !== RUNTIME_EVIDENCE_KIND[pending.command.kind]

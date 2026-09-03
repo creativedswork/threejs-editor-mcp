@@ -1,6 +1,6 @@
 # Runtime Harness Architecture R4 Status
 
-Updated: 2026-09-04T03:15:34+0800
+Updated: 2026-09-04T03:30:00+0800
 Milestone: R4 Simplify Harness authority
 State: `IMPLEMENTING_SLICES`
 Gate: `AWAITING_ACCEPTANCE`
@@ -24,8 +24,8 @@ fields.
 
 | Slice | State | Commit | Owned scope |
 |---|---|---|---|
-| 1. Opaque Runtime reference | `IMPLEMENTED` | pending | Owner-bound `runtimeRef` issue/resolve/rotation, opaque model context, and preferred ordinary tool schemas; legacy identity remains internal compatibility only. |
-| 2. Validation and active authority | `PENDING` | pending | Independent validation execution, command-bound evidence token, typed active confirmation, and one-shot Editor grant consumption. |
+| 1. Opaque Runtime reference | `COMMITTED` | `60f80f9` | Owner-bound `runtimeRef` issue/resolve/rotation, opaque model context, and preferred ordinary tool schemas; legacy identity remains internal compatibility only. |
+| 2. Validation and active authority | `IMPLEMENTED` | pending | Independent validation execution, command-bound evidence token, typed active confirmation, and one-shot Editor grant consumption. |
 | 3. Typed settlement and invariant matrix | `PENDING` | pending | One preferred typed idempotent settlement operation, legacy report/fail adapters, and focused broker/registry/protocol invariants. |
 
 ## Recovered Baseline
@@ -58,6 +58,10 @@ fields.
 - Relevant tracked files already contain mixed R4, M9, transport, lifecycle,
   and debug changes. Existing untracked debug notes, collectors, reports,
   fixtures, and Harness browser/page tests are preserved.
+- `tests/fixtures/m6/workspace/world-model.html` and `world-model.png` appeared
+  after the R4 baseline at 03:28. R4 commands wrote only `/tmp` bundle
+  artifacts, no source or test references identify their producer, and their
+  provenance is uncertain. They remain untracked, unstaged, and excluded.
 
 ## Explicit Exclusions
 
@@ -85,33 +89,39 @@ fields.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-04T03:15:34+0800
+- Updated at: 2026-09-04T03:30:00+0800
 - Milestone: R4 Simplify Harness authority
-- Slice: 1. Opaque Runtime reference
+- Slice: 2. Validation and active authority
 - Phase: commit
 - Slice state: `IMPLEMENTED`
-- Completed facts: the accepted R3 baseline, empty index, canonical plan,
-  audit findings 2/5/6, R4 plan, accepted R2/R3 STATUS files, candidate dirty
-  hunks, and relevant hashes were read from disk. Candidate R4 work exists in
-  `src/workspaces.ts`, `src/server.ts`, `src/view.ts`,
-  `src/m7-runtime.ts`, and `tests/runtime-registry.test.mjs`.
-- Repository state: `main` at `f2570fc`; the index contains only Slice 1
-  hunks in `src/workspaces.ts`, `src/server.ts`, and `src/view.ts`; mixed
-  dirty and untracked paths listed in Recovered Baseline remain present.
-- Intended changes: reconcile only owner-bound `runtimeRef` issue, rotation,
-  resolution, opaque model publication, and preferred ordinary Harness
-  schemas in `src/workspaces.ts`, `src/server.ts`, and `src/view.ts`.
+- Completed facts: Slice 1 committed as `60f80f9`; model-facing Harness tools
+  and Editor context use owner-bound opaque `runtimeRef`, refs rotate on
+  registration and projection changes, and flat identity remains an internal
+  compatibility adapter.
+- Repository state: `main` at `60f80f9`; the index contains only Slice 2
+  hunks in `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and
+  `src/m7-runtime.ts`; mixed dirty and untracked paths remain present.
+- Intended changes: reconcile only independent validation execution identity,
+  per-command evidence tokens, command target binding, typed
+  `ACTIVE_CONFIRMATION_REQUIRED`, and consumption of the existing Editor-issued
+  one-shot active grant.
 - Explicit exclusions: all items in Explicit Exclusions; especially no M9,
   debug-probe, transport, browser, R5 cleanup, process, port, or remote work.
-- Verification: baseline Git/status/hash checks PASS at `f2570fc`;
-  `git diff --cached --check` PASS; syntax-only Bun bundles of the exact
-  cached `src/workspaces.ts`, `src/server.ts`, and `src/view.ts` blobs PASS.
-  Focused Bun bundles of the mixed working-tree `src/server.ts` and
-  `src/view.ts` also PASS. Post-edit SHA-256 values remained stable after more
-  than five seconds: `src/server.ts`
+- Verification: Slice 1 cached diff and exact-blob syntax bundles PASS.
+  Slice 2 `git diff --cached --check` PASS; syntax-only Bun bundles of the
+  exact cached `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and
+  `src/m7-runtime.ts` blobs PASS. Slice 2 pre-edit SHA-256 values:
+  `src/workspaces.ts`
+  `0f06e6b411ec736c6b91315153c1107ecb8ba2cd2d23c8a8ad4ebb9bb66f35a8`;
+  `src/server.ts`
   `eab35c998f005d7e0346676a23a1e6605f50d362b7e06060512b0487320db4cc`;
   `src/view.ts`
-  `7b907df09fe28bc3f2fe54424578b67bd9661fcb0b530a739479d2a28494f69a`.
+  `7b907df09fe28bc3f2fe54424578b67bd9661fcb0b530a739479d2a28494f69a`;
+  `src/m7-runtime.ts`
+  `15648962f2503ec48bfad3992fa401ffb968222dbc10c6f377c3d9f26793429f`.
+  Post-edit values remained stable after more than five seconds; only
+  `src/workspaces.ts` changed, to
+  `2f10819ed2d0f92de0bdf5cd97c85527b5affcfcb145c23368f9429cb09ad8b4`.
 - Evidence paths: this STATUS, the canonical plan/audit/R2/R3 STATUS files,
   and preserved debug/report artifacts already in the working tree.
 - Run identity: N/A; R4 uses pure broker/registry/protocol checks and no live
@@ -125,7 +135,7 @@ fields.
 - Blockers and risks: mixed files require exact hunk staging; browser and full
   repository validation remain deferred to Release Hardening.
 - Exact next action: stage this STATUS, verify the final cached diff, and
-  create the local Slice 1 atomic commit.
+  create the local Slice 2 atomic commit.
 - Stop condition: all three Slices committed, concentrated isolated-HEAD R4
   self-test recorded, docs-only candidate committed, then stop at
   `MILESTONE_CANDIDATE` / `AWAITING_ACCEPTANCE`.

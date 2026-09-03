@@ -601,7 +601,7 @@ export function m7BootstrapHtml(): string {
           kind: 'capture-frame',
           runtime: evidenceRuntime(current, request.target),
           evidenceId: crypto.randomUUID(),
-          evidenceToken: current.evidenceToken,
+          evidenceToken: request.evidenceToken,
           digest: await sha256(bytes),
           mimeType,
           data,
@@ -636,7 +636,7 @@ export function m7BootstrapHtml(): string {
         kind: 'runtime-logs',
         runtime: evidenceRuntime(current, request.target),
         evidenceId: crypto.randomUUID(),
-        evidenceToken: current.evidenceToken,
+        evidenceToken: request.evidenceToken,
         entries: selected,
         nextCursor: matching.length > limit
           ? (selected.at(-1)?.cursor ?? cursor) + 1
@@ -805,7 +805,7 @@ export function m7BootstrapHtml(): string {
             kind: 'action-trace',
             runtime: evidenceRuntime(current, request.target),
             evidenceId: crypto.randomUUID(),
-            evidenceToken: current.evidenceToken,
+            evidenceToken: request.evidenceToken,
             status: current.stopped || cancelledHarnessCommands.has(request.commandId)
               ? 'cancelled'
               : 'failed',
@@ -819,7 +819,7 @@ export function m7BootstrapHtml(): string {
         kind: 'action-trace',
         runtime: evidenceRuntime(current, request.target),
         evidenceId: crypto.randomUUID(),
-        evidenceToken: current.evidenceToken,
+        evidenceToken: request.evidenceToken,
         status: 'completed',
         startFrame,
         endFrame: current.frame,
