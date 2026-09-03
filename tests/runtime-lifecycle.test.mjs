@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  RuntimeCoordinator,
   RuntimeTransitionController,
   RuntimeTransitionError,
 } from '../src/runtime-lifecycle.ts'
@@ -116,4 +117,87 @@ test('rejects interactive stable phases without a committed Runtime', async () =
       && /requires a committed Runtime/.test(error.message),
   )
   assert.equal(controller.snapshot().phase, 'recoverable-failure')
+})
+
+test('promotes one candidate as the complete committed aggregate', async () => {
+  const coordinator = new RuntimeCoordinator()
+  await bootstrap(coordinator)
+  const previous = coordinator.snapshot()
+  const candidate = { runId: 'candidate-1' }
+  const validation = { runId: 'validation-1' }
+  const replacement = { ...runtime, runId: 'run-2' }
+
+  await coordinator.enqueue('reload', 1_000, async context => {
+    coordinator.setValidation(context.committed, validation)
+    coordinator.setCandidate(context.epoch, candidate)
+    assert.equal(coordinator.snapshot().candidate, candidate)
+    assert.equal(coordinator.snapshot().validation, validation)
+
+    coordinator.commitCandidate(context.epoch, candidate, replacement)
+    assert.equal(coordinator.snapshot().committed, replacement)
+    assert.equal(coordinator.snapshot().candidate, undefined)
+    assert.equal(coordinator.snapshot().validation, undefined)
+    return { phase: 'edit-ready', committed: replacement, value: undefined }
+  })
+
+  assert.equal(Object.isFrozen(previous), true)
+  assert.equal(previous.committed, runtime)
+  assert.deepEqual(coordinator.snapshot(), {
+    phase: 'edit-ready',
+    epoch: 2,
+    committed: replacement,
+  })
+})
+
+test('rejects stale aggregate writes and preserves newer resources', async () => {
+  const coordinator = new RuntimeCoordinator()
+  await bootstrap(coordinator)
+  const previous = coordinator.snapshot().committed
+  const validation = { runId: 'validation-1' }
+  coordinator.setValidation(previous, validation)
+
+  let release
+  const blocked = new Promise(resolve => {
+    release = resolve
+  })
+  const transition = coordinator.enqueue('reload', 1_000, async context => {
+    const candidate = { runId: 'candidate-1' }
+    coordinator.setCandidate(context.epoch, candidate)
+    await blocked
+    coordinator.discardCandidate(candidate)
+    return { phase: 'edit-ready', value: undefined }
+  })
+  await Promise.resolve()
+  const staleEpoch = coordinator.snapshot().epoch
+  coordinator.cancelActive()
+  release()
+
+  await assert.rejects(transition, /Rejected stale Runtime reload epoch/)
+  assert.throws(
+    () => coordinator.setCandidate(staleEpoch, { runId: 'stale-candidate' }),
+    /Rejected stale Runtime epoch/,
+  )
+  assert.throws(
+    () => coordinator.setValidation({ ...runtime }, validation),
+    /stale Runtime/,
+  )
+  assert.equal(coordinator.snapshot().committed, previous)
+  assert.equal(coordinator.snapshot().candidate, undefined)
+  assert.equal(coordinator.snapshot().validation, validation)
+})
+
+test('releases only the current committed aggregate outside transitions', async () => {
+  const coordinator = new RuntimeCoordinator()
+  await bootstrap(coordinator)
+  const committed = coordinator.snapshot().committed
+
+  assert.throws(
+    () => coordinator.releaseCommitted({ ...runtime }),
+    /stale committed Runtime/,
+  )
+  coordinator.releaseCommitted(committed)
+
+  assert.equal(coordinator.snapshot().committed, undefined)
+  assert.equal(coordinator.snapshot().phase, 'disposed')
+  assert.equal(coordinator.snapshot().epoch, 2)
 })

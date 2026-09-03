@@ -116,7 +116,11 @@ export class RuntimeCoordinator<
     if (this.#snapshot.candidate !== candidate) {
       throw new RuntimeTransitionError('Cannot commit a stale Runtime candidate')
     }
-    this.#replaceResources({ committed, candidate: undefined })
+    this.#replaceResources({
+      committed,
+      candidate: undefined,
+      validation: undefined,
+    })
   }
 
   replaceCommitted(epoch: number, expected: Runtime, committed?: Runtime): void {
@@ -134,7 +138,13 @@ export class RuntimeCoordinator<
     if (this.#snapshot.committed !== expected) {
       throw new RuntimeTransitionError('Cannot release a stale committed Runtime')
     }
-    this.#replaceResources({ committed: undefined })
+    this.#setSnapshot({
+      phase: 'disposed',
+      epoch: this.#snapshot.epoch + 1,
+      ...this.#snapshot.validation === undefined
+        ? {}
+        : { validation: this.#snapshot.validation },
+    })
   }
 
   setValidation(expected: Runtime | undefined, validation?: Validation): void {
