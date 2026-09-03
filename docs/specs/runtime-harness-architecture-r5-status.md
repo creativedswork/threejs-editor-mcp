@@ -171,5 +171,3 @@ accepted as idempotent.
   Hardening, and all remote operations require a later explicit action.
 - Stop condition: R5 acceptance closeout committed locally; no next milestone
   or hardening work starts in this run.
-- Stop condition: R5 candidate report at `AWAITING_ACCEPTANCE`, or an ownership
-  ambiguity that prevents exact-hunk staging.
