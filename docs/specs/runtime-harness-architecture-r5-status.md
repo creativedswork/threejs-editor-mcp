@@ -1,9 +1,9 @@
 # Runtime Harness Architecture R5 Status
 
-Updated: 2026-09-04T05:50:37+0800
+Updated: 2026-09-04T05:52:21+0800
 Milestone: R5 Remove legacy paths and harden
-State: `IMPLEMENTING_SLICES`
-Gate: `AUTHORIZED`
+State: `MILESTONE_CANDIDATE`
+Gate: `AWAITING_ACCEPTANCE`
 Next phase: Release Hardening approval
 Base: `c9c4933`
 Branch: `main`
@@ -34,7 +34,7 @@ broker state machine, and no active legacy lifecycle path.
 |---|---|---|---|
 | 1. Server/registry legacy removal | `COMMITTED_LOCAL` | `b689567` | `src/runtime-protocol.ts`, exact R5 hunks in `src/server.ts`, `src/workspaces.ts`, and required client contract hunks in `src/view.ts`; this STATUS |
 | 2. Client/Runtime probe removal | `COMMITTED_LOCAL` | `cbb694f` | Removed temporary production collectors and probe tools from `src/view.ts`, `src/m7-runtime.ts`, `src/server.ts`, and `src/workspaces.ts`; preserved all historical evidence artifacts. |
-| 3. Behavioral invariant cleanup | `IMPLEMENTED` | pending | Replaced legacy adapter and flat-RPC assertions with normalized protocol, registry, broker, and tool-inventory behavior in focused tests. |
+| 3. Behavioral invariant cleanup | `COMMITTED_LOCAL` | `60b88f7` | Replaced legacy adapter and flat-RPC assertions with normalized protocol, registry, broker, and tool-inventory behavior in focused tests. |
 
 ## Recovered Baseline
 
@@ -87,28 +87,65 @@ broker state machine, and no active legacy lifecycle path.
 - Run five browser lifecycle cycles and the 50-cycle Snow soak.
 - Revalidate M9 and all accepted R milestones together after R5 acceptance.
 
+## Milestone Self-Test
+
+- Source under test: committed implementation HEAD `60b88f7`, exported to an
+  isolated tracked-file snapshot so excluded worktree changes could not affect
+  the result.
+- Focused server build:
+  `pnpm exec tsdown --config <isolated>/tsdown.config.ts --filter threejs-editor-mcp/server`
+  passed in 97 ms.
+- One concentrated `node --test` invocation selected
+  `compares normalized execution and projection as one Runtime identity` and
+  `normalized Runtime registry and broker preserve identity invariants` from
+  `tests/runtime-protocol.test.mjs` and
+  `tests/runtime-registry.test.mjs`.
+- Result: `2/2` passed, `0` failed, in 7.19 seconds.
+- The selected behavior proves normalized identity equality, owner-bound opaque
+  Runtime references, independent validation execution, one command-state map,
+  idempotent matching settlement, conflicting-settlement rejection, pending
+  projection binding, projection generation advance, and stale-reference
+  rejection.
+- Functional implementation and exact staging took tens of minutes; the
+  focused build and self-test took under 30 seconds.
+
+## Acceptance
+
+1. Review Slice commits `b689567`, `cbb694f`, and `60b88f7`.
+2. Confirm production source exposes no flat registration, report/fail broker
+   adapter, debug-only App tool, hard-coded collector, or duplicate registry
+   and settled-command map.
+3. Confirm Runtime preparation, commit, command execution, settlement, and
+   projection use normalized execution/projection identities internally and
+   opaque `runtimeRef` addresses at the App boundary.
+4. Confirm the isolated focused build and two selected behavior tests pass.
+
+Expected result: one identity model, one client coordinator, one owner-scoped
+registry aggregate, one broker state machine, and no active legacy lifecycle
+path. Failure is any retained production compatibility route, foreign/stale
+reference acceptance, duplicate mutable owner, or conflicting settlement
+accepted as idempotent.
+
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-04T05:50:37+0800
+- Updated at: 2026-09-04T05:52:21+0800
 - Milestone: R5 Remove legacy paths and harden
-- Slice: 3. Behavioral invariant cleanup
-- Phase: commit
-- Slice state: `IMPLEMENTED`
+- Slice: all Slices
+- Phase: milestone-candidate
+- Slice state: `COMMITTED_LOCAL`
 - Completed facts: Slice 1 committed as `b689567`; Slice 2 cleanup was recorded
-  as `cbb694f`. Focused tests now construct normalized execution/projection
-  identities, route commands through opaque Runtime references, exercise one
-  typed settlement path, and assert the current tool inventory.
-- Repository state: `main` at `cbb694f`; index empty; relevant dirty files are
+  as `cbb694f`; Slice 3 committed as `60b88f7`. The exact committed candidate
+  passed the focused server build and two selected normalized protocol/registry
+  behavior tests.
+- Repository state: `main` at `60b88f7`; index empty; relevant dirty files are
   `src/server.ts`, `src/workspaces.ts`, `src/view.ts`, and
   `src/m7-runtime.ts`; unrelated dirty and untracked paths remain excluded.
-- Intended changes: stage only `tests/runtime-protocol.test.mjs`,
-  `tests/runtime-registry.test.mjs`, the exact tool-inventory hunk in
-  `tests/m1-server.test.mjs`, and this STATUS.
+- Intended changes: commit only this candidate STATUS.
 - Explicit exclusions: all items in Explicit Exclusions; preserve every
   unrelated dirty hunk and evidence artifact.
-- Verification: all three Slice 3 test files pass `node --check`; their hashes
-  remained stable across the five-second editor-buffer check; focused source
-  search finds no active legacy adapter or deleted RPC assertion.
+- Verification: exact Slice 1 indexed TypeScript PASS; Slice 3 syntax checks
+  PASS; committed candidate focused server build PASS; concentrated behavior
+  test PASS `2/2` in 7.19 seconds.
 - Evidence paths: this STATUS and the accepted R2/R3/R4 STATUS files.
 - Run identity: N/A; R5 uses pure focused checks and no live browser Runtime.
 - Continuity constraints: edit latest disk content; hash every mixed target
@@ -117,10 +154,12 @@ broker state machine, and no active legacy lifecycle path.
 - Invalidators: branch or HEAD change, unknown staged content, target hash
   change outside an owned patch, or inability to prove an obsolete hunk from
   the audit or call graph.
-- Blockers and risks: compatibility tests may encode obsolete behavior and
-  must be replaced by current state-machine invariants without broad test
-  expansion.
-- Exact next action: commit Slice 3, then run the one focused R5 self-test from
-  an isolated indexed/committed snapshot.
+- Blockers and risks: no R5 functional blocker. Broader M6/M7/M8.1/M9 tests
+  still contain or carry dirty compatibility migrations and remain deferred
+  with full suites, browser cycles, fault injection, review, and soak to
+  Release Hardening.
+- Exact next action: commit this candidate STATUS, then apply the standing user
+  authorization to record R5 acceptance and mark R0-R5 accepted in the master
+  plan.
 - Stop condition: R5 candidate report at `AWAITING_ACCEPTANCE`, or an ownership
   ambiguity that prevents exact-hunk staging.
