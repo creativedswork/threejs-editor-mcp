@@ -21,10 +21,16 @@ export interface RuntimeFailure {
   message: string
 }
 
-export interface RuntimeLifecycleSnapshot<Runtime> {
+export interface RuntimeLifecycleSnapshot<
+  Runtime,
+  Candidate = never,
+  Validation = never,
+> {
   phase: RuntimePhase
   epoch: number
   committed?: Runtime
+  candidate?: Candidate
+  validation?: Validation
   operation?: {
     command: RuntimeCommand
     startedAt: number
@@ -48,29 +54,41 @@ export interface RuntimeTransitionResult<Runtime, Value> {
 
 export class RuntimeTransitionError extends Error {}
 
-export class RuntimeTransitionController<Runtime> {
+export class RuntimeCoordinator<
+  Runtime,
+  Candidate = never,
+  Validation = never,
+> {
   readonly #now: () => number
-  readonly #listeners = new Set<(snapshot: RuntimeLifecycleSnapshot<Runtime>) => void>()
+  readonly #listeners = new Set<(
+    snapshot: RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>,
+  ) => void>()
   readonly #idleWaiters = new Set<() => void>()
   #active?: { epoch: number; controller: AbortController }
   #pending = 0
   #tail = Promise.resolve()
-  #snapshot: RuntimeLifecycleSnapshot<Runtime>
+  #snapshot: RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>
 
   constructor(
-    onSnapshot?: (snapshot: RuntimeLifecycleSnapshot<Runtime>) => void,
+    onSnapshot?: (
+      snapshot: RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>,
+    ) => void,
     now: () => number = Date.now,
   ) {
     this.#now = now
-    this.#snapshot = { phase: 'disposed', epoch: 0 }
+    this.#snapshot = Object.freeze({ phase: 'disposed', epoch: 0 })
     if (onSnapshot !== undefined) this.#listeners.add(onSnapshot)
   }
 
-  snapshot(): Readonly<RuntimeLifecycleSnapshot<Runtime>> {
+  snapshot(): Readonly<RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>> {
     return this.#snapshot
   }
 
-  subscribe(listener: (snapshot: RuntimeLifecycleSnapshot<Runtime>) => void): () => void {
+  subscribe(
+    listener: (
+      snapshot: RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>,
+    ) => void,
+  ): () => void {
     this.#listeners.add(listener)
     listener(this.#snapshot)
     return () => this.#listeners.delete(listener)
@@ -80,6 +98,50 @@ export class RuntimeTransitionController<Runtime> {
     return this.#snapshot.epoch === epoch
       && this.#active?.epoch === epoch
       && this.#active.controller.signal.aborted === false
+  }
+
+  setCandidate(epoch: number, candidate: Candidate | undefined): void {
+    this.#assertCurrentEpoch(epoch)
+    this.#replaceResources({ candidate })
+  }
+
+  discardCandidate(candidate: Candidate): void {
+    if (this.#snapshot.candidate === candidate) {
+      this.#replaceResources({ candidate: undefined })
+    }
+  }
+
+  commitCandidate(epoch: number, candidate: Candidate, committed: Runtime): void {
+    this.#assertCurrentEpoch(epoch)
+    if (this.#snapshot.candidate !== candidate) {
+      throw new RuntimeTransitionError('Cannot commit a stale Runtime candidate')
+    }
+    this.#replaceResources({ committed, candidate: undefined })
+  }
+
+  replaceCommitted(epoch: number, expected: Runtime, committed?: Runtime): void {
+    this.#assertCurrentEpoch(epoch)
+    if (this.#snapshot.committed !== expected) {
+      throw new RuntimeTransitionError('Cannot replace a stale committed Runtime')
+    }
+    this.#replaceResources({ committed })
+  }
+
+  releaseCommitted(expected: Runtime): void {
+    if (this.#snapshot.operation !== undefined) {
+      throw new RuntimeTransitionError('Cannot release a committed Runtime during a transition')
+    }
+    if (this.#snapshot.committed !== expected) {
+      throw new RuntimeTransitionError('Cannot release a stale committed Runtime')
+    }
+    this.#replaceResources({ committed: undefined })
+  }
+
+  setValidation(expected: Runtime | undefined, validation?: Validation): void {
+    if (this.#snapshot.committed !== expected) {
+      throw new RuntimeTransitionError('Cannot replace validation for a stale Runtime')
+    }
+    this.#replaceResources({ validation })
   }
 
   cancelActive(reason = 'Runtime transition cancelled'): void {
@@ -92,6 +154,12 @@ export class RuntimeTransitionController<Runtime> {
       ...this.#snapshot.committed === undefined
         ? {}
         : { committed: this.#snapshot.committed },
+      ...this.#snapshot.candidate === undefined
+        ? {}
+        : { candidate: this.#snapshot.candidate },
+      ...this.#snapshot.validation === undefined
+        ? {}
+        : { validation: this.#snapshot.validation },
       ...command === undefined
         ? {}
         : { failure: { command, message: reason } },
@@ -118,7 +186,7 @@ export class RuntimeTransitionController<Runtime> {
     return scheduled
   }
 
-  idle(): Promise<Readonly<RuntimeLifecycleSnapshot<Runtime>>> {
+  idle(): Promise<Readonly<RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>>> {
     if (this.#pending === 0 && this.#snapshot.operation === undefined) {
       return Promise.resolve(this.#snapshot)
     }
@@ -145,6 +213,12 @@ export class RuntimeTransitionController<Runtime> {
       ...this.#snapshot.committed === undefined
         ? {}
         : { committed: this.#snapshot.committed },
+      ...this.#snapshot.candidate === undefined
+        ? {}
+        : { candidate: this.#snapshot.candidate },
+      ...this.#snapshot.validation === undefined
+        ? {}
+        : { validation: this.#snapshot.validation },
       operation: {
         command,
         startedAt,
@@ -180,6 +254,12 @@ export class RuntimeTransitionController<Runtime> {
         phase: result.phase,
         epoch,
         ...committed === undefined ? {} : { committed },
+        ...this.#snapshot.candidate === undefined
+          ? {}
+          : { candidate: this.#snapshot.candidate },
+        ...this.#snapshot.validation === undefined
+          ? {}
+          : { validation: this.#snapshot.validation },
       })
       return result.value
     } catch (error) {
@@ -192,6 +272,12 @@ export class RuntimeTransitionController<Runtime> {
           ...this.#snapshot.committed === undefined
             ? {}
             : { committed: this.#snapshot.committed },
+          ...this.#snapshot.candidate === undefined
+            ? {}
+            : { candidate: this.#snapshot.candidate },
+          ...this.#snapshot.validation === undefined
+            ? {}
+            : { validation: this.#snapshot.validation },
           failure: {
             command,
             message: error instanceof Error ? error.message : String(error),
@@ -232,11 +318,34 @@ export class RuntimeTransitionController<Runtime> {
     if ((phase === 'edit-ready' || phase === 'playing') && committed === undefined) {
       throw new RuntimeTransitionError(`Runtime ${phase} requires a committed Runtime`)
     }
+    if (this.#snapshot.candidate !== undefined) {
+      throw new RuntimeTransitionError(`Runtime ${phase} cannot retain a candidate`)
+    }
   }
 
-  #setSnapshot(snapshot: RuntimeLifecycleSnapshot<Runtime>): void {
-    this.#snapshot = snapshot
-    for (const listener of this.#listeners) listener(snapshot)
+  #assertCurrentEpoch(epoch: number): void {
+    if (!this.isCurrent(epoch)) {
+      throw new RuntimeTransitionError(`Rejected stale Runtime epoch ${String(epoch)}`)
+    }
+  }
+
+  #replaceResources(resources: {
+    committed?: Runtime
+    candidate?: Candidate
+    validation?: Validation
+  }): void {
+    const snapshot = {
+      ...this.#snapshot,
+      ...resources,
+    }
+    this.#setSnapshot(snapshot)
+  }
+
+  #setSnapshot(
+    snapshot: RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>,
+  ): void {
+    this.#snapshot = Object.freeze(snapshot)
+    for (const listener of this.#listeners) listener(this.#snapshot)
   }
 
   #settled(): void {
@@ -247,6 +356,8 @@ export class RuntimeTransitionController<Runtime> {
     for (const resolve of waiters) resolve()
   }
 }
+
+export { RuntimeCoordinator as RuntimeTransitionController }
 
 function transitionPhase(command: RuntimeCommand): RuntimePhase {
   if (command === 'play') return 'entering-play'
