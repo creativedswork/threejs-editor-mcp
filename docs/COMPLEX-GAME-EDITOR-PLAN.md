@@ -1,10 +1,13 @@
 # Three.js Collaborative Game Studio V2 可执行规划
 
-状态：**M6-M8 已获批准；M8 于 2026-08-23 验收通过并获提交授权；M8.1 白屏、
-parked validation Runtime 长帧命令超时、Save 黑屏、MCP UI 遮挡输入框和重连后
-Runtime identity 失效的恢复均已完成并回到
-`ACCEPTED`；debug cleanup 已完成，双仓提交已获授权；push 与 M9 均未执行；
-M9-M11 未开始**
+状态（2026-09-04）：
+
+- M6-M8.2 已验收；
+- M9 核心实现与 S1/S2 已本地提交，Milestone 自测暂停；
+- Runtime 架构治理 R0 已完成，R1 已验收，R2 已有实现但待独立收口，
+  R3 尚未开始，R4 部分实现，R5 尚未开始；
+- R 系列完成并验收后恢复 M9，再进入 M10、M11；
+- 尚未执行 push。
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
 [`98453747`](https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills/tree/98453747cc0678f6a5d910f38d7483596a5f9a40)
@@ -1010,12 +1013,54 @@ tool routing 的 deterministic Agent regression。
 
 准入：M8.2 验收并原子提交前不得进入 M9。
 
+### Runtime 架构治理前置路线（R0-R5）
+
+M9 自测暴露的 Runtime、revision projection 和 Harness evidence 问题不能继续通过
+增加兼容分支解决。R0-R5 是插入 M8.2 与 M9 验收之间的架构治理路线，不替代
+M5-M11 产品里程碑。M9 已提交的实现和有效证据继续保留，但在 R 系列完成前不扩展
+M9 功能范围。
+
+详细设计和实际执行状态分别记录在：
+
+- [`specs/runtime-harness-architecture-audit.md`](specs/runtime-harness-architecture-audit.md)；
+- [`specs/runtime-harness-architecture-r1-status.md`](specs/runtime-harness-architecture-r1-status.md)；
+- [`specs/runtime-lifecycle-recovery.md`](specs/runtime-lifecycle-recovery.md)；
+- [`specs/runtime-lifecycle-recovery-m2-status.md`](specs/runtime-lifecycle-recovery-m2-status.md)。
+
+| 阶段 | 当前状态 | 目标 | 进入下一阶段的条件 |
+|---|---|---|---|
+| R0：冻结并归类问题 | `COMPLETE` | 把已知事故映射到协议 invariant，并把传输限制与 Runtime identity 问题分开 | 每类事故都有 invariant 或明确归类为独立传输限制 |
+| R1：规范化内部类型 | `ACCEPTED`（用户于 2026-09-04 验收） | 引入 `ExecutionId`、`RuntimeProjection`、`RuntimeBuildRef`、typed outcome 和显式 legacy adapter；统一 identity equality 与错误码 | R1 三个 Slice 保持原子提交，纯 invariant matrix 通过，用户验收 |
+| R2：权威 projection | 已有实现，待独立收口 | 使用 pending projection、iframe acknowledgement 和 registry CAS；失败后从已提交 Workspace revision 恢复 | 成功、超时、取消、重连和 acknowledgement 失败后，Workspace、registry 与 iframe 最终收敛 |
+| R3：Coordinator 单一所有权 | 未开始 | 把 active frame、execution、build、token、candidate 和 validation 纳入一个 coordinator aggregate | `src/view.ts` 中没有第二个可变生命周期资源 owner |
+| R4：简化 Harness authority | 部分实现 | 使用 opaque `runtimeRef`、独立 validation execution、command-bound evidence token、Editor-issued active capability 和幂等 settlement | 普通 Harness 工具不再依赖模型复制或生成内部 identity |
+| R5：删除遗留路径并加固 | 未开始 | 删除 flat identity、重复 queue、旧 report/fail adapter、临时 probe 和已确认可清理的 collector | 只保留一套 identity、coordinator、registry aggregate 和 broker state machine |
+
+执行顺序：
+
+```text
+R1 验收
+→ R2 独立收口与验收
+→ R3 实施与验收
+→ R4 收口与验收
+→ R5 清理与验收
+→ 恢复 M9 Milestone 自测
+→ M10
+→ M11
+→ 统一 Release Hardening
+```
+
+R 系列开发阶段只执行各 Milestone 所需的定向自测。完整 Node 和浏览器测试、
+typecheck、lint、production build、包检查、独立累计 Review、五轮浏览器循环和
+Snow 50-cycle soak 统一留到 Release Hardening。
+
 ### M9：高级 Pipeline 与大型本地资产
 
-**状态（2026-08-27）：MILESTONE_SELF_TEST - BLOCKED。核心实现与 S1/S2 已本地原子提交；
-历史定向测试、corpus build 与 standalone browser 证据仍有效，但完整 DSH Replay UI
-在 `open_editor` 成功后停留于 App loading，尚未满足 Milestone 验收门禁。详见
-`reports/M9-validation.md`。**
+**状态（2026-09-03）：PAUSED_BY_RUNTIME_REMEDIATION。核心实现与 S1/S2 已本地原子
+提交；历史定向测试、corpus build 与 standalone browser 证据继续保留。完整 DSH
+Replay UI 曾在 `open_editor` 成功后停留于 App loading，后续 Runtime/Harness
+问题已归入 R0-R5。R 系列完成并验收后，从 Milestone 自测恢复，不重复实现已提交的
+M9 Slice。详见 `reports/M9-validation.md`。**
 
 目标：覆盖 multipass FFT、post-processing、EXR/3D texture/bin 资产。
 

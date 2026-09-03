@@ -1,12 +1,18 @@
 # Runtime Harness Architecture R1 Status
 
-Updated: 2026-09-03T12:43:14+0800
+Updated: 2026-09-04T01:06:55+0800
 Milestone: R1 Normalize internal Runtime protocol
-State: `MILESTONE_CANDIDATE`
-Gate: `AWAITING_ACCEPTANCE`
+State: `ACCEPTED`
+Gate: `ACCEPTED`
+Next milestone: R2 Authoritative projection
 Base: `f821b929cafbb1bda1d41e5a1c693c73be54617f`
 Candidate implementation: `f665b6f69bce001f6bdba5197c05e35f749fe044`
 Branch: `main`
+
+## Acceptance Decision
+
+On 2026-09-04, the user explicitly accepted R1 and authorized continuation
+according to the master plan: “嗯，按照总计划文档继续执行”.
 
 ## Scope
 
@@ -98,13 +104,15 @@ sites, or if any focused invariant fails.
 
 ## EXECUTION_CHECKPOINT (CLOSED)
 
-- Updated at: 2026-09-03T12:43:14+0800
+- Updated at: 2026-09-04T01:06:55+0800
 - Milestone: R1 Normalize internal Runtime protocol
 - Slice: all Slices
-- Phase: awaiting-acceptance
+- Phase: acceptance-closeout
 - Slice state: `COMMITTED_LOCAL`
 - Completed facts: Slices 1-3 are committed as `7014b11`, `80fab31`, and
-  `f665b6f`. The concentrated R1 self-test passed 8/8.
+  `f665b6f`. The concentrated R1 self-test passed 8/8. The user explicitly
+  accepted R1 on 2026-09-04 and authorized continuation according to the
+  master plan.
 - Repository state: `/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp`
   on `main`; candidate implementation is `f665b6f`; the index was empty before
   this final STATUS update. All pre-existing unrelated changes remain dirty.
@@ -129,5 +137,7 @@ sites, or if any focused invariant fails.
 - Blockers and risks: mixed R2/R4/debug changes remain in
   `src/workspaces.ts` and `src/view.ts`; full integration confidence is deferred
   to Release Hardening after those changes have their own ownership boundary.
-- Exact next action: wait for the user's R1 acceptance decision.
-- Stop condition: user selects acceptance, further R1 iteration, or stop.
+- Exact next action: close the replacement R1 acceptance Owner; R2 is the next
+  milestone and requires a new independent Owner.
+- Stop condition: create the docs-only R1 acceptance commit without starting
+  R2 or performing any remote operation.
