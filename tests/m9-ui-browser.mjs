@@ -241,7 +241,7 @@ function hasConfiguredWorkspace() {
     .some(workspace => resolve(workspace.path) === workspacePath)
 }
 
-async function waitForLatestTurn() {
+async function waitForLatestTurn(minimumTurn = 1) {
   const deadline = Date.now() + startupTimeout
   while (Date.now() < deadline) {
     const workspaceStore = JSON.parse(readFileSync(resolve(dshHome, 'storages/workspace.json'), 'utf8'))
@@ -253,7 +253,7 @@ async function waitForLatestTurn() {
       'storages/session_projcache.json',
     ), 'utf8'))
     const stats = sessionStore.tables?.sessions?.[sessionId]?.rows?.sessionStats?.val
-    if (stats?.lastTurn >= 1 && stats.openStep === null) return
+    if (stats?.lastTurn >= minimumTurn && stats.openStep === null) return
     await new Promise(resolve_ => setTimeout(resolve_, 100))
   }
   throw new Error(`Replay turn did not settle within ${startupTimeout} ms`)
@@ -412,6 +412,7 @@ try {
     + '的云层覆盖度改为 0.46，并构建当前版本。',
   )
   await composer.press('Enter')
+  await waitForLatestTurn(2)
   await app.waitForFunction(previous => {
     const value = globalThis.__THREE_M7__.metrics()
     return value.revision !== previous
