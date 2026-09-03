@@ -1,18 +1,25 @@
 # Runtime Harness Architecture R5 Status
 
-Updated: 2026-09-04T05:52:21+0800
+Updated: 2026-09-04T05:53:22+0800
 Milestone: R5 Remove legacy paths and harden
-State: `MILESTONE_CANDIDATE`
-Gate: `AWAITING_ACCEPTANCE`
-Next phase: Release Hardening approval
+State: `ACCEPTED`
+Gate: `ACCEPTED`
+Next phase: M9 Milestone self-test, not started
 Base: `c9c4933`
 Branch: `main`
 
 ## Authorization
 
-The user authorized completing all remaining R milestones before one final
-report. R5 stops at `MILESTONE_CANDIDATE` / `AWAITING_ACCEPTANCE`; it does not
-resume M9 or enter Release Hardening.
+The user authorized completing and accepting all remaining R milestones before
+one final report. The authorization does not resume M9 or enter Release
+Hardening.
+
+## Acceptance Decision
+
+On 2026-09-04, the standing user authorization accepted the R5 candidate after
+its Slice commits, focused self-test evidence, exclusions, and deferred
+Release Hardening work were recorded. This closes R0-R5 without starting M9,
+M10, M11, or Release Hardening.
 
 ## Scope
 
@@ -128,19 +135,21 @@ accepted as idempotent.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-04T05:52:21+0800
+- Updated at: 2026-09-04T05:53:22+0800
 - Milestone: R5 Remove legacy paths and harden
 - Slice: all Slices
-- Phase: milestone-candidate
+- Phase: acceptance-closeout
 - Slice state: `COMMITTED_LOCAL`
 - Completed facts: Slice 1 committed as `b689567`; Slice 2 cleanup was recorded
   as `cbb694f`; Slice 3 committed as `60b88f7`. The exact committed candidate
   passed the focused server build and two selected normalized protocol/registry
   behavior tests.
-- Repository state: `main` at `60b88f7`; index empty; relevant dirty files are
-  `src/server.ts`, `src/workspaces.ts`, `src/view.ts`, and
-  `src/m7-runtime.ts`; unrelated dirty and untracked paths remain excluded.
-- Intended changes: commit only this candidate STATUS.
+- Repository state: `main`; implementation HEAD `60b88f7`; candidate
+  documentation `5dcfd4f`; index empty before this acceptance closeout.
+  Relevant dirty files are `src/server.ts`, `src/workspaces.ts`, `src/view.ts`,
+  and `src/m7-runtime.ts`; unrelated dirty and untracked paths remain excluded.
+- Intended changes: commit only this acceptance STATUS and the master-plan
+  R0-R5 state update.
 - Explicit exclusions: all items in Explicit Exclusions; preserve every
   unrelated dirty hunk and evidence artifact.
 - Verification: exact Slice 1 indexed TypeScript PASS; Slice 3 syntax checks
@@ -158,8 +167,9 @@ accepted as idempotent.
   still contain or carry dirty compatibility migrations and remain deferred
   with full suites, browser cycles, fault injection, review, and soak to
   Release Hardening.
-- Exact next action: commit this candidate STATUS, then apply the standing user
-  authorization to record R5 acceptance and mark R0-R5 accepted in the master
-  plan.
+- Exact next action: close the R5 Owner and stop. M9, M10, M11, Release
+  Hardening, and all remote operations require a later explicit action.
+- Stop condition: R5 acceptance closeout committed locally; no next milestone
+  or hardening work starts in this run.
 - Stop condition: R5 candidate report at `AWAITING_ACCEPTANCE`, or an ownership
   ambiguity that prevents exact-hunk staging.

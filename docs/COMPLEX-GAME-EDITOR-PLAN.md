@@ -4,8 +4,8 @@
 
 - M6-M8.2 已验收；
 - M9 核心实现与 S1/S2 已本地提交，Milestone 自测暂停；
-- Runtime 架构治理 R0 已完成，R1-R4 已验收，R5 为当前/下一阶段且尚未开始；
-- R 系列完成并验收后恢复 M9，再进入 M10、M11；
+- Runtime 架构治理 R0-R5 已于 2026-09-04 全部验收；
+- 本轮未恢复 M9，也未进入 M10、M11 或 Release Hardening；
 - 尚未执行 push。
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
@@ -1023,17 +1023,18 @@ M9 功能范围。
 
 - [`specs/runtime-harness-architecture-audit.md`](specs/runtime-harness-architecture-audit.md)；
 - [`specs/runtime-harness-architecture-r1-status.md`](specs/runtime-harness-architecture-r1-status.md)；
+- [`specs/runtime-harness-architecture-r5-status.md`](specs/runtime-harness-architecture-r5-status.md)；
 - [`specs/runtime-lifecycle-recovery.md`](specs/runtime-lifecycle-recovery.md)；
 - [`specs/runtime-lifecycle-recovery-m2-status.md`](specs/runtime-lifecycle-recovery-m2-status.md)。
 
 | 阶段 | 当前状态 | 目标 | 进入下一阶段的条件 |
 |---|---|---|---|
-| R0：冻结并归类问题 | `COMPLETE` | 把已知事故映射到协议 invariant，并把传输限制与 Runtime identity 问题分开 | 每类事故都有 invariant 或明确归类为独立传输限制 |
+| R0：冻结并归类问题 | `ACCEPTED`（用户于 2026-09-04 验收） | 把已知事故映射到协议 invariant，并把传输限制与 Runtime identity 问题分开 | 每类事故都有 invariant 或明确归类为独立传输限制 |
 | R1：规范化内部类型 | `ACCEPTED`（用户于 2026-09-04 验收） | 引入 `ExecutionId`、`RuntimeProjection`、`RuntimeBuildRef`、typed outcome 和显式 legacy adapter；统一 identity equality 与错误码 | R1 三个 Slice 保持原子提交，纯 invariant matrix 通过，用户验收 |
 | R2：权威 projection | `ACCEPTED`（用户于 2026-09-04 验收） | 使用 pending projection、iframe acknowledgement 和 registry CAS；失败后从已提交 Workspace revision 恢复 | 成功、超时、取消、重连和 acknowledgement 失败后，Workspace、registry 与 iframe 最终收敛 |
 | R3：Coordinator 单一所有权 | `ACCEPTED`（用户于 2026-09-04 验收） | 把 active frame、execution、build、token、candidate 和 validation 纳入一个 coordinator aggregate | `src/view.ts` 中没有第二个可变生命周期资源 owner |
 | R4：简化 Harness authority | `ACCEPTED`（用户于 2026-09-04 验收） | 使用 opaque `runtimeRef`、独立 validation execution、command-bound evidence token、Editor-issued active capability 和幂等 settlement | 普通 Harness 工具不再依赖模型复制或生成内部 identity |
-| R5：删除遗留路径并加固 | `NEXT`（当前阶段，尚未开始） | 删除 flat identity、重复 queue、旧 report/fail adapter、临时 probe 和已确认可清理的 collector | 只保留一套 identity、coordinator、registry aggregate 和 broker state machine |
+| R5：删除遗留路径并加固 | `ACCEPTED`（用户于 2026-09-04 验收） | 删除 flat identity、重复 queue、旧 report/fail adapter、临时 probe 和已确认可清理的 collector | 只保留一套 identity、coordinator、registry aggregate 和 broker state machine |
 
 执行顺序：
 
