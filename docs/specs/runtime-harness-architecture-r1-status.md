@@ -1,6 +1,6 @@
 # Runtime Harness Architecture R1 Status
 
-Updated: 2026-09-03T12:34:37+0800
+Updated: 2026-09-03T12:40:27+0800
 Milestone: R1 Normalize internal Runtime protocol
 State: `IMPLEMENTING_SLICES`
 Gate: `AUTHORIZED`
@@ -22,8 +22,8 @@ excluded.
 | Slice | State | Commit | Owned files |
 |---|---|---|---|
 | 1. Protocol types and legacy boundary | `COMMITTED_LOCAL` | `7014b11` | `src/runtime-protocol.ts`, this STATUS |
-| 2. Equality and error mapping migration | `IMPLEMENTED` | pending | isolated hunks in `src/workspaces.ts` and `src/view.ts`, this STATUS |
-| 3. Pure invariant matrix | `PENDING` | pending | `tests/runtime-protocol.test.mjs`, this STATUS |
+| 2. Equality and error mapping migration | `COMMITTED_LOCAL` | `80fab31` | isolated hunks in `src/workspaces.ts` and `src/view.ts`, this STATUS |
+| 3. Pure invariant matrix | `IMPLEMENTED` | pending | `tests/runtime-protocol.test.mjs`, this STATUS |
 
 ## Recovered Baseline
 
@@ -65,9 +65,9 @@ excluded.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-03T12:34:37+0800
+- Updated at: 2026-09-03T12:40:27+0800
 - Milestone: R1 Normalize internal Runtime protocol
-- Slice: 2. Equality and error mapping migration
+- Slice: 3. Pure invariant matrix
 - Phase: commit
 - Slice state: `IMPLEMENTED`
 - Completed facts: Slice 1 committed locally as `7014b11`; commit readback
@@ -76,13 +76,18 @@ excluded.
   `22b59976b9daf5e0ea75bf9aef7f0601357c6c1c491cd44cca300b2de8e33157`.
   Server and client compatibility comparisons now delegate to the centralized
   helpers. Active-runtime stale and foreign failures now carry stable codes.
+  Slice 2 committed locally as `80fab31`; cached and commit readback excluded
+  all R2/R4/debug hunks. The pure R1 matrix now covers adapter construction,
+  every equality coordinate, projection purity and stale expectations, every
+  terminal outcome, replay determinism, and stable error messages. Its stable
+  SHA-256 is
+  `19b1d668555030a92423cb80002bc45152c138028702cb9d9d2fec3cbbaec940`.
 - Repository state: `/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp`
-  on `main` at `7014b11`; relevant dirty files and exclusions are recorded
+  on `main` at `80fab31`; relevant dirty files and exclusions are recorded
   above; no staged files.
-- Intended changes: replace only the pre-existing duplicate legacy identity
-  and owner comparisons in `src/workspaces.ts` and `src/view.ts` with the
-  centralized compatibility helpers; map the pre-existing active-runtime
-  stale and foreign errors to stable protocol codes; update this STATUS.
+- Intended changes: expand only `tests/runtime-protocol.test.mjs` into the
+  approved pure constructibility, equality, projection, outcome, and
+  idempotency matrix; update this STATUS.
 - Explicit exclusions: every pre-existing dirty hunk outside the exact R1
   protocol/equality changes; R2/R3/R4/R5 behavior; all debug sessions,
   collectors, probes, logs, reports, fixtures, and evidence; port `7778`;
@@ -95,7 +100,8 @@ excluded.
   with TS5112 before checking source and was corrected without changing scope.
   Slice 2 targeted TypeScript check of `src/workspaces.ts` and `src/view.ts`
   PASS after restoring the repository's Node type setting; the first invocation
-  without `--types node` reported only missing Node globals.
+  without `--types node` reported only missing Node globals. Slice 3
+  `node --check tests/runtime-protocol.test.mjs` PASS.
 - Evidence paths: this STATUS; `docs/specs/runtime-harness-architecture-audit.md`;
   `src/runtime-protocol.ts`; `tests/runtime-protocol.test.mjs`.
 - Run identity: N/A for pure R1 verification. A read-only
@@ -106,10 +112,10 @@ excluded.
 - Invalidators: HEAD changes unexpectedly; any target hash changes outside the
   current patch; any pre-existing file becomes staged; or an R1 cached diff
   contains an excluded hunk.
-- Blockers and risks: mixed R2/R4/debug changes share `src/workspaces.ts` and
-  `src/view.ts`; Slice 2 requires exact cached-hunk inspection.
-- Exact next action: stage only the audited equality/error hunks and this
-  STATUS, inspect the cached patch against `7014b11`, and commit Slice 2.
+- Blockers and risks: mixed R2/R4/debug changes remain in
+  `src/workspaces.ts` and `src/view.ts`; they must remain unstaged.
+- Exact next action: explicitly stage `tests/runtime-protocol.test.mjs` and
+  this STATUS, inspect the cached diff, and create the Slice 3 local commit.
 - Stop condition: stop at `AWAITING_ACCEPTANCE` after three local Slice commits,
   one concentrated self-test, and final checkpoint/report publication; stop
   earlier only for an ownership ambiguity, concurrent write, failed commit, or
