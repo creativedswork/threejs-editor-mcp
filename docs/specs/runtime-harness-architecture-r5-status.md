@@ -1,6 +1,6 @@
 # Runtime Harness Architecture R5 Status
 
-Updated: 2026-09-04T05:13:47+0800
+Updated: 2026-09-04T05:48:06+0800
 Milestone: R5 Remove legacy paths and harden
 State: `IMPLEMENTING_SLICES`
 Gate: `AUTHORIZED`
@@ -32,8 +32,8 @@ broker state machine, and no active legacy lifecycle path.
 
 | Slice | State | Commit | Owned scope |
 |---|---|---|---|
-| 1. Server/registry legacy removal | `IMPLEMENTED` | pending | `src/runtime-protocol.ts`, exact R5 hunks in `src/server.ts`, `src/workspaces.ts`, and required client contract hunks in `src/view.ts`; this STATUS |
-| 2. Client/Runtime probe removal | `PENDING` | pending | Exact legacy/probe hunks in `src/view.ts`, `src/m7-runtime.ts`, `src/server.ts`, and `src/workspaces.ts`; no historical evidence artifacts |
+| 1. Server/registry legacy removal | `COMMITTED_LOCAL` | `b689567` | `src/runtime-protocol.ts`, exact R5 hunks in `src/server.ts`, `src/workspaces.ts`, and required client contract hunks in `src/view.ts`; this STATUS |
+| 2. Client/Runtime probe removal | `IMPLEMENTED` | pending | Removed temporary production collectors and probe tools from `src/view.ts`, `src/m7-runtime.ts`, `src/server.ts`, and `src/workspaces.ts`; preserved all historical evidence artifacts. |
 | 3. Behavioral invariant cleanup | `PENDING` | pending | Source-regex/legacy assertions replaced or removed in focused test files |
 
 ## Recovered Baseline
@@ -89,28 +89,28 @@ broker state machine, and no active legacy lifecycle path.
 
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-04T05:46:00+0800
+- Updated at: 2026-09-04T05:48:06+0800
 - Milestone: R5 Remove legacy paths and harden
-- Slice: 1. Server/registry legacy removal
-- Phase: exact-candidate-check
+- Slice: 2. Client/Runtime probe removal
+- Phase: commit
 - Slice state: `IMPLEMENTED`
-- Completed facts: accepted R4 closeout and direct R4 ancestry were verified;
-  the branch, HEAD, empty index, mixed dirty tree, required plans/statuses, and
-  target hashes were read from disk. Committed code still exposes legacy
-  identity adapters, flat-address fallback, report/fail RPC adapters, and
-  legacy broker-target state. The implementation now uses normalized
-  execution/projection identities, one owner-scoped registry aggregate, one
-  queued/executing/settled command-state map, and opaque refs for App routing.
-- Repository state: `main` at `c9c4933`; index empty; relevant dirty files are
+- Completed facts: Slice 1 committed as `b689567` after its exact indexed
+  snapshot passed TypeScript. Production source contains no temporary
+  collector URL, debug probe event, or debug-only App tool; retained `.dbg`,
+  debug notes, reports, logs, screenshots, and browser evidence were not
+  changed.
+- Repository state: `main` at `b689567`; index empty; relevant dirty files are
   `src/server.ts`, `src/workspaces.ts`, `src/view.ts`, and
   `src/m7-runtime.ts`; unrelated dirty and untracked paths remain excluded.
-- Intended changes: stage only the implemented Slice 1 protocol, registry,
-  broker, server, and required client-contract hunks plus this STATUS.
+- Intended changes: commit only this STATUS update because the probes were
+  uncommitted instrumentation; removing them produces no source delta against
+  the committed Slice 1 candidate.
 - Explicit exclusions: all items in Explicit Exclusions; preserve every
   unrelated dirty hunk and evidence artifact.
-- Verification: baseline Git/status/hash checks PASS at `c9c4933`; required
-  milestone documents and Skill checkpoint guidance read completely; current
-  mixed-tree `pnpm exec tsc --noEmit --pretty false` PASS.
+- Verification: exact indexed Slice 1 snapshot
+  `pnpm exec tsc --noEmit --pretty false` PASS; source search for collector
+  URLs, debug probe events, and debug-only App tools PASS at `b689567` and in
+  the current worktree.
 - Evidence paths: this STATUS and the accepted R2/R3/R4 STATUS files.
 - Run identity: N/A; R5 uses pure focused checks and no live browser Runtime.
 - Continuity constraints: edit latest disk content; hash every mixed target
@@ -122,7 +122,7 @@ broker state machine, and no active legacy lifecycle path.
 - Blockers and risks: compatibility tests may encode obsolete behavior and
   must be replaced by current state-machine invariants without broad test
   expansion.
-- Exact next action: stage exact Slice 1 hunks, export the staged candidate,
-  and run focused TypeScript plus diff checks before committing.
+- Exact next action: commit this Slice 2 STATUS update, then replace legacy and
+  source-regex tests with focused normalized-state invariants.
 - Stop condition: R5 candidate report at `AWAITING_ACCEPTANCE`, or an ownership
   ambiguity that prevents exact-hunk staging.
