@@ -370,13 +370,18 @@ try {
 
   stage(`navigating to ${webUrl}`)
   await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
-  const composer = await readyComposer()
+  let composer = await readyComposer()
   stage('submitting open-editor replay prompt')
   await composer.fill('打开 threejs-volumetric-clouds/weather-volume-clouds')
   await composer.press('Enter')
   await waitForLatestTurn()
   stage('reloading settled replay session')
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
+  composer = page.locator(
+    'textarea:enabled[placeholder="描述你想要构建的内容"], '
+    + 'textarea:enabled[aria-label="给智能体发消息"]',
+  )
+  await composer.waitFor({ state: 'visible', timeout: 30_000 })
   const app = await appFrame()
   const initial = await app.evaluate(() => globalThis.__THREE_M7__.metrics())
 
