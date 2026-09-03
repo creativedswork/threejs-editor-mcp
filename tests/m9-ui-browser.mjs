@@ -428,7 +428,9 @@ try {
   ), 'utf8')
   assert.match(source, /clouds\.coverage = 0\.46;/)
 
-  await page.getByRole('tab', { name: '构建', exact: true }).click()
+  await page.locator(
+    `[data-mcp-app-update="threejs:project:${ai.projectId}"]`,
+  ).last().getByRole('button', { name: 'Locate Editor', exact: true }).click()
   app = await appFrame()
   stage('starting runtime')
   await app.getByRole('button', { name: 'Play', exact: true }).click()
