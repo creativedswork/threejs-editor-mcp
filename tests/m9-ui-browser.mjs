@@ -262,7 +262,7 @@ async function waitForLatestTurn() {
 async function readyComposer() {
   const composer = page.locator(
     'textarea:enabled[placeholder="描述你想要构建的内容"], '
-    + 'textarea:enabled[aria-label="给智能体发消息"]',
+    + 'textarea:enabled[placeholder="给智能体发消息"]',
   )
   if (await composer.isVisible().catch(() => false)) return composer
 
@@ -377,9 +377,10 @@ try {
   await waitForLatestTurn()
   stage('reloading settled replay session')
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
+  await page.getByRole('tab', { name: '对话', exact: true }).click()
   composer = page.locator(
     'textarea:enabled[placeholder="描述你想要构建的内容"], '
-    + 'textarea:enabled[aria-label="给智能体发消息"]',
+    + 'textarea:enabled[placeholder="给智能体发消息"]',
   )
   await composer.waitFor({ state: 'visible', timeout: 30_000 })
   const app = await appFrame()
