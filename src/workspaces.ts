@@ -203,6 +203,7 @@ const activeRuntimeSchema = z.object({
   buildId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   buildRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   projectionGeneration: z.number().int().nonnegative().default(0),
+  runtimeRef: z.string().uuid().optional(),
   runId: z.string().uuid(),
   nonce: z.string().uuid().optional(),
   evidenceToken: z.string().uuid().optional(),
@@ -218,10 +219,12 @@ export interface RegisteredRuntime {
   buildId?: string
   buildRevision?: string
   projectionGeneration: number
+  runtimeRef: string
   runId: string
   nonce?: string
   evidenceToken: string
 }
+export type RuntimeContextIdentity = Omit<RegisteredRuntime, 'evidenceToken'>
 export interface PendingRuntimeProjection {
   transitionId: string
   projectId: string
@@ -236,6 +239,7 @@ export interface PreparedRuntimeRun extends RuntimeIdentity {
   buildId?: string
   buildRevision?: string
   projectionGeneration: number
+  runtimeRef: string
   evidenceToken: string
   expiresAt: number
 }
@@ -342,6 +346,14 @@ export interface WorkspaceProjectCandidate {
 }
 
 export type RuntimeIdentity = LegacyRuntimeIdentity
+
+export interface RuntimeHarnessAddress {
+  projectId: string
+  runtimeRef?: string
+  revision?: string
+  runId?: string
+  nonce?: string
+}
 
 export type RuntimeOwner = ProtocolRuntimeOwner
 
@@ -1425,11 +1437,13 @@ export class WorkspaceStore {
         : revision
       this.rejectRuntimeCommand(runtimeKey, 'Runtime revision changed')
       this.activeRuntimeGrants.delete(runtimeKey)
+      const runtimeRef = randomUUID()
       const activeRuntime = activeRuntimeSchema.parse({
         revision,
         buildId: buildId ?? previousRuntime?.buildId,
         buildRevision,
         projectionGeneration,
+        runtimeRef,
         runId,
         nonce,
         evidenceToken,
@@ -1472,6 +1486,7 @@ export class WorkspaceStore {
         buildId: activeRuntime.buildId,
         buildRevision: activeRuntime.buildRevision,
         projectionGeneration,
+        runtimeRef,
         runId,
         nonce: activeRuntime.nonce,
         evidenceToken,
@@ -1501,9 +1516,10 @@ export class WorkspaceStore {
         projectId,
         revision,
         buildId,
-        runId,
         buildRevision: buildId === undefined ? undefined : revision,
         projectionGeneration: 0,
+        runtimeRef: randomUUID(),
+        runId,
         nonce,
         evidenceToken: randomUUID(),
         expiresAt: Date.now() + ttlMs,
@@ -1554,9 +1570,10 @@ export class WorkspaceStore {
       const next = activeRuntimeSchema.parse({
         revision: prepared.revision,
         buildId: prepared.buildId,
-        runId: prepared.runId,
         buildRevision: prepared.buildRevision,
         projectionGeneration: prepared.projectionGeneration,
+        runtimeRef: prepared.runtimeRef,
+        runId: prepared.runId,
         nonce: prepared.nonce,
         evidenceToken: prepared.evidenceToken,
         sessionId: owner.sessionId,
@@ -1670,11 +1687,13 @@ export class WorkspaceStore {
         revision,
         undefined,
       )
+      const runtimeRef = randomUUID()
       const next = activeRuntimeSchema.parse({
         revision: projection.workspaceRevision,
         buildId: projection.loadedBuild.buildId,
         buildRevision: projection.loadedBuild.sourceRevision,
         projectionGeneration: projection.generation,
+        runtimeRef,
         runId,
         nonce,
         evidenceToken: active.evidenceToken,
@@ -1694,6 +1713,7 @@ export class WorkspaceStore {
         buildId: next.buildId,
         buildRevision: next.buildRevision,
         projectionGeneration: next.projectionGeneration,
+        runtimeRef,
         runId,
         nonce,
         evidenceToken: next.evidenceToken!,
@@ -1748,7 +1768,7 @@ export class WorkspaceStore {
   async runtimeIdentity(
     projectId: string,
     owner: RuntimeOwner,
-  ): Promise<RuntimeIdentity | undefined> {
+  ): Promise<RuntimeContextIdentity | undefined> {
     validateProjectId(projectId)
     return this.withLock(projectId, async () => {
       const workspace = this.workspaces.get(projectId)
@@ -1756,11 +1776,17 @@ export class WorkspaceStore {
       const active = this.activeRuntimes.get(this.runtimeKey(projectId, owner))
       if (active === undefined
         || active.nonce === undefined
+        || active.runtimeRef === undefined
+        || active.evidenceToken === undefined
         || active.sessionId !== owner.sessionId
         || active.connectionGeneration !== owner.connectionGeneration) return undefined
       return {
         projectId,
         revision: active.revision,
+        buildId: active.buildId,
+        buildRevision: active.buildRevision,
+        projectionGeneration: active.projectionGeneration,
+        runtimeRef: active.runtimeRef,
         runId: active.runId,
         nonce: active.nonce,
       }
@@ -1784,7 +1810,7 @@ export class WorkspaceStore {
   }
 
   async requestRuntimeCommand(
-    runtime: RuntimeIdentity,
+    address: RuntimeHarnessAddress,
     owner: RuntimeOwner,
     kind: RuntimeHarnessCommand['kind'],
     target: RuntimeHarnessCommand['target'],
@@ -1792,7 +1818,7 @@ export class WorkspaceStore {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    validateProjectId(runtime.projectId)
+    validateProjectId(address.projectId)
     signal?.throwIfAborted()
     let resolvePending!: (value: unknown) => void
     let rejectPending!: (error: Error) => void
@@ -1801,10 +1827,28 @@ export class WorkspaceStore {
       rejectPending = reject
     })
     let pending: PendingRuntimeCommand | undefined
-    await this.withLock(runtime.projectId, async () => {
+    await this.withLock(address.projectId, async () => {
       signal?.throwIfAborted()
-      const workspace = this.workspaces.get(runtime.projectId)
-      if (workspace === undefined) throw new Error(`unknown workspace ${runtime.projectId}`)
+      const workspace = this.workspaces.get(address.projectId)
+      if (workspace === undefined) throw new Error(`unknown workspace ${address.projectId}`)
+      let runtime: RuntimeIdentity
+      if (address.runtimeRef !== undefined) {
+        runtime = this.resolveRuntimeReference(address.projectId, address.runtimeRef, owner)
+      } else if (address.revision !== undefined
+        && address.runId !== undefined
+        && address.nonce !== undefined) {
+        runtime = {
+          projectId: address.projectId,
+          revision: address.revision,
+          runId: address.runId,
+          nonce: address.nonce,
+        }
+      } else {
+        throw new RuntimeProtocolError(
+          'RUNTIME_REFERENCE_STALE',
+          'Use runtimeRef from the latest Runtime context supplied by the Editor',
+        )
+      }
       await this.assertRuntimeIdentity(runtime, owner)
       const key = this.runtimeKey(runtime.projectId, owner)
       if (this.runtimeCommands.has(key)) {
@@ -2440,6 +2484,30 @@ export class WorkspaceStore {
       )
     }
     return active
+  }
+
+  private resolveRuntimeReference(
+    projectId: string,
+    runtimeRef: string,
+    owner: RuntimeOwner,
+  ): RuntimeIdentity {
+    const active = this.activeRuntimes.get(this.runtimeKey(projectId, owner))
+    if (active === undefined
+      || active.runtimeRef !== runtimeRef
+      || active.nonce === undefined
+      || active.sessionId !== owner.sessionId
+      || active.connectionGeneration !== owner.connectionGeneration) {
+      throw new RuntimeProtocolError(
+        'RUNTIME_REFERENCE_STALE',
+        'Runtime reference is stale; use the latest Runtime context from the Editor',
+      )
+    }
+    return {
+      projectId,
+      revision: active.revision,
+      runId: active.runId,
+      nonce: active.nonce,
+    }
   }
 
   private runtimeKey(projectId: string, owner: RuntimeOwner): string {

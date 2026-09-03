@@ -189,6 +189,7 @@ interface M7Run {
   revision: string
   runId: string
   nonce: string
+  runtimeRef?: string
   projectionGeneration?: number
 }
 
@@ -2223,14 +2224,23 @@ const app = new App(
 
 async function publishRuntimeModelContext(run: M7Run, signal?: AbortSignal): Promise<void> {
   if (app.getHostCapabilities()?.updateModelContext === undefined) return
+  if (run.runtimeRef === undefined) {
+    throw new Error('Runtime reference is unavailable')
+  }
   await app.updateModelContext({
     content: [{
       type: 'text',
-      text: `The active Three.js Runtime identity is ${JSON.stringify(run)}. This is the latest identity and supersedes every earlier Runtime identity for this project. Use these exact projectId, revision, runId, and nonce values for subsequent Runtime Harness tool calls.`,
+      text: `The active Three.js Runtime reference is ${JSON.stringify({
+        projectId: run.projectId,
+        runtimeRef: run.runtimeRef,
+      })}. Use this opaque reference for subsequent Runtime Harness tool calls.`,
     }],
     structuredContent: {
       kind: 'threejs-runtime-identity',
-      runtime: run,
+      runtime: {
+        projectId: run.projectId,
+        runtimeRef: run.runtimeRef,
+      },
     },
   }, {
     signal,
@@ -3317,6 +3327,17 @@ async function startM7Runtime(
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
     if (committedResult.isError) throw new Error(resultError(committedResult))
+    const registered = record(committedResult.structuredContent)
+    if (typeof registered?.runtimeRef !== 'string'
+      || typeof registered.projectionGeneration !== 'number'
+      || registered.evidenceToken !== prepared.evidenceToken) {
+      throw new Error('commit_runtime_run returned an invalid Runtime registration')
+    }
+    const committedRun: M7Run = {
+      ...run,
+      runtimeRef: registered.runtimeRef,
+      projectionGeneration: registered.projectionGeneration,
+    }
     await stopValidationRuntime()
     promoteM7CandidateFrame(candidateFrame)
     const nextCommitted: CommittedRuntime = {
@@ -3324,9 +3345,9 @@ async function startM7Runtime(
       revision: startRevision,
       frame: candidateFrame,
       runtime: {
-        run,
+        run: committedRun,
         artifact,
-        evidenceToken: prepared.evidenceToken,
+        evidenceToken: registered.evidenceToken,
         mode,
       },
     }
@@ -3338,7 +3359,7 @@ async function startM7Runtime(
     m7Metrics = readyEvent.data ?? {}
     m7MessagesAfterStop = 0
     m7EditorSceneAccepted = true
-    acceptRuntimeEditorScene(objects as EditorObjectSnapshot[], run, projected)
+    acceptRuntimeEditorScene(objects as EditorObjectSnapshot[], committedRun, projected)
     if (mode === 'run') {
       playingProject = serializeProject()
       playingRevision = startRevision
@@ -3877,12 +3898,18 @@ async function applyEditorRevision(
     })
     if (registered.isError) throw new Error(resultError(registered))
     const registration = record(registered.structuredContent)
+    const runtimeRef = registration?.runtimeRef
     const projectionGeneration = registration?.projectionGeneration
     if (registration?.evidenceToken !== active.evidenceToken
+      || typeof runtimeRef !== 'string'
       || typeof projectionGeneration !== 'number') {
       throw new Error('Runtime projection commit returned an invalid registration')
     }
-    nextRun = { ...nextRun, projectionGeneration }
+    nextRun = {
+      ...nextRun,
+      runtimeRef,
+      projectionGeneration,
+    }
 
     workspace = snapshot.workspace
     renderFileTree()

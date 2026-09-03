@@ -119,16 +119,32 @@ const sessionProjectPathSchema = z.string()
 const revisionSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const runIdSchema = z.string().uuid()
 const nonceSchema = z.string().uuid()
+const runtimeRefSchema = z.string().uuid()
 const runtimeIdentitySchema = z.object({
-  projectId: projectIdSchema,
-  revision: revisionSchema,
-  runId: runIdSchema,
-  nonce: nonceSchema,
+  projectId: projectIdSchema.describe(
+    'Copy exactly from the latest Runtime context supplied by the Editor.',
+  ),
+  revision: revisionSchema.describe(
+    'Copy exactly from the latest Runtime context supplied by the Editor.',
+  ),
+  runId: runIdSchema.describe(
+    'Copy exactly from the latest Runtime context supplied by the Editor. Never generate this UUID.',
+  ),
+  nonce: nonceSchema.describe(
+    'Copy exactly from the latest Runtime context supplied by the Editor. Never generate this UUID.',
+  ),
 })
-const registeredRuntimeSchema = runtimeIdentitySchema.extend({
+const runtimeContextIdentitySchema = runtimeIdentitySchema.extend({
   buildId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   buildRevision: revisionSchema.optional(),
   projectionGeneration: z.number().int().nonnegative(),
+  runtimeRef: runtimeRefSchema,
+})
+const runtimeReferenceSchema = z.object({
+  projectId: projectIdSchema,
+  runtimeRef: runtimeRefSchema,
+})
+const registeredRuntimeSchema = runtimeContextIdentitySchema.extend({
   evidenceToken: nonceSchema,
 })
 const preparedRuntimeRunSchema = registeredRuntimeSchema.extend({
@@ -144,7 +160,19 @@ const pendingRuntimeProjectionSchema = z.object({
   expectedGeneration: z.number().int().nonnegative(),
   expiresAt: z.string().datetime(),
 })
+const runtimeHarnessAddressShape = {
+  projectId: projectIdSchema,
+  runtimeRef: runtimeRefSchema.describe(
+    'Use the opaque reference from the latest Editor Runtime context.',
+  ),
+}
 const runtimeTargetSchema = z.enum(['active', 'validation'])
+const runtimeHarnessTargetSchema = runtimeTargetSchema.default('validation').describe(
+  'Omit target for ordinary checks. The default validation Runtime is isolated and requires no Editor grant. Use active only after the user explicitly asks to inspect the current live Runtime.',
+)
+const activeIntentSchema = z.literal('user-requested').optional().describe(
+  'Deprecated compatibility hint. Editor-issued authorization is the sole authority.',
+)
 const runtimeOwnerSchema = z.object({
   sessionId: z.string().min(1).max(128),
   connectionGeneration: z.string().uuid(),
@@ -1618,7 +1646,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         syntaxError: z.string().optional(),
       }),
       diagnostics: diagnosticsSchema.optional(),
-      runtime: runtimeIdentitySchema.optional(),
+      runtime: runtimeReferenceSchema.optional(),
     }),
     _meta: { ui: { visibility: ['model'] } },
   }, async ({ projectId }, { _meta }) => {
@@ -1694,7 +1722,14 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         ...scriptError === undefined ? {} : { syntaxError: scriptError },
       },
       ...diagnostics === undefined ? {} : { diagnostics },
-      ...runtime === undefined ? {} : { runtime },
+      ...runtime === undefined
+        ? {}
+        : {
+            runtime: {
+              projectId: runtime.projectId,
+              runtimeRef: runtime.runtimeRef,
+            },
+          },
     }
     return textResult(
       `Three.js project inspection:\n${JSON.stringify(detail)}`,
@@ -1967,11 +2002,11 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'capture_runtime_frame', {
     title: 'Capture Three.js Runtime frame',
-    description: 'Captures only the exact Runtime canvas. Defaults to an isolated validation Runtime.',
+    description: 'Captures only the Runtime canvas. Use runtimeRef from the latest Editor context. Omit target for ordinary checks; validation is isolated and requires no Editor grant. Active access consumes an Editor-issued one-shot authorization.',
     inputSchema: {
-      ...runtimeIdentitySchema.shape,
-      target: runtimeTargetSchema.default('validation'),
-      activeIntent: z.literal('user-requested').optional(),
+      ...runtimeHarnessAddressShape,
+      target: runtimeHarnessTargetSchema,
+      activeIntent: activeIntentSchema,
       format: z.enum(['png', 'jpeg']).default('png'),
       maxWidth: z.number().int().min(64).max(1_024).default(768),
       maxHeight: z.number().int().min(64).max(1_024).default(768),
@@ -1991,12 +2026,12 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     maxHeight,
     deterministic,
     timeoutMs,
-    ...identity
+    ...address
   }, { _meta, signal }) => {
     requireActiveIntent(target, activeIntent)
     const evidence = runtimeEvidenceSchema.options[0].parse(
       await workspaces.requestRuntimeCommand(
-        identity,
+        address,
         runtimeOwner(_meta)!,
         'capture-frame',
         target,
@@ -2020,11 +2055,11 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'read_runtime_logs', {
     title: 'Read Three.js Runtime logs',
-    description: 'Reads bounded cursor-based logs from one exact Runtime.',
+    description: 'Reads bounded cursor-based logs. Use runtimeRef from the latest Editor context. Omit target for ordinary checks; validation is isolated and requires no Editor grant. Active access consumes an Editor-issued one-shot authorization.',
     inputSchema: {
-      ...runtimeIdentitySchema.shape,
-      target: runtimeTargetSchema.default('validation'),
-      activeIntent: z.literal('user-requested').optional(),
+      ...runtimeHarnessAddressShape,
+      target: runtimeHarnessTargetSchema,
+      activeIntent: activeIntentSchema,
       cursor: z.number().int().nonnegative().default(0),
       level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
       limit: z.number().int().min(1).max(500).default(100),
@@ -2039,12 +2074,12 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     level,
     limit,
     timeoutMs,
-    ...identity
+    ...address
   }, { _meta, signal }) => {
     requireActiveIntent(target, activeIntent)
     const evidence = runtimeEvidenceSchema.options[1].parse(
       await workspaces.requestRuntimeCommand(
-        identity,
+        address,
         runtimeOwner(_meta)!,
         'read-logs',
         target,
@@ -2062,21 +2097,21 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'simulate_player_actions', {
     title: 'Simulate Three.js player actions',
-    description: 'Runs a bounded normalized action sequence in an isolated validation Runtime by default.',
+    description: 'Runs bounded normalized actions. Use runtimeRef from the latest Editor context. Omit target for ordinary checks; validation is isolated and requires no Editor grant. Active access consumes an Editor-issued one-shot authorization.',
     inputSchema: {
-      ...runtimeIdentitySchema.shape,
-      target: runtimeTargetSchema.default('validation'),
-      activeIntent: z.literal('user-requested').optional(),
+      ...runtimeHarnessAddressShape,
+      target: runtimeHarnessTargetSchema,
+      activeIntent: activeIntentSchema,
       actions: z.array(playerActionSchema).min(1).max(32),
       timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000).default(20_000),
     },
     outputSchema: runtimeEvidenceSchema.options[2].omit({ evidenceToken: true }),
     _meta: { ui: { visibility: ['model', 'app'] } },
-  }, async ({ target, activeIntent, actions, timeoutMs, ...identity }, { _meta, signal }) => {
+  }, async ({ target, activeIntent, actions, timeoutMs, ...address }, { _meta, signal }) => {
     requireActiveIntent(target, activeIntent)
     const evidence = runtimeEvidenceSchema.options[2].parse(
       await workspaces.requestRuntimeCommand(
-        identity,
+        address,
         runtimeOwner(_meta)!,
         'simulate-actions',
         target,
