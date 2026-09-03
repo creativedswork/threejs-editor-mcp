@@ -125,9 +125,23 @@ const runtimeIdentitySchema = z.object({
   runId: runIdSchema,
   nonce: nonceSchema,
 })
-const preparedRuntimeRunSchema = runtimeIdentitySchema.extend({
+const registeredRuntimeSchema = runtimeIdentitySchema.extend({
   buildId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  buildRevision: revisionSchema.optional(),
+  projectionGeneration: z.number().int().nonnegative(),
   evidenceToken: nonceSchema,
+})
+const preparedRuntimeRunSchema = registeredRuntimeSchema.extend({
+  expiresAt: z.string().datetime(),
+})
+const pendingRuntimeProjectionSchema = z.object({
+  transitionId: z.string().uuid(),
+  projectId: projectIdSchema,
+  runId: runIdSchema,
+  nonce: nonceSchema,
+  baseRevision: revisionSchema,
+  targetRevision: revisionSchema,
+  expectedGeneration: z.number().int().nonnegative(),
   expiresAt: z.string().datetime(),
 })
 const runtimeTargetSchema = z.enum(['active', 'validation'])
@@ -1754,17 +1768,10 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       nonce: nonceSchema.optional(),
       previousRevision: revisionSchema.optional(),
     },
-    outputSchema: z.object({
-      projectId: projectIdSchema,
-      revision: revisionSchema,
-      buildId: buildIdSchema.optional(),
-      runId: z.string().uuid(),
-      nonce: nonceSchema.optional(),
-      evidenceToken: nonceSchema,
-    }),
+    outputSchema: registeredRuntimeSchema,
     _meta: { ui: { visibility: ['app'] } },
   }, async ({ projectId, revision, buildId, runId, nonce, previousRevision }, { signal, _meta }) => {
-    const evidenceToken = await workspaces.registerRuntimeRun(
+    const registered = await workspaces.registerRuntimeRun(
       projectId,
       revision,
       buildId,
@@ -1775,12 +1782,34 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       signal,
     )
     return textResult(`Registered Runtime run ${runId}.`, {
+      ...registered,
+    })
+  })
+
+  registerAppTool(server, 'commit_runtime_projection', {
+    title: 'Commit Three.js Runtime projection',
+    description: 'CAS-commits one pending revision change after matching iframe acknowledgement.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      transitionId: z.string().uuid(),
+      runId: runIdSchema,
+      nonce: nonceSchema,
+      revision: revisionSchema,
+    },
+    outputSchema: registeredRuntimeSchema,
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, transitionId, runId, nonce, revision }, { signal, _meta }) => {
+    const registered = await workspaces.commitRuntimeProjection(
       projectId,
-      revision,
-      buildId,
+      transitionId,
       runId,
       nonce,
-      evidenceToken,
+      revision,
+      runtimeOwner(_meta),
+      signal,
+    )
+    return textResult(`Advanced Runtime projection to ${revision}.`, {
+      ...registered,
     })
   })
 
@@ -2189,6 +2218,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       kind: z.enum(['linked-workspace', 'managed-workspace']).optional(),
       commandTypes: z.array(z.string()).optional(),
       history: z.unknown().optional(),
+      pendingProjection: pendingRuntimeProjectionSchema.optional(),
       conflict: z.literal(true).optional(),
       currentRevision: revisionSchema.optional(),
     }),
@@ -2207,6 +2237,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       }
       let applied: ReturnType<typeof applyEditorCommands>
       let summary: ProjectSummary | WorkspaceSummary
+      let pendingProjection: z.infer<typeof pendingRuntimeProjectionSchema> | undefined
       if (workspace === undefined) {
         applied = applyEditorCommands(snapshot.project, operations)
         summary = await store.push(projectId, baseRevision, applied.project)
@@ -2288,11 +2319,18 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             ...operations.map(operation => ({ source, operation })),
           ].slice(-200),
         })
-        summary = await workspaces.apply(projectId, baseRevision, [{
+        const committed = await workspaces.apply(projectId, baseRevision, [{
           type: 'write',
           path: WORKSPACE_EDITOR_STATE_PATH,
           text: `${JSON.stringify(nextState, null, 2)}\n`,
-        }], reported.runId, signal, owner)
+        }], reported.runId, signal, owner, owner === undefined ? undefined : 600_000)
+        summary = committed
+        if (committed.pendingProjection !== undefined) {
+          pendingProjection = {
+            ...committed.pendingProjection,
+            expiresAt: new Date(committed.pendingProjection.expiresAt).toISOString(),
+          }
+        }
       }
       return textResult(
         `Applied official Three.js Editor commands to ${projectId}: `
@@ -2304,6 +2342,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
           ...'kind' in summary ? { kind: summary.kind } : {},
           commandTypes: applied.commandTypes,
           history: applied.history,
+          ...pendingProjection === undefined ? {} : { pendingProjection },
         },
       )
     } catch (error) {
@@ -2578,13 +2617,18 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       project: projectSchema.optional(),
       workspace: workspaceViewSchema.optional(),
       editorOperations: z.array(editorCommandSchema).optional(),
+      pendingProjection: pendingRuntimeProjectionSchema.optional(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, currentRevision }) => {
+  }, async ({ projectId, currentRevision }, { _meta }) => {
     const workspace = await loadWorkspace(projectId)
     const snapshot = workspace ?? await store.load(projectId)
     const changed = currentRevision !== snapshot.revision
     let editorOperations: EditorCommandOperation[] | undefined
+    const owner = runtimeOwner(_meta, false)
+    const pendingProjection = changed && workspace !== undefined && owner !== undefined
+      ? await workspaces.pendingRuntimeProjection(projectId, snapshot.revision, owner)
+      : undefined
     if (changed
       && workspace?.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
       const [file] = await workspaces.readFiles(projectId, [{
@@ -2602,6 +2646,12 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         project: snapshot.project,
         ...workspace === undefined ? {} : { workspace: workspaceView(workspace) },
         ...editorOperations === undefined ? {} : { editorOperations },
+        ...pendingProjection === undefined ? {} : {
+          pendingProjection: {
+            ...pendingProjection,
+            expiresAt: new Date(pendingProjection.expiresAt).toISOString(),
+          },
+        },
       } : {},
     })
   })

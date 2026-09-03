@@ -63,6 +63,7 @@ import {
 } from './runtime-lock.js'
 import {
   RuntimeProtocolError,
+  advanceRuntimeProjection as nextRuntimeProjection,
   sameLegacyRuntimeIdentity as sameRuntimeIdentity,
   sameRuntimeOwner,
   type LegacyRuntimeIdentity,
@@ -199,6 +200,8 @@ export const workspaceChangeSchema = z.discriminatedUnion('type', [
 const activeRuntimeSchema = z.object({
   revision: z.string().regex(/^[a-f0-9]{64}$/),
   buildId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  buildRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  projectionGeneration: z.number().int().nonnegative().default(0),
   runId: z.string().uuid(),
   nonce: z.string().uuid().optional(),
   evidenceToken: z.string().uuid().optional(),
@@ -208,8 +211,30 @@ const activeRuntimeSchema = z.object({
   ownerPid: z.number().int().positive().optional(),
 })
 type ActiveRuntime = z.infer<typeof activeRuntimeSchema>
+export interface RegisteredRuntime {
+  projectId: string
+  revision: string
+  buildId?: string
+  buildRevision?: string
+  projectionGeneration: number
+  runId: string
+  nonce?: string
+  evidenceToken: string
+}
+export interface PendingRuntimeProjection {
+  transitionId: string
+  projectId: string
+  runId: string
+  nonce: string
+  baseRevision: string
+  targetRevision: string
+  expectedGeneration: number
+  expiresAt: number
+}
 export interface PreparedRuntimeRun extends RuntimeIdentity {
   buildId?: string
+  buildRevision?: string
+  projectionGeneration: number
   evidenceToken: string
   expiresAt: number
 }
@@ -390,6 +415,11 @@ interface PendingRuntimeCommand {
   settlementDeadline?: number
   timer: ReturnType<typeof setTimeout>
   abort?: () => void
+}
+
+export interface WorkspaceCommitResult {
+  snapshot: WorkspaceSnapshot
+  pendingProjection?: PendingRuntimeProjection
 }
 
 interface ActiveRuntimeGrant {
@@ -624,6 +654,7 @@ export class WorkspaceStore {
   private readonly sessionWorkspaceIds = new Set<string>()
   private readonly activeRuntimes = new Map<string, ActiveRuntime>()
   private readonly preparedRuntimes = new Map<string, PreparedRuntimeRun>()
+  private readonly pendingRuntimeProjections = new Map<string, PendingRuntimeProjection>()
   private readonly activeRuntimeGrants = new Map<string, ActiveRuntimeGrant>()
   private readonly runtimeCommands = new Map<string, PendingRuntimeCommand>()
   private readonly verifiedResourceObjects = new Map<string, Promise<VerifiedResourceObject>>()
@@ -1330,7 +1361,7 @@ export class WorkspaceStore {
     owner?: RuntimeOwner,
     previousRevision?: string,
     signal?: AbortSignal,
-  ): Promise<string> {
+  ): Promise<RegisteredRuntime> {
     validateProjectId(projectId)
     if ((nonce === undefined) !== (owner === undefined)) {
       throw new Error('Runtime nonce and owner identity must be provided together')
@@ -1349,6 +1380,7 @@ export class WorkspaceStore {
             || !key.startsWith(`${projectId}\0`)
             || active.sessionId !== owner.sessionId) continue
           this.activeRuntimes.delete(key)
+          this.pendingRuntimeProjections.delete(key)
           this.activeRuntimeGrants.delete(key)
           this.rejectRuntimeCommand(key, 'MCP connection generation changed')
         }
@@ -1382,11 +1414,21 @@ export class WorkspaceStore {
         }
       }
       const runtimeKey = ownerKey ?? projectId
+      this.pendingRuntimeProjections.delete(runtimeKey)
+      const projectionGeneration = previousRevision === undefined
+        ? 0
+        : (previousRuntime?.projectionGeneration ?? 0) + 1
+      const buildRevision = buildId === undefined
+        ? previousRuntime?.buildRevision
+          ?? (previousRuntime?.buildId === undefined ? undefined : previousRuntime.revision)
+        : revision
       this.rejectRuntimeCommand(runtimeKey, 'Runtime revision changed')
       this.activeRuntimeGrants.delete(runtimeKey)
       const activeRuntime = activeRuntimeSchema.parse({
         revision,
-        buildId,
+        buildId: buildId ?? previousRuntime?.buildId,
+        buildRevision,
+        projectionGeneration,
         runId,
         nonce,
         evidenceToken,
@@ -1423,7 +1465,16 @@ export class WorkspaceStore {
         }
         signal.throwIfAborted()
       }
-      return evidenceToken
+      return {
+        projectId,
+        revision,
+        buildId: activeRuntime.buildId,
+        buildRevision: activeRuntime.buildRevision,
+        projectionGeneration,
+        runId,
+        nonce: activeRuntime.nonce,
+        evidenceToken,
+      }
     })
   }
 
@@ -1450,6 +1501,8 @@ export class WorkspaceStore {
         revision,
         buildId,
         runId,
+        buildRevision: buildId === undefined ? undefined : revision,
+        projectionGeneration: 0,
         nonce,
         evidenceToken: randomUUID(),
         expiresAt: Date.now() + ttlMs,
@@ -1496,6 +1549,8 @@ export class WorkspaceStore {
         revision: prepared.revision,
         buildId: prepared.buildId,
         runId: prepared.runId,
+        buildRevision: prepared.buildRevision,
+        projectionGeneration: prepared.projectionGeneration,
         nonce: prepared.nonce,
         evidenceToken: prepared.evidenceToken,
         sessionId: owner.sessionId,
@@ -1520,7 +1575,123 @@ export class WorkspaceStore {
       this.activeRuntimeGrants.delete(key)
       this.activeRuntimes.set(key, next)
       this.preparedRuntimes.delete(key)
+      this.pendingRuntimeProjections.delete(key)
       return prepared
+    })
+  }
+
+  async pendingRuntimeProjection(
+    projectId: string,
+    revision: string,
+    owner: RuntimeOwner,
+  ): Promise<PendingRuntimeProjection | undefined> {
+    validateProjectId(projectId)
+    return this.withLock(projectId, async () => {
+      const key = this.runtimeKey(projectId, owner)
+      const pending = this.pendingRuntimeProjections.get(key)
+      if (pending === undefined) return undefined
+      if (pending.expiresAt <= Date.now()) {
+        this.pendingRuntimeProjections.delete(key)
+        return undefined
+      }
+      return pending.targetRevision === revision ? { ...pending } : undefined
+    })
+  }
+
+  async commitRuntimeProjection(
+    projectId: string,
+    transitionId: string,
+    runId: string,
+    nonce: string,
+    revision: string,
+    owner: RuntimeOwner,
+    signal?: AbortSignal,
+  ): Promise<RegisteredRuntime> {
+    validateProjectId(projectId)
+    return this.withLock(projectId, async () => {
+      signal?.throwIfAborted()
+      const key = this.runtimeKey(projectId, owner)
+      const pending = this.pendingRuntimeProjections.get(key)
+      if (pending === undefined
+        || pending.expiresAt <= Date.now()
+        || pending.transitionId !== transitionId
+        || pending.projectId !== projectId
+        || pending.runId !== runId
+        || pending.nonce !== nonce
+        || pending.targetRevision !== revision) {
+        if (pending?.expiresAt !== undefined && pending.expiresAt <= Date.now()) {
+          this.pendingRuntimeProjections.delete(key)
+        }
+        throw new RuntimeProtocolError(
+          'RUNTIME_PROJECTION_STALE',
+          'Pending Runtime projection is missing, expired, or stale',
+        )
+      }
+      const active = this.activeRuntimes.get(key)
+      if (active === undefined
+        || active.runId !== runId
+        || active.nonce !== nonce
+        || active.sessionId !== owner.sessionId
+        || active.connectionGeneration !== owner.connectionGeneration) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_PROJECTION_STALE',
+          'Runtime execution changed before projection commit',
+        )
+      }
+      if (active.buildId === undefined) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_PROJECTION_STALE',
+          'Active Runtime has no loaded build provenance',
+        )
+      }
+      const projection = nextRuntimeProjection(
+        {
+          workspaceRevision: active.revision,
+          generation: active.projectionGeneration,
+          loadedBuild: {
+            buildId: active.buildId,
+            sourceRevision: active.buildRevision ?? active.revision,
+          },
+        },
+        {
+          workspaceRevision: pending.baseRevision,
+          generation: pending.expectedGeneration,
+        },
+        pending.targetRevision,
+      )
+      const { snapshot, activePath } = await this.validateRuntimeBuild(
+        projectId,
+        revision,
+        undefined,
+      )
+      const next = activeRuntimeSchema.parse({
+        revision: projection.workspaceRevision,
+        buildId: projection.loadedBuild.buildId,
+        buildRevision: projection.loadedBuild.sourceRevision,
+        projectionGeneration: projection.generation,
+        runId,
+        nonce,
+        evidenceToken: active.evidenceToken,
+        sessionId: owner.sessionId,
+        connectionGeneration: owner.connectionGeneration,
+        ownerId: this.runtimeOwnerId,
+        ownerPid: process.pid,
+      })
+      this.rejectRuntimeCommand(key, 'Runtime revision changed')
+      this.activeRuntimeGrants.delete(key)
+      await this.writeAtomic(snapshot.path, activePath, canonicalBytes(next))
+      this.activeRuntimes.set(key, next)
+      this.pendingRuntimeProjections.delete(key)
+      return {
+        projectId,
+        revision: next.revision,
+        buildId: next.buildId,
+        buildRevision: next.buildRevision,
+        projectionGeneration: next.projectionGeneration,
+        runId,
+        nonce,
+        evidenceToken: next.evidenceToken!,
+      }
     })
   }
 
@@ -1559,6 +1730,7 @@ export class WorkspaceStore {
         ? await this.clearActiveRuntime(workspace.path, revision, runId)
         : this.activeRuntimes.delete(key)
       if (owner !== undefined) {
+        this.pendingRuntimeProjections.delete(key)
         this.activeRuntimeGrants.delete(key)
         await this.clearActiveRuntime(workspace.path, revision, runId)
       }
@@ -1948,7 +2120,8 @@ export class WorkspaceStore {
     expectedRunId?: string,
     signal?: AbortSignal,
     owner?: RuntimeOwner,
-  ): Promise<WorkspaceSnapshot> {
+    projectionTtlMs?: number,
+  ): Promise<WorkspaceSnapshot & { pendingProjection?: PendingRuntimeProjection }> {
     validateProjectId(projectId)
     const changes = candidates.map(candidate => workspaceChangeSchema.parse(candidate))
     if (changes.length === 0 || changes.length > 100) {
@@ -1958,13 +2131,21 @@ export class WorkspaceStore {
       signal?.throwIfAborted()
       const registration = this.workspaces.get(projectId)
       if (registration === undefined) throw new Error(`unknown workspace ${projectId}`)
+      let activeRuntime: ActiveRuntime | undefined
       const commit = async (): Promise<WorkspaceSnapshot> => {
       const current = await this.loadUnlocked(projectId)
       if (current.revision !== baseRevision) {
         throw new RevisionConflictError(current.revision)
       }
+      if (projectionTtlMs !== undefined
+        && (expectedRunId === undefined || owner === undefined)) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_PROJECTION_STALE',
+          'Runtime projection requires an owned active execution',
+        )
+      }
       if (expectedRunId !== undefined) {
-        const activeRuntime = owner === undefined
+        activeRuntime = owner === undefined
           ? await this.readActiveRuntime(current.path)
           : this.activeRuntimes.get(this.runtimeKey(projectId, owner))
         if (activeRuntime?.revision !== baseRevision
@@ -1973,6 +2154,13 @@ export class WorkspaceStore {
         }
       }
       const normalized = await this.normalizeChanges(current, changes)
+      if (projectionTtlMs !== undefined
+        && (activeRuntime?.nonce === undefined || activeRuntime.buildId === undefined)) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_PROJECTION_STALE',
+          'Runtime projection cannot be prepared without an owned active execution',
+        )
+      }
       if (normalized.length === 0) throw new Error('workspace change batch has no effect')
       const editorState = expectedRunId === undefined
         ? normalized.find(change => change.path === WORKSPACE_EDITOR_STATE_PATH)
@@ -2075,7 +2263,23 @@ export class WorkspaceStore {
       }
       return this.loadUnlocked(projectId)
       }
-      return commit()
+      const snapshot = await commit()
+      if (projectionTtlMs === undefined) return snapshot
+      const pendingProjection: PendingRuntimeProjection = {
+        transitionId: randomUUID(),
+        projectId,
+        runId: activeRuntime!.runId,
+        nonce: activeRuntime!.nonce!,
+        baseRevision,
+        targetRevision: snapshot.revision,
+        expectedGeneration: activeRuntime!.projectionGeneration,
+        expiresAt: Date.now() + projectionTtlMs,
+      }
+      this.pendingRuntimeProjections.set(
+        this.runtimeKey(projectId, owner!),
+        pendingProjection,
+      )
+      return { ...snapshot, pendingProjection }
     })
   }
 

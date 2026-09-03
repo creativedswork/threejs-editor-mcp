@@ -136,6 +136,16 @@ interface RemoteSnapshot {
   revision: string
   workspace?: WorkspaceView
   editorOperations?: EditorCommandOperation[]
+  pendingProjection?: {
+    transitionId: string
+    projectId: string
+    runId: string
+    nonce: string
+    baseRevision: string
+    targetRevision: string
+    expectedGeneration: number
+    expiresAt: string
+  }
 }
 
 interface HistoryEntry {
@@ -180,6 +190,7 @@ interface M7Run {
   revision: string
   runId: string
   nonce: string
+  projectionGeneration?: number
 }
 
 interface CommittedRuntime {
@@ -2146,6 +2157,18 @@ function snapshotFromResult(result: CallToolResult): RemoteSnapshot | undefined 
   if (editorOperations?.some(operation => operation === undefined)) {
     throw new Error('pull_project returned invalid Editor operations')
   }
+  const pending = record(structured.pendingProjection)
+  const pendingProjection = pending !== undefined
+    && typeof pending.transitionId === 'string'
+    && typeof pending.projectId === 'string'
+    && typeof pending.runId === 'string'
+    && typeof pending.nonce === 'string'
+    && typeof pending.baseRevision === 'string'
+    && typeof pending.targetRevision === 'string'
+    && typeof pending.expectedGeneration === 'number'
+    && typeof pending.expiresAt === 'string'
+    ? pending as unknown as NonNullable<RemoteSnapshot['pendingProjection']>
+    : undefined
   return {
     project: candidate as unknown as Project,
     revision: nextRevision,
@@ -2153,6 +2176,7 @@ function snapshotFromResult(result: CallToolResult): RemoteSnapshot | undefined 
     ...editorOperations === undefined
       ? {}
       : { editorOperations: editorOperations as EditorCommandOperation[] },
+    ...pendingProjection === undefined ? {} : { pendingProjection },
   }
 }
 
@@ -3683,10 +3707,18 @@ async function applyEditorRevision(
   if (!canApplyEditorRevision(snapshot)
     || m7ActiveRun === undefined
     || snapshot.workspace === undefined
-    || snapshot.editorOperations === undefined) return false
+    || snapshot.editorOperations === undefined
+    || snapshot.pendingProjection === undefined) return false
 
   const run = m7ActiveRun
-  const nextRun = { ...run, revision: snapshot.revision }
+  const pending = snapshot.pendingProjection
+  if (pending.projectId !== run.projectId
+    || pending.runId !== run.runId
+    || pending.nonce !== run.nonce
+    || pending.baseRevision !== run.revision
+    || pending.targetRevision !== snapshot.revision
+    || pending.expectedGeneration !== (run.projectionGeneration ?? 0)) return false
+  let nextRun = { ...run, revision: snapshot.revision }
   const token = context.epoch
   m7StartToken = token
   let registrationStarted = false
@@ -3694,27 +3726,6 @@ async function applyEditorRevision(
   let runtimeAdvanced = false
   try {
     status.textContent = 'Applying external Editor changes'
-    registrationStarted = true
-    const registered = await app.callServerTool({
-      name: 'register_runtime_run',
-      arguments: {
-        projectId: run.projectId,
-        revision: nextRun.revision,
-        runId: run.runId,
-        nonce: run.nonce,
-        previousRevision: run.revision,
-      },
-    }, {
-      signal: context.signal,
-      timeout: M7_LIFECYCLE_TIMEOUT,
-      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
-    })
-    if (registered.isError) throw new Error(resultError(registered))
-    const registration = record(registered.structuredContent)
-    if (registration?.evidenceToken !== m7EvidenceToken) {
-      throw new Error('Runtime evidence token changed during revision rollover')
-    }
-    advanced = true
     if (m7ActiveRun === undefined
       || !sameM7Run(m7ActiveRun, run)
       || !m7RunIsCurrent(run)
@@ -3729,11 +3740,14 @@ async function applyEditorRevision(
       nextRun,
       10_000,
       context.signal,
+      event => event.type === 'runtime-error'
+        || event.data?.projectionTransitionId === pending.transitionId,
     )
     postM7Run(run, 'apply-operations', {
       operations: snapshot.editorOperations,
       previousRevision: run.revision,
       revision: snapshot.revision,
+      projectionTransitionId: pending.transitionId,
     })
     const event = await applied
     if (event.type === 'runtime-error') {
@@ -3756,6 +3770,31 @@ async function applyEditorRevision(
       || root.dataset.sync !== expectedSync) {
       throw new Error('Editor state changed during Runtime revision rollover')
     }
+
+    registrationStarted = true
+    const registered = await app.callServerTool({
+      name: 'commit_runtime_projection',
+      arguments: {
+        projectId: run.projectId,
+        transitionId: pending.transitionId,
+        runId: run.runId,
+        nonce: run.nonce,
+        revision: snapshot.revision,
+      },
+    }, {
+      signal: context.signal,
+      timeout: M7_LIFECYCLE_TIMEOUT,
+      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    })
+    if (registered.isError) throw new Error(resultError(registered))
+    const registration = record(registered.structuredContent)
+    const projectionGeneration = registration?.projectionGeneration
+    if (registration?.evidenceToken !== m7EvidenceToken
+      || typeof projectionGeneration !== 'number') {
+      throw new Error('Runtime projection commit returned an invalid registration')
+    }
+    nextRun = { ...nextRun, projectionGeneration }
+    advanced = true
 
     workspace = snapshot.workspace
     renderFileTree()

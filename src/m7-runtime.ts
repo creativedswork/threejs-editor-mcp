@@ -1814,7 +1814,10 @@ export function m7BootstrapHtml(): string {
             current.revision = nextRevision
             eventRevision = nextRevision
             current.revisionTransition = undefined
-            emit(runId, nonce, 'editor-scene', editorScene(current))
+            emit(runId, nonce, 'editor-scene', {
+              ...editorScene(current),
+              projectionTransitionId: request.projectionTransitionId,
+            })
           })
         } catch (error) {
           emit(
