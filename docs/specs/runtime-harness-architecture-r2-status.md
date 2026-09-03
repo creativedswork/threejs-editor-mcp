@@ -1,9 +1,9 @@
 # Runtime Harness Architecture R2 Status
 
-Updated: 2026-09-03T17:58:44Z
+Updated: 2026-09-03T18:04:38Z
 Milestone: R2 Complete authoritative projection
-State: `IMPLEMENTING_SLICES`
-Gate: `IMPLEMENTING_SLICES`
+State: `MILESTONE_CANDIDATE`
+Gate: `AWAITING_ACCEPTANCE`
 Base: `655cb62f25814f47f88c5bfab21e855dd73bfd9b`
 Branch: `main`
 
@@ -24,7 +24,7 @@ failure.
 |---|---|---|---|
 | 1. Projection transaction boundary | `COMMITTED_LOCAL` | `61020fa` | Narrow R2 hunks in `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and the `apply-operations` acknowledgement in `src/m7-runtime.ts`; this STATUS |
 | 2. Committed-revision recovery | `COMMITTED_LOCAL` | `7b0273e` | Narrow R2 recovery hunks in `src/workspaces.ts` and `src/view.ts`; this STATUS |
-| 3. Projection invariant matrix | `IMPLEMENTING` | pending | R2-only cases in `tests/runtime-registry.test.mjs`; this STATUS |
+| 3. Projection invariant matrix | `COMMITTED_LOCAL` | `5c980b1` | R2-only cases in `tests/runtime-registry.test.mjs`; this STATUS |
 
 ## Recovered Baseline
 
@@ -88,38 +88,69 @@ failure.
   opaque authority/evidence protocol.
 - Remove debug sessions and probes only under their own accepted cleanup scope.
 
+## Milestone Self-Test
+
+- Source under test: committed HEAD
+  `5c980b15d1989592102540b613e31c8c1425cafa`, exported to an isolated
+  temporary directory so excluded working-tree changes could not affect the
+  result.
+- Focused build:
+  `tsdown --config tsdown.config.ts --filter threejs-editor-mcp/server` passed.
+- Focused test:
+  `node --test --test-name-pattern='Runtime projection advances only after acknowledgement and recovers by replacement' tests/runtime-registry.test.mjs`
+  passed `1/1` in 13.1 seconds.
+- The test proves registry state remains on the base revision before
+  acknowledgement, stale and duplicate commits fail, a matching commit
+  advances exactly one generation, and candidate replacement converges from
+  the committed Workspace revision both before projection commit and after an
+  ambiguously observed commit. A new owner generation also converges on that
+  committed revision.
+- Coverage collection was skipped because no coverage gate was requested and
+  this milestone explicitly defers coverage to Release Hardening.
+- `utree flush` was attempted after the passing test but the TRAE sandbox
+  denied writes to the Skill and system temporary directories. No repository
+  artifact or test result was affected.
+- Functional implementation took tens of minutes; the concentrated build and
+  self-test took under one minute.
+
+## Acceptance
+
+1. Review commits `61020fa`, `7b0273e`, and `5c980b1`.
+2. Confirm the focused test reports one passing R2 projection case.
+3. Confirm an Editor mutation returns a pending transition while the registry
+   remains on the base revision.
+4. Confirm a matching acknowledgement advances the registry once, while
+   timeout, cancellation, acknowledgement failure, reconnect, and an
+   ambiguously observed CAS recover by replacing the Runtime from the
+   committed Workspace revision.
+
+Expected result: Workspace, owner-scoped registry, and iframe converge on the
+committed revision without compensating browser rollback. Failure is any stale
+registry revision after candidate replacement, a second generation advance for
+one transition, or disposal/rollback of the committed Workspace state.
+
 ## EXECUTION_CHECKPOINT
 
-- Updated at: 2026-09-03T17:58:44Z
+- Updated at: 2026-09-03T18:04:38Z
 - Milestone: R2 Complete authoritative projection
-- Slice: 3. Projection invariant matrix
-- Phase: commit
-- Slice state: `IMPLEMENTED`
+- Slice: Milestone self-test
+- Phase: milestone-candidate
+- Slice state: `COMMITTED_LOCAL`
 - Completed facts: R1 was accepted at `655cb62`; branch, HEAD, index, dirty
   files, canonical documents, and relevant hashes were verified from disk.
-  Slice 1 was committed as `61020fa`. Slice 2 was committed as `7b0273e`;
-  both commits were reread and the index is empty. The Slice 1 follow-up type
-  diagnostic was fixed and passed its targeted TypeScript check in Slice 2.
-- Repository state: `main` at `7b0273e068763b7a59e7c7428782fc114ddbf53f`;
-  the index contains only this STATUS and the standalone appended R2 test in
-  `tests/runtime-registry.test.mjs`; the pre-existing unrelated dirty and
-  untracked paths remain.
-- Intended changes: append one independently staged R2 invariant test to
-  `tests/runtime-registry.test.mjs`, proving pending state before
-  acknowledgement, stale CAS rejection, exactly one generation advance, and
-  candidate convergence after unacknowledged or ambiguously committed
-  projection, including a new owner generation after reconnect. The pre-edit
-  SHA-256 is
-  `dae86f47c061f7bda7ef90f4afdbe3cf2b259a561655ab9ce99703ce53042676`;
-  the stable post-edit SHA-256 is
-  `67f21e68fb659c5ff8f8ad618d8619a3c890b900211b76929a3b76e15d00671d`.
+  Slice 1 was committed as `61020fa`, Slice 2 as `7b0273e`, and Slice 3 as
+  `5c980b1`; all commits were reread and the index is empty. The Slice 1
+  follow-up type diagnostic passed its targeted TypeScript check in Slice 2.
+- Repository state: `main` at `5c980b15d1989592102540b613e31c8c1425cafa`;
+  index empty; the pre-existing unrelated dirty and untracked paths remain.
+- Intended changes: no further implementation is authorized before R2
+  acceptance.
 - Explicit exclusions: all items in the Explicit Exclusions section; no
   process, port, remote, cleanup, or release-hardening operation.
 - Verification: Slice 2 passed `git diff --cached --check`; the Slice 1
   follow-up Fix passed its targeted TypeScript command. Slice 3 passed
-  `node --check tests/runtime-registry.test.mjs` and `git diff --check`;
-  functional execution remains deferred to the one concentrated R2 self-test
-  after its local commit.
+  `node --check tests/runtime-registry.test.mjs` and `git diff --check`. The
+  concentrated committed-HEAD R2 test passed `1/1` in 13.1 seconds.
 - Evidence paths: this STATUS and the canonical plan/spec documents named in
   the milestone request.
 - Run identity: N/A; no browser or external Runtime smoke is active for R2.
@@ -129,11 +160,10 @@ failure.
 - Invalidators: branch or HEAD change, unknown staged content, target hash
   change outside an owned patch, or inability to separate an R2 hunk from
   excluded R4/M9/debug work.
-- Blockers and risks: `tests/runtime-registry.test.mjs` contains pre-existing
-  R4 `runtimeRef`/evidence and obsolete `advance_runtime_projection` edits;
-  whole-file staging is forbidden.
-- Exact next action: create the local Slice 3 commit, reread it and the dirty
-  tree, then run the one concentrated R2 self-test.
+- Blockers and risks: real browser failure injection, full suites, coverage,
+  typecheck, lint, production build, and review remain deferred to Release
+  Hardening; the `utree flush` report artifact was blocked by sandbox policy.
+- Exact next action: await explicit user acceptance or requested R2 iteration.
 - Stop condition: stop at an ownership ambiguity that cannot be resolved from
   Git and call-site evidence, or after R2 reaches
   `MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE`.
