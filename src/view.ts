@@ -39,7 +39,7 @@ import {
 import { RuntimeAssetCache } from './runtime-asset-cache.js'
 import { RuntimeEffects } from './runtime-effects.js'
 import {
-  RuntimeTransitionController,
+  RuntimeCoordinator,
   type RuntimeLifecycleSnapshot,
   type RuntimeTransitionContext,
 } from './runtime-lifecycle.js'
@@ -195,7 +195,13 @@ interface M7Run {
 interface CommittedRuntime {
   projectId: string
   revision: string
-  run?: M7Run
+  frame: HTMLIFrameElement
+  runtime?: {
+    run: M7Run
+    artifact: RuntimeArtifact
+    evidenceToken: string
+    mode: 'edit' | 'run'
+  }
 }
 
 interface RuntimeDiagnosticsEffect {
@@ -238,11 +244,32 @@ interface WorkspaceDraft {
   }
 }
 
+interface RuntimeArtifact {
+  projectId: string
+  revision: string
+  buildId: string
+  build: Record<string, unknown>
+  bundle: string
+  backend: 'webgl' | 'webgpu' | 'raw-webgpu'
+  assets: RuntimeAsset[]
+  validated: boolean
+}
+
 interface M7StartingRun {
   run: M7Run
   frame: HTMLIFrameElement
+  artifact: RuntimeArtifact
+  evidenceToken?: string
+  mode: 'edit' | 'run'
   signal: AbortSignal
   runSent: boolean
+}
+
+interface M7ValidationRuntime {
+  run: M7Run
+  frame: HTMLIFrameElement
+  buildId: string
+  evidenceToken: string
 }
 
 interface M7EditorSceneReport {
@@ -492,8 +519,8 @@ function compileLifecycle(source: string): GameLifecycle {
 const root = required<HTMLElement>('[data-three-editor]')
 const viewport = required<HTMLElement>('[data-viewport]')
 const canvas = required<HTMLCanvasElement>('[data-three-canvas]')
-let runtimeFrame = required<HTMLIFrameElement>('[data-runtime-sandbox]')
-const validationFrame = required<HTMLIFrameElement>('[data-validation-runtime]')
+const initialRuntimeFrame = required<HTMLIFrameElement>('[data-runtime-sandbox]')
+const validationRuntimeFrame = required<HTMLIFrameElement>('[data-validation-runtime]')
 const title = required<HTMLInputElement>('[data-title]')
 const revisionOutput = required<HTMLOutputElement>('[data-revision]')
 const undo = required<HTMLButtonElement>('[data-undo]')
@@ -601,10 +628,6 @@ let m5Ready: Record<string, unknown> | undefined
 let m5ServerCommandProof: OfficialCommandProof | undefined
 let m5MessagesAfterStop = 0
 let m5FrameAtStop: number | undefined
-let m7ActiveRun: M7Run | undefined
-let m7StartingRun: M7StartingRun | undefined
-let m7StartToken = 0
-let m7Build: Record<string, unknown> | undefined
 let m7Events: M7RuntimeEvent[] = []
 let m7Errors: string[] = []
 let m7Ready: Record<string, unknown> | undefined
@@ -616,18 +639,6 @@ const m7LifecycleTasks = new Set<Promise<unknown>>()
 const m7CleanupFailures: unknown[] = []
 let m7EditorSceneAccepted = false
 let m7EditorSceneReport: M7EditorSceneReport | undefined
-let m7ValidationRun: M7Run | undefined
-let m7EvidenceToken: string | undefined
-let m7Bundle: {
-  projectId: string
-  revision: string
-  buildId: string
-  build: Record<string, unknown>
-  bundle: string
-  backend: 'webgl' | 'webgpu' | 'raw-webgpu'
-  assets: RuntimeAsset[]
-  validated: boolean
-} | undefined
 const runtimeAssetCache = new RuntimeAssetCache()
 let m7BuildRequests = 0
 let m7AssetFetches = 0
@@ -653,9 +664,25 @@ const runtimeEffects = new RuntimeEffects(M7_LIFECYCLE_TIMEOUT, ({ name, error }
   recordRuntimeWarning([`${name} unavailable: ${runtimeMessage(error).split('\n')[0]}`])
 })
 let publishedRuntimeIdentity: string | undefined
-const runtimeTransitions = new RuntimeTransitionController<CommittedRuntime>(
+const runtimeCoordinator = new RuntimeCoordinator<
+  CommittedRuntime,
+  M7StartingRun,
+  M7ValidationRuntime
+>(
   projectRuntimeUi,
 )
+
+function activeRuntime(): CommittedRuntime['runtime'] {
+  return runtimeCoordinator.snapshot().committed?.runtime
+}
+
+function activeRun(): M7Run | undefined {
+  return activeRuntime()?.run
+}
+
+function runtimeFrame(): HTMLIFrameElement {
+  return runtimeCoordinator.snapshot().committed?.frame ?? initialRuntimeFrame
+}
 
 const loader = new THREE.ObjectLoader()
 const raycaster = new THREE.Raycaster()
@@ -754,7 +781,13 @@ function refreshHistoryButtons(): void {
   redo.disabled = historyIndex < 0 || historyIndex >= history.length - 1
 }
 
-function projectRuntimeUi(snapshot: RuntimeLifecycleSnapshot<CommittedRuntime>): void {
+function projectRuntimeUi(
+  snapshot: RuntimeLifecycleSnapshot<
+    CommittedRuntime,
+    M7StartingRun,
+    M7ValidationRuntime
+  >,
+): void {
   root.dataset.lifecyclePhase = snapshot.phase
   root.dataset.lifecycleEpoch = String(snapshot.epoch)
   root.dataset.playState = snapshot.phase === 'playing'
@@ -775,7 +808,9 @@ function projectRuntimeUi(snapshot: RuntimeLifecycleSnapshot<CommittedRuntime>):
   else if (snapshot.phase === 'entering-play') status.textContent = 'Entering Play'
   else if (snapshot.phase === 'restoring') status.textContent = 'Restoring edit state'
   else if (snapshot.phase === 'saving') status.textContent = 'Committing revision'
-  const run = snapshot.committed?.run
+  const runtime = snapshot.committed?.runtime
+  if (runtime !== undefined) root.dataset.runtimeMode = runtime.mode
+  const run = runtime?.run
   const identity = run === undefined
     ? undefined
     : `${run.projectId}:${run.revision}:${run.runId}:${run.nonce}`
@@ -788,7 +823,8 @@ function projectRuntimeUi(snapshot: RuntimeLifecycleSnapshot<CommittedRuntime>):
 }
 
 function refreshPlayButtons(): void {
-  const phase = runtimeTransitions.snapshot().phase
+  const snapshot = runtimeCoordinator.snapshot()
+  const phase = snapshot.phase
   const stable = phase === 'edit-ready' || phase === 'playing'
   const active = phase !== 'edit-ready' && phase !== 'disposed'
   play.disabled = editorDisabled
@@ -796,7 +832,7 @@ function refreshPlayButtons(): void {
     || navigationTab !== 'scene'
     || root.dataset.sync !== 'clean'
   stop.disabled = phase !== 'playing'
-  activeGrant.disabled = phase !== 'playing' || m7ActiveRun === undefined
+  activeGrant.disabled = phase !== 'playing' || snapshot.committed?.runtime === undefined
   runtimeDebug.disabled = workspace === undefined
     || !stable
   runtimeQuality.disabled = workspace === undefined || active
@@ -1397,7 +1433,7 @@ async function restoreWorkspaceDraft(snapshot: RemoteSnapshot): Promise<void> {
   }
 
   restoredDraftOperations = [...draft.editorOperations]
-  await runtimeTransitions.idle()
+  await runtimeCoordinator.idle()
   await runtimeEffects.idle()
   if (tearingDown || workspace === undefined || project === undefined) return
   const baseline = cloneProject(history[0]?.project ?? project)
@@ -1646,7 +1682,7 @@ function selectObject(object: THREE.Object3D | undefined, notifyRuntime = true):
   }
   transform?.detach()
   if (object !== undefined && object !== scene && !isHelper(object)) transform?.attach(object)
-  if (notifyRuntime && workspace !== undefined && m7ActiveRun !== undefined) {
+  if (notifyRuntime && workspace !== undefined && activeRun() !== undefined) {
     postM7('select-object', { objectUuid: object?.uuid })
   }
   renderHierarchy()
@@ -1845,12 +1881,12 @@ function acceptRuntimeEditorScene(
 }
 
 function previewRuntimeOperation(operation: EditorCommandOperation): void {
-  if (workspace === undefined || m7ActiveRun === undefined) return
+  if (workspace === undefined || activeRun() === undefined) return
   postM7('apply-operation', { operation })
 }
 
 function syncRuntimeMirror(): void {
-  if (workspace === undefined || m7ActiveRun === undefined) return
+  if (workspace === undefined || activeRun() === undefined) return
   const operations: EditorCommandOperation[] = []
   scene.traverse(object => {
     if (object === scene || isHelper(object)) return
@@ -1928,8 +1964,8 @@ async function applySnapshotPort(
   fileLoading = false
   stopLocalRuntimeForSnapshot()
   if (workspace !== undefined && nextWorkspace === undefined) {
-    runtimeFrame.hidden = true
-    await stopM7Runtime(false)
+    runtimeFrame().hidden = true
+    await stopM7Runtime(false, true, context)
   }
   const previousFile = activeFile
   workspace = nextWorkspace
@@ -1986,16 +2022,16 @@ async function applySnapshotPort(
   }
   if (workspace !== undefined) {
     if (context === undefined) throw new Error('Runtime transition context is required')
-    const run = await startM7RuntimePort(context, workspaceMode)
-    if (run === undefined || !context.isCurrent()) {
+    const committed = await startM7RuntimePort(context, workspaceMode)
+    if (committed === undefined || !context.isCurrent()) {
       throw new Error('Runtime snapshot adoption was cancelled')
     }
     status.textContent = message
-    return { projectId: run.projectId, revision: run.revision, run }
+    return committed
   }
   status.textContent = message
   if (projectId === undefined) throw new Error('Project identity is unavailable')
-  return { projectId, revision: nextRevision }
+  return { projectId, revision: nextRevision, frame: runtimeFrame() }
 }
 
 function adoptSnapshot(
@@ -2006,7 +2042,7 @@ function adoptSnapshot(
   workspaceMode: 'edit' | 'run' = 'edit',
   command: 'reload' | 'adopt-snapshot' = 'adopt-snapshot',
 ): Promise<void> {
-  return runtimeTransitions.enqueue(command, M7_TRANSITION_TIMEOUT, async context => ({
+  return runtimeCoordinator.enqueue(command, M7_TRANSITION_TIMEOUT, async context => ({
     phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',
     committed: await applySnapshotPort(
       nextProject,
@@ -2414,7 +2450,7 @@ function waitForM5Event(type: string, runId: string, timeout = 8_000): Promise<M
       reject(new Error(`timed out waiting for M5 ${type}`))
     }, timeout)
     const listener = (event: MessageEvent<unknown>) => {
-      if (event.source !== runtimeFrame.contentWindow) return
+      if (event.source !== runtimeFrame().contentWindow) return
       const candidate = record(event.data)
       if (candidate?.channel !== 'threejs-editor-m5-runtime'
         || candidate.runId !== runId
@@ -2428,10 +2464,11 @@ function waitForM5Event(type: string, runId: string, timeout = 8_000): Promise<M
 }
 
 function postM5(action: string, payload: Record<string, unknown> = {}): void {
-  if (m5ActiveRun === undefined || runtimeFrame.contentWindow === null) {
+  const frameElement = runtimeFrame()
+  if (m5ActiveRun === undefined || frameElement.contentWindow === null) {
     throw new Error('M5 runtime is not active')
   }
-  runtimeFrame.contentWindow.postMessage({
+  frameElement.contentWindow.postMessage({
     channel: 'threejs-editor-m5-runtime',
     action,
     ...m5ActiveRun,
@@ -2441,13 +2478,14 @@ function postM5(action: string, payload: Record<string, unknown> = {}): void {
 
 function loadM5Frame(): Promise<void> {
   return new Promise((resolve, reject) => {
+    const frameElement = runtimeFrame()
     const timer = window.setTimeout(() => reject(new Error('M5 runtime frame load timed out')), 5_000)
-    runtimeFrame.addEventListener('load', () => {
+    frameElement.addEventListener('load', () => {
       window.clearTimeout(timer)
       resolve()
     }, { once: true })
-    runtimeFrame.hidden = false
-    runtimeFrame.srcdoc = m5BootstrapHtml()
+    frameElement.hidden = false
+    frameElement.srcdoc = m5BootstrapHtml()
   })
 }
 
@@ -2476,7 +2514,7 @@ async function readM5Resources(): Promise<M5RuntimeManifest> {
 
 async function stopIsolatedRuntime(): Promise<Record<string, unknown> | undefined> {
   if (m5ActiveRun === undefined) {
-    runtimeFrame.hidden = true
+    runtimeFrame().hidden = true
     return undefined
   }
   const run = m5ActiveRun
@@ -2486,8 +2524,8 @@ async function stopIsolatedRuntime(): Promise<Record<string, unknown> | undefine
   const frameValue = event.data?.frame
   m5FrameAtStop = typeof frameValue === 'number' ? frameValue : undefined
   m5ActiveRun = undefined
-  runtimeFrame.hidden = true
-  runtimeFrame.srcdoc = '<!doctype html><title>Stopped</title>'
+  runtimeFrame().hidden = true
+  runtimeFrame().srcdoc = '<!doctype html><title>Stopped</title>'
   status.textContent = 'M5 Runtime stopped'
   return event.data
 }
@@ -2521,7 +2559,7 @@ async function startIsolatedRuntime(
 }
 
 window.addEventListener('message', event => {
-  if (event.source !== runtimeFrame.contentWindow) return
+  if (event.source !== runtimeFrame().contentWindow) return
   const candidate = record(event.data)
   if (candidate?.channel !== 'threejs-editor-m5-runtime'
     || typeof candidate.runId !== 'string'
@@ -2552,7 +2590,7 @@ function waitForM7Event(
   timeout = 120_000,
   signal?: AbortSignal,
   accept?: (event: M7RuntimeEvent) => boolean,
-  frameElement: HTMLIFrameElement = runtimeFrame,
+  frameElement: HTMLIFrameElement = runtimeFrame(),
 ): Promise<M7RuntimeEvent> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
@@ -2572,7 +2610,7 @@ function waitForM7Event(
       const candidate = record(event.data)
       if (event.source !== frameElement.contentWindow) return
       if (candidate?.channel !== M7_RUNTIME_CHANNEL
-        || candidate.epoch !== runtimeTransitions.snapshot().epoch
+        || candidate.epoch !== runtimeCoordinator.snapshot().epoch
         || candidate.projectId !== run.projectId
         || candidate.runId !== run.runId
         || candidate.nonce !== run.nonce
@@ -2629,14 +2667,14 @@ function postM7Run(
   run: M7Run,
   action: string,
   payload: Record<string, unknown> = {},
-  frameElement: HTMLIFrameElement = runtimeFrame,
+  frameElement: HTMLIFrameElement = runtimeFrame(),
 ): void {
   if (frameElement.contentWindow === null) {
     throw new Error('M7 runtime is not active')
   }
   frameElement.contentWindow.postMessage({
     channel: M7_RUNTIME_CHANNEL,
-    epoch: runtimeTransitions.snapshot().epoch,
+    epoch: runtimeCoordinator.snapshot().epoch,
     action,
     ...run,
     ...payload,
@@ -2644,13 +2682,14 @@ function postM7Run(
 }
 
 function postM7(action: string, payload: Record<string, unknown> = {}): void {
-  if (m7ActiveRun === undefined) throw new Error('M7 runtime is not active')
-  postM7Run(m7ActiveRun, action, payload)
+  const run = activeRun()
+  if (run === undefined) throw new Error('M7 runtime is not active')
+  postM7Run(run, action, payload)
 }
 
 function loadM7Frame(
   signal: AbortSignal,
-  frameElement: HTMLIFrameElement = runtimeFrame,
+  frameElement: HTMLIFrameElement = runtimeFrame(),
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
@@ -2687,12 +2726,12 @@ function createM7CandidateFrame(): HTMLIFrameElement {
   frameElement.tabIndex = -1
   frameElement.style.visibility = 'hidden'
   frameElement.style.pointerEvents = 'none'
-  runtimeFrame.insertAdjacentElement('afterend', frameElement)
+  runtimeFrame().insertAdjacentElement('afterend', frameElement)
   return frameElement
 }
 
 function promoteM7CandidateFrame(candidate: HTMLIFrameElement): HTMLIFrameElement {
-  const previous = runtimeFrame
+  const previous = runtimeFrame()
   previous.removeAttribute('data-runtime-sandbox')
   previous.setAttribute('aria-hidden', 'true')
   previous.style.visibility = 'hidden'
@@ -2704,16 +2743,16 @@ function promoteM7CandidateFrame(candidate: HTMLIFrameElement): HTMLIFrameElemen
   candidate.removeAttribute('tabindex')
   candidate.style.removeProperty('visibility')
   candidate.style.removeProperty('pointer-events')
-  runtimeFrame = candidate
   return previous
 }
 
 async function runtimeBundleFor(
   run: M7Run,
   signal?: AbortSignal,
-): Promise<NonNullable<typeof m7Bundle>> {
-  if (m7Bundle?.projectId === run.projectId
-    && m7Bundle.revision === run.revision) return m7Bundle
+): Promise<RuntimeArtifact> {
+  const artifact = activeRuntime()?.artifact
+  if (artifact?.projectId === run.projectId
+    && artifact.revision === run.revision) return artifact
   m7BuildRequests += 1
   const buildResult = await app.callServerTool({
     name: 'build_project',
@@ -2743,7 +2782,7 @@ async function runtimeBundleFor(
     timeout: M7_REQUEST_TIMEOUT,
     maxTotalTimeout: M7_REQUEST_TIMEOUT,
   })
-  const artifact: NonNullable<typeof m7Bundle> = {
+  return {
     projectId: run.projectId,
     revision: run.revision,
     buildId: build.buildId,
@@ -2753,77 +2792,89 @@ async function runtimeBundleFor(
     assets: await runtimeAssets(build, signal),
     validated: false,
   }
-  m7Bundle = artifact
-  return artifact
 }
 
 async function stopValidationRuntime(): Promise<void> {
-  const run = m7ValidationRun
-  m7ValidationRun = undefined
-  if (run === undefined) return
+  const snapshot = runtimeCoordinator.snapshot()
+  const validation = snapshot.validation
+  if (validation === undefined) return
+  runtimeCoordinator.setValidation(snapshot.committed, undefined)
   const disposed = waitForM7Event(
     ['disposed'],
-    run,
+    validation.run,
     10_000,
     undefined,
     undefined,
-    validationFrame,
+    validation.frame,
   )
-  postM7Run(run, 'stop', {}, validationFrame)
+  postM7Run(validation.run, 'stop', {}, validation.frame)
   await disposed
 }
 
 async function ensureValidationRuntime(anchor: M7Run): Promise<M7Run> {
-  if (m7ValidationRun !== undefined
-    && m7ValidationRun.projectId === anchor.projectId
-    && m7ValidationRun.revision === anchor.revision
-    && m7ValidationRun.runId === anchor.runId
-    && m7ValidationRun.nonce === anchor.nonce) {
-    return m7ValidationRun
+  const cached = runtimeCoordinator.snapshot().validation
+  if (cached !== undefined && sameM7Run(cached.run, anchor)) {
+    return cached.run
   }
   await stopValidationRuntime()
   const artifact = await runtimeBundleFor(anchor)
   const run: M7Run = { ...anchor }
-  const evidenceToken = m7ActiveRun !== undefined
-    && sameM7Run(m7ActiveRun, anchor)
-    ? m7EvidenceToken
+  const committed = runtimeCoordinator.snapshot().committed
+  const active = committed?.runtime
+  const evidenceToken = active !== undefined
+    && sameM7Run(active.run, anchor)
+    ? active.evidenceToken
     : crypto.randomUUID()
   if (evidenceToken === undefined) throw new Error('Runtime evidence token is unavailable')
-  const controller = new AbortController()
-  await loadM7Frame(controller.signal, validationFrame)
-  const ready = waitForM7Event(
-    ['ready', 'runtime-error'],
+  const validation: M7ValidationRuntime = {
     run,
-    120_000,
-    controller.signal,
-    undefined,
-    validationFrame,
-  )
-  postM7Run(run, 'run', {
-    bundle: artifact.bundle,
-    backend: artifact.backend,
+    frame: validationRuntimeFrame,
     buildId: artifact.buildId,
-    assets: artifact.assets,
-    debugMode: runtimeDebugMode,
-    mode: 'run',
     evidenceToken,
-  }, validationFrame)
-  const event = await ready
-  if (event.type === 'runtime-error') {
-    throw new Error(typeof event.data?.message === 'string'
-      ? event.data.message
-      : 'Validation Runtime failed')
   }
-  m7ValidationRun = run
-  return run
+  runtimeCoordinator.setValidation(committed, validation)
+  const controller = new AbortController()
+  try {
+    await loadM7Frame(controller.signal, validation.frame)
+    const ready = waitForM7Event(
+      ['ready', 'runtime-error'],
+      run,
+      120_000,
+      controller.signal,
+      undefined,
+      validation.frame,
+    )
+    postM7Run(run, 'run', {
+      bundle: artifact.bundle,
+      backend: artifact.backend,
+      buildId: artifact.buildId,
+      assets: artifact.assets,
+      debugMode: runtimeDebugMode,
+      mode: 'run',
+      evidenceToken,
+    }, validation.frame)
+    const event = await ready
+    if (event.type === 'runtime-error') {
+      throw new Error(typeof event.data?.message === 'string'
+        ? event.data.message
+        : 'Validation Runtime failed')
+    }
+    return run
+  } catch (error) {
+    if (runtimeCoordinator.snapshot().validation === validation) {
+      runtimeCoordinator.setValidation(committed, undefined)
+    }
+    throw error
+  }
 }
 
 async function reportRuntimeHarnessResult(
   command: RuntimeHarnessCommand,
   result: Record<string, unknown>,
 ): Promise<void> {
-  if (m7EvidenceToken === undefined) throw new Error('Runtime evidence token is unavailable')
-  if (result.evidenceToken !== m7EvidenceToken) {
+  const evidenceToken = activeRuntime()?.evidenceToken
+  if (evidenceToken === undefined) throw new Error('Runtime evidence token is unavailable')
+  if (result.evidenceToken !== evidenceToken) {
     throw new Error('Runtime evidence provenance is invalid')
   }
   const reported = await app.callServerTool({
@@ -2843,7 +2894,8 @@ async function reportRuntimeHarnessResult(
 async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Promise<void> {
   let targetRun: M7Run
   try {
-    if (m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, command.runtime)) {
+    const active = activeRuntime()
+    if (active === undefined || !sameM7Run(active.run, command.runtime)) {
       throw new Error('Runtime Harness command targets a stale active run')
     }
     targetRun = command.target === 'validation'
@@ -2882,7 +2934,10 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     throw new Error('Runtime Harness command expired')
   }
-  const frameElement = command.target === 'validation' ? validationFrame : runtimeFrame
+  const frameElement = command.target === 'validation'
+    ? runtimeCoordinator.snapshot().validation?.frame
+    : runtimeCoordinator.snapshot().committed?.frame
+  if (frameElement === undefined) throw new Error('Runtime command frame is unavailable')
   let cancelSent = false
   let monitorBusy = false
   let finished = false
@@ -2951,7 +3006,7 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
       kind: 'runtime-harness-error',
       runtime: { ...targetRun, target: command.target },
       evidenceId: crypto.randomUUID(),
-      evidenceToken: m7EvidenceToken,
+      evidenceToken: activeRuntime()?.evidenceToken,
       status: 'failed',
       message: typeof event.data?.message === 'string'
         ? event.data.message
@@ -2963,9 +3018,9 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
 }
 
 async function pullRuntimeHarnessCommand(): Promise<void> {
-  if (runtimeHarnessPulling || tearingDown || m7ActiveRun === undefined) return
+  const run = activeRun()
+  if (runtimeHarnessPulling || tearingDown || run === undefined) return
   runtimeHarnessPulling = true
-  const run = m7ActiveRun
   try {
     const result = await app.callServerTool({
       name: 'pull_runtime_command',
@@ -2974,7 +3029,8 @@ async function pullRuntimeHarnessCommand(): Promise<void> {
       timeout: M7_LIFECYCLE_TIMEOUT,
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
-    if (result.isError || m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, run)) return
+    const currentRun = activeRun()
+    if (result.isError || currentRun === undefined || !sameM7Run(currentRun, run)) return
     const command = record(record(result.structuredContent)?.command)
     if (command === undefined
       || typeof command.commandId !== 'string'
@@ -3035,7 +3091,7 @@ async function waitForM7EditorScene(run: M7Run): Promise<void> {
 
 async function disposeM7Runtime(
   run: M7Run,
-  frameElement: HTMLIFrameElement = runtimeFrame,
+  frameElement: HTMLIFrameElement = runtimeFrame(),
 ): Promise<Record<string, unknown> | undefined> {
   const disposed = waitForM7Event(
     ['disposed'],
@@ -3060,21 +3116,32 @@ async function disposeM7Runtime(
 async function stopM7Runtime(
   invalidate = true,
   hideFrame = true,
+  context?: RuntimeTransitionContext<CommittedRuntime>,
 ): Promise<Record<string, unknown> | undefined> {
-  if (invalidate) runtimeTransitions.cancelActive()
-  if (m7ActiveRun === undefined) {
-    if (hideFrame) runtimeFrame.hidden = true
+  if (invalidate) runtimeCoordinator.cancelActive()
+  const committed = runtimeCoordinator.snapshot().committed
+  const active = committed?.runtime
+  if (committed === undefined || active === undefined) {
+    if (hideFrame) runtimeFrame().hidden = true
     return undefined
   }
-  const run = m7ActiveRun
+  const { run } = active
+  const frameElement = committed.frame
   try {
-    return await disposeM7Runtime(run)
+    return await disposeM7Runtime(run, frameElement)
   } finally {
     m7DisposedRuns.add(run.runId)
-    if (m7ActiveRun === run) {
-      m7ActiveRun = undefined
-      m7EvidenceToken = undefined
-      if (hideFrame) runtimeFrame.hidden = true
+    if (runtimeCoordinator.snapshot().committed === committed) {
+      if (context !== undefined) {
+        runtimeCoordinator.replaceCommitted(context.epoch, committed, {
+          projectId: committed.projectId,
+          revision: committed.revision,
+          frame: committed.frame,
+        })
+      } else {
+        runtimeCoordinator.releaseCommitted(committed)
+      }
+      if (hideFrame) frameElement.hidden = true
     }
     await releaseM7Run(run)
   }
@@ -3085,7 +3152,7 @@ async function startM7Runtime(
   signal: AbortSignal,
   mode: 'edit' | 'run' = 'edit',
   restoredRuntimeState?: Record<string, unknown>,
-): Promise<M7Run | undefined> {
+): Promise<CommittedRuntime | undefined> {
   if (tearingDown || signal.aborted) return
   if (projectId === undefined || revision === undefined || workspace === undefined) {
     throw new Error('Workspace is not ready')
@@ -3093,45 +3160,44 @@ async function startM7Runtime(
   const startProjectId = projectId
   const startRevision = revision
   const startWorkspace = workspace
-  const previousRun = m7ActiveRun
-  const previousFrame = runtimeFrame
+  const previousRuntime = activeRuntime()
+  const previousRun = previousRuntime?.run
+  const previousFrame = runtimeFrame()
   const previousRuntimeView = record(restoredRuntimeState?.viewState)
     ?? (previousRun?.projectId === startProjectId ? m7Metrics : undefined)
   const restoredSelectedUuid = restoredRuntimeState?.selectedUuid
-  if (token !== m7StartToken) return
+  if (!runtimeCoordinator.isCurrent(token)) return
   const run: M7Run = {
     projectId: startProjectId,
     runId: crypto.randomUUID(),
     nonce: crypto.randomUUID(),
     revision: startRevision,
   }
-  const previousBundle = m7Bundle
   status.textContent = `Building ${startWorkspace.entry}`
-  let artifact: NonNullable<typeof m7Bundle>
+  let artifact: RuntimeArtifact
   try {
     artifact = await runtimeBundleFor(run, signal)
   } catch (error) {
-    if (tearingDown || !runtimeTransitions.isCurrent(token) || signal.aborted) return
+    if (tearingDown || !runtimeCoordinator.isCurrent(token) || signal.aborted) return
     throw error
   }
-  if (tearingDown || token !== m7StartToken) {
-    m7Bundle = previousBundle
-    return
-  }
+  if (tearingDown || !runtimeCoordinator.isCurrent(token)) return
   const validatesArtifact = !artifact.validated
-  if (tearingDown || token !== m7StartToken) return
+  if (tearingDown || !runtimeCoordinator.isCurrent(token)) return
   if (m5ActiveRun !== undefined) await stopIsolatedRuntime()
-  if (tearingDown || token !== m7StartToken) return
+  if (tearingDown || !runtimeCoordinator.isCurrent(token)) return
 
   const { build, bundle, assets } = artifact
   const candidateFrame = createM7CandidateFrame()
-  const starting: M7StartingRun = {
+  let starting: M7StartingRun = {
     run,
     frame: candidateFrame,
+    artifact,
+    mode,
     signal,
     runSent: false,
   }
-  m7StartingRun = starting
+  runtimeCoordinator.setCandidate(token, starting)
   let committed = false
   try {
     const preparedResult = await app.callServerTool({
@@ -3154,9 +3220,11 @@ async function startM7Runtime(
     if (typeof prepared?.evidenceToken !== 'string') {
       throw new Error('prepare_runtime_run returned no Runtime evidence token')
     }
-    if (token !== m7StartToken
+    starting = { ...starting, evidenceToken: prepared.evidenceToken }
+    runtimeCoordinator.setCandidate(token, starting)
+    if (!runtimeCoordinator.isCurrent(token)
       || starting.signal.aborted
-      || m7StartingRun !== starting) {
+      || runtimeCoordinator.snapshot().candidate !== starting) {
       throw new Error('M7 Runtime start cancelled')
     }
     await loadM7Frame(starting.signal, candidateFrame)
@@ -3187,11 +3255,12 @@ async function startM7Runtime(
       ...previousRuntimeView === undefined ? {} : { viewState: previousRuntimeView },
       ...typeof restoredSelectedUuid === 'string' ? { selectedUuid: restoredSelectedUuid } : {},
     }, candidateFrame)
-    starting.runSent = true
+    starting = { ...starting, runSent: true }
+    runtimeCoordinator.setCandidate(token, starting)
     const [readyEvent, initialSceneEvent] = await Promise.all([ready, editorScene])
-    if (token !== m7StartToken
+    if (!runtimeCoordinator.isCurrent(token)
       || starting.signal.aborted
-      || m7StartingRun !== starting) {
+      || runtimeCoordinator.snapshot().candidate !== starting) {
       throw new Error('M7 Runtime start cancelled')
     }
     if (readyEvent.type === 'runtime-error' || initialSceneEvent.type === 'runtime-error') {
@@ -3231,7 +3300,9 @@ async function startM7Runtime(
       objects as EditorObjectSnapshot[],
     ) as Project
     if (validatesArtifact) {
-      artifact.validated = true
+      artifact = { ...artifact, validated: true }
+      starting = { ...starting, artifact }
+      runtimeCoordinator.setCandidate(token, starting)
       m7ValidationStarts += 1
     }
     const committedResult = await app.callServerTool({
@@ -3246,18 +3317,27 @@ async function startM7Runtime(
       maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
     })
     if (committedResult.isError) throw new Error(resultError(committedResult))
+    await stopValidationRuntime()
+    promoteM7CandidateFrame(candidateFrame)
+    const nextCommitted: CommittedRuntime = {
+      projectId: startProjectId,
+      revision: startRevision,
+      frame: candidateFrame,
+      runtime: {
+        run,
+        artifact,
+        evidenceToken: prepared.evidenceToken,
+        mode,
+      },
+    }
+    runtimeCoordinator.commitCandidate(token, starting, nextCommitted)
     committed = true
-    m7ActiveRun = run
-    m7EvidenceToken = prepared.evidenceToken
-    m7Build = build
     m7Events = [initialSceneEvent, readyEvent]
     m7Errors = []
     m7Ready = readyEvent.data ?? {}
     m7Metrics = readyEvent.data ?? {}
     m7MessagesAfterStop = 0
     m7EditorSceneAccepted = true
-    m7StartingRun = undefined
-    promoteM7CandidateFrame(candidateFrame)
     acceptRuntimeEditorScene(objects as EditorObjectSnapshot[], run, projected)
     if (mode === 'run') {
       playingProject = serializeProject()
@@ -3283,12 +3363,12 @@ async function startM7Runtime(
         previousFrame.remove()
       }
     }
-    return run
+    return nextCommitted
   } catch (error) {
-    const cancelled = token !== m7StartToken
+    const cancelled = !runtimeCoordinator.isCurrent(token)
       || starting.signal.aborted
-      || m7StartingRun !== starting
-    if (m7StartingRun === starting) m7StartingRun = undefined
+      || runtimeCoordinator.snapshot().candidate !== starting
+    runtimeCoordinator.discardCandidate(starting)
     const cleanupErrors: unknown[] = []
     if (!committed && starting.runSent) {
       try {
@@ -3300,7 +3380,6 @@ async function startM7Runtime(
     if (!committed) {
       m7DisposedRuns.add(run.runId)
       candidateFrame.remove()
-      m7Bundle = previousBundle
     }
     if (cleanupErrors.length > 0) {
       throw new AggregateError(
@@ -3316,9 +3395,8 @@ function startM7RuntimePort(
   context: RuntimeTransitionContext<CommittedRuntime>,
   mode: 'edit' | 'run' = 'edit',
   restoredRuntimeState?: Record<string, unknown>,
-): Promise<M7Run | undefined> {
+): Promise<CommittedRuntime | undefined> {
   if (tearingDown) return Promise.resolve(undefined)
-  m7StartToken = context.epoch
   if (m7CleanupFailures.length > 0) {
     return Promise.reject(new AggregateError(
       [...m7CleanupFailures],
@@ -3329,15 +3407,17 @@ function startM7RuntimePort(
 }
 
 async function failM7Runtime(run: M7Run, message: string): Promise<void> {
-  if (tearingDown || m7ActiveRun === undefined || !sameM7Run(m7ActiveRun, run)) return
+  const currentRun = activeRun()
+  if (tearingDown || currentRun === undefined || !sameM7Run(currentRun, run)) return
   recordRuntimeError(message)
   playingProject = undefined
   playingRevision = undefined
   playingRuntimeState = undefined
   try {
-    await runtimeTransitions.enqueue('reload', M7_LIFECYCLE_TIMEOUT, async () => {
-      if (m7ActiveRun !== undefined && sameM7Runtime(m7ActiveRun, run)) {
-        await stopM7Runtime(false)
+    await runtimeCoordinator.enqueue('reload', M7_LIFECYCLE_TIMEOUT, async context => {
+      const active = activeRun()
+      if (active !== undefined && sameM7Runtime(active, run)) {
+        await stopM7Runtime(false, true, context)
       }
       return { phase: 'disposed', committed: null, value: undefined }
     })
@@ -3348,11 +3428,11 @@ async function failM7Runtime(run: M7Run, message: string): Promise<void> {
 }
 
 window.addEventListener('message', event => {
-  if (event.source !== runtimeFrame.contentWindow) return
+  if (event.source !== runtimeFrame().contentWindow) return
   if (tearingDown) return
   const candidate = record(event.data)
   if (candidate?.channel !== M7_RUNTIME_CHANNEL
-    || candidate.epoch !== runtimeTransitions.snapshot().epoch
+    || candidate.epoch !== runtimeCoordinator.snapshot().epoch
     || typeof candidate.projectId !== 'string'
     || typeof candidate.runId !== 'string'
     || typeof candidate.nonce !== 'string'
@@ -3363,7 +3443,7 @@ window.addEventListener('message', event => {
     m7MessagesAfterStop += 1
     return
   }
-  const run = m7ActiveRun ?? m7StartingRun?.run
+  const run = activeRun() ?? runtimeCoordinator.snapshot().candidate?.run
   if (run === undefined) {
     m7MessagesAfterStop += 1
     return
@@ -3415,11 +3495,6 @@ window.addEventListener('message', event => {
         `Transformed ${object?.name || object?.type || 'Runtime object'}`,
       )
     }
-  } else if (runtimeEvent.type === 'mode') {
-    const mode = runtimeEvent.data?.mode
-    if (mode === 'edit' || mode === 'run') {
-      root.dataset.runtimeMode = mode
-    }
   } else if (runtimeEvent.type === 'runtime-error') {
     const message = typeof runtimeEvent.data?.message === 'string'
       ? runtimeEvent.data.message
@@ -3454,14 +3529,12 @@ function committedRuntime(): CommittedRuntime {
   if (projectId === undefined || revision === undefined) {
     throw new Error('Project is not ready')
   }
-  if (workspace !== undefined && m7ActiveRun === undefined) {
+  const committed = runtimeCoordinator.snapshot().committed
+  if (workspace !== undefined && committed?.runtime === undefined) {
     throw new Error('Workspace Runtime is not active')
   }
-  return {
-    projectId,
-    revision,
-    ...m7ActiveRun === undefined ? {} : { run: m7ActiveRun },
-  }
+  if (committed?.projectId === projectId && committed.revision === revision) return committed
+  return { projectId, revision, frame: runtimeFrame() }
 }
 
 async function startGamePort(
@@ -3478,22 +3551,33 @@ async function startGamePort(
     playingRevision = revision
     playingRuntimeState = undefined
     status.textContent = `Starting ${workspace.backend.toUpperCase()} Runtime`
-    if (m7ActiveRun !== undefined && !m7RunIsCurrent(m7ActiveRun)) {
-      await stopM7Runtime(false)
+    const active = activeRun()
+    if (active !== undefined && !m7RunIsCurrent(active)) {
+      await stopM7Runtime(false, true, context)
     }
     if (!context.isCurrent()) throw new Error('Play transition was cancelled')
-    if (m7ActiveRun === undefined) {
+    if (activeRun() === undefined) {
       await startM7RuntimePort(context, 'run')
     } else {
-      const run = m7ActiveRun
+      const committed = runtimeCoordinator.snapshot().committed
+      const runtime = committed?.runtime
+      if (committed === undefined || runtime === undefined) {
+        throw new Error('Workspace Runtime is not active')
+      }
+      const run = runtime.run
       const event = await setM7Mode(run, 'run', context.signal)
       playingRuntimeState = record(event.data?.editState)
+      const current = runtimeCoordinator.snapshot().committed
       if (!context.isCurrent()
-        || m7ActiveRun === undefined
-        || !sameM7Run(m7ActiveRun, run)
+        || current !== committed
+        || !sameM7Run(runtime.run, run)
         || !m7RunIsCurrent(run)) {
         throw new Error('Play transition became stale')
       }
+      runtimeCoordinator.replaceCommitted(context.epoch, committed, {
+        ...committed,
+        runtime: { ...runtime, mode: 'run' },
+      })
       status.textContent = `${workspace.backend.toUpperCase()} Runtime`
     }
     return committedRuntime()
@@ -3528,7 +3612,7 @@ async function startGamePort(
 }
 
 function startGame(): void {
-  void runtimeTransitions.enqueue('play', M7_TRANSITION_TIMEOUT, async context => ({
+  void runtimeCoordinator.enqueue('play', M7_TRANSITION_TIMEOUT, async context => ({
     phase: 'playing',
     committed: await startGamePort(context),
     value: undefined,
@@ -3555,16 +3639,26 @@ async function stopGamePort(
   const testedRevision = playingRevision
   if (stopWorkspace !== undefined) {
     try {
-      if (m7ActiveRun !== undefined && !m7RunIsCurrent(m7ActiveRun)) {
-        await stopM7Runtime(false)
-      } else if (m7ActiveRun !== undefined) {
-        await setM7Mode(m7ActiveRun, 'edit', context.signal)
+      const active = activeRun()
+      if (active !== undefined && !m7RunIsCurrent(active)) {
+        await stopM7Runtime(false, true, context)
+      } else if (active !== undefined) {
+        const committed = runtimeCoordinator.snapshot().committed
+        const resources = committed?.runtime
+        if (committed === undefined || resources === undefined) {
+          throw new Error('Workspace Runtime is not active')
+        }
+        await setM7Mode(active, 'edit', context.signal)
+        runtimeCoordinator.replaceCommitted(context.epoch, committed, {
+          ...committed,
+          runtime: { ...resources, mode: 'edit' },
+        })
       }
     } catch (error) {
       if (!stopIsCurrent()) throw new Error('Stop transition became stale')
       recordRuntimeError(error)
       try {
-        await stopM7Runtime(false)
+        await stopM7Runtime(false, true, context)
       } catch (teardownError) {
         if (!stopIsCurrent()) {
           m7CleanupFailures.push(teardownError)
@@ -3597,8 +3691,8 @@ async function stopGamePort(
     ? stopWorkspace === undefined ? reason : `${stopWorkspace.backend.toUpperCase()} Edit`
     : `Runtime error: ${runtimeErrors[0]?.split('\n')[0] ?? 'unknown error'}`
   if (stopWorkspace !== undefined
-    && m7ActiveRun !== undefined
-    && m7RunIsCurrent(m7ActiveRun)) {
+    && activeRun() !== undefined
+    && m7RunIsCurrent(activeRun()!)) {
     status.textContent = 'Restoring editor'
     try {
       const token = context.epoch
@@ -3623,7 +3717,7 @@ async function stopGamePort(
           diagnostics: {
             projectId: stopProjectId,
             testedRevision,
-            ...committed.run === undefined ? {} : { runId: committed.run.runId },
+            ...committed.runtime === undefined ? {} : { runId: committed.runtime.run.runId },
             errors: [...runtimeErrors],
             warnings: [...runtimeWarnings],
           },
@@ -3633,7 +3727,7 @@ async function stopGamePort(
 }
 
 function stopGame(reason = 'Stopped', report = true): Promise<void> {
-  return runtimeTransitions.enqueue('stop', M7_TRANSITION_TIMEOUT, async context => {
+  return runtimeCoordinator.enqueue('stop', M7_TRANSITION_TIMEOUT, async context => {
     const stopped = await stopGamePort(context, reason, report)
     return {
       phase: 'edit-ready',
@@ -3653,13 +3747,14 @@ function handleTransitionFailure(error: unknown): void {
 }
 
 function canApplyEditorRevision(snapshot: RemoteSnapshot): boolean {
+  const run = activeRun()
   if (navigationTab !== 'scene'
     || workspace === undefined
     || snapshot.workspace === undefined
     || snapshot.editorOperations === undefined
     || project === undefined
-    || m7ActiveRun === undefined
-    || !m7RunIsCurrent(m7ActiveRun)
+    || run === undefined
+    || !m7RunIsCurrent(run)
     || workspace.kind !== snapshot.workspace.kind
     || workspace.entry !== snapshot.workspace.entry
     || workspace.backend !== snapshot.workspace.backend) return false
@@ -3703,13 +3798,16 @@ async function applyEditorRevision(
   context: RuntimeTransitionContext<CommittedRuntime>,
   expectedSync = 'clean',
 ): Promise<boolean> {
+  const committed = runtimeCoordinator.snapshot().committed
+  const active = committed?.runtime
   if (!canApplyEditorRevision(snapshot)
-    || m7ActiveRun === undefined
+    || committed === undefined
+    || active === undefined
     || snapshot.workspace === undefined
     || snapshot.editorOperations === undefined
     || snapshot.pendingProjection === undefined) return false
 
-  const run = m7ActiveRun
+  const run = active.run
   const pending = snapshot.pendingProjection
   if (pending.projectId !== run.projectId
     || pending.runId !== run.runId
@@ -3719,14 +3817,11 @@ async function applyEditorRevision(
     || pending.expectedGeneration !== (run.projectionGeneration ?? 0)) return false
   let nextRun = { ...run, revision: snapshot.revision }
   const token = context.epoch
-  m7StartToken = token
   let runtimeAdvanced = false
   try {
     status.textContent = 'Applying external Editor changes'
-    if (m7ActiveRun === undefined
-      || !sameM7Run(m7ActiveRun, run)
+    if (runtimeCoordinator.snapshot().committed !== committed
       || !m7RunIsCurrent(run)
-      || token !== m7StartToken
       || !context.isCurrent()
       || root.dataset.sync !== expectedSync) {
       throw new Error('Editor state changed during Runtime revision rollover')
@@ -3759,10 +3854,8 @@ async function applyEditorRevision(
     if (objects.some(object => object === undefined)) {
       throw new Error('Workspace Runtime returned invalid editor objects')
     }
-    if (m7ActiveRun === undefined
-      || !sameM7Run(m7ActiveRun, run)
+    if (runtimeCoordinator.snapshot().committed !== committed
       || !m7RunIsCurrent(run)
-      || token !== m7StartToken
       || !context.isCurrent()
       || root.dataset.sync !== expectedSync) {
       throw new Error('Editor state changed during Runtime revision rollover')
@@ -3785,7 +3878,7 @@ async function applyEditorRevision(
     if (registered.isError) throw new Error(resultError(registered))
     const registration = record(registered.structuredContent)
     const projectionGeneration = registration?.projectionGeneration
-    if (registration?.evidenceToken !== m7EvidenceToken
+    if (registration?.evidenceToken !== active.evidenceToken
       || typeof projectionGeneration !== 'number') {
       throw new Error('Runtime projection commit returned an invalid registration')
     }
@@ -3793,16 +3886,19 @@ async function applyEditorRevision(
 
     workspace = snapshot.workspace
     renderFileTree()
-    m7ActiveRun = nextRun
     await stopValidationRuntime()
-    m7Bundle = undefined
+    const nextCommitted: CommittedRuntime = {
+      ...committed,
+      revision: snapshot.revision,
+      runtime: { ...active, run: nextRun },
+    }
+    runtimeCoordinator.replaceCommitted(token, committed, nextCommitted)
     m7EditorSceneAccepted = true
     setClean(snapshot.revision)
     acceptRuntimeEditorScene(objects as EditorObjectSnapshot[], nextRun)
     await waitForM7EditorScene(nextRun)
-    if (token !== m7StartToken
-      || m7ActiveRun === undefined
-      || !sameM7Run(m7ActiveRun, nextRun)
+    if (!context.isCurrent()
+      || runtimeCoordinator.snapshot().committed !== nextCommitted
       || !m7RunIsCurrent(nextRun)) {
       throw new Error('Runtime lifecycle changed during revision rollover')
     }
@@ -3811,10 +3907,17 @@ async function applyEditorRevision(
     }
     return true
   } catch (error) {
+    const current = runtimeCoordinator.snapshot().committed
     if (runtimeAdvanced
-      && m7ActiveRun !== undefined
-      && sameM7Runtime(m7ActiveRun, run)) {
-      m7ActiveRun = nextRun
+      && context.isCurrent()
+      && current?.runtime !== undefined
+      && sameM7Runtime(current.runtime.run, run)
+      && !sameM7Run(current.runtime.run, nextRun)) {
+      runtimeCoordinator.replaceCommitted(token, current, {
+        ...current,
+        revision: nextRun.revision,
+        runtime: { ...current.runtime, run: nextRun },
+      })
     }
     recordRuntimeWarning([
       `Runtime projection failed; reloading committed revision: ${runtimeMessage(error)}`,
@@ -3846,7 +3949,7 @@ async function pullLatest(timeout = 60_000): Promise<void> {
     if (snapshot === undefined) return
     if (snapshot.revision === revision) return
     const workspaceMode = root.dataset.playState === 'playing' ? 'run' : 'edit'
-    await runtimeTransitions.enqueue('adopt-snapshot', M7_TRANSITION_TIMEOUT, async context => {
+    await runtimeCoordinator.enqueue('adopt-snapshot', M7_TRANSITION_TIMEOUT, async context => {
       if (tearingDown || projectId !== pullProjectId || revision !== pullRevision) {
         return {
           phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',
@@ -3898,13 +4001,13 @@ async function loadProject(nextProjectId: string): Promise<void> {
   const preserveDirty = projectId === nextProjectId
     && (root.dataset.sync === 'dirty' || root.dataset.sync === 'conflict')
   loadingId = nextProjectId
-  const previousPhase = runtimeTransitions.snapshot().phase === 'playing'
+  const previousPhase = runtimeCoordinator.snapshot().phase === 'playing'
     ? 'playing'
     : 'edit-ready'
   let loadedSnapshot: RemoteSnapshot | undefined
-  runtimeTransitions.cancelActive('Reload requested')
+  runtimeCoordinator.cancelActive('Reload requested')
   try {
-    await runtimeTransitions.enqueue('reload', M7_TRANSITION_TIMEOUT, async context => {
+    await runtimeCoordinator.enqueue('reload', M7_TRANSITION_TIMEOUT, async context => {
       if (!preserveDirty) {
         root.dataset.sync = 'loading'
         status.textContent = 'Loading project'
@@ -3989,7 +4092,7 @@ app.onteardown = async () => {
   tearingDown = true
   loadToken += 1
   parameterLoadToken += 1
-  runtimeTransitions.cancelActive('Editor teardown')
+  runtimeCoordinator.cancelActive('Editor teardown')
   if (pollTimer !== undefined) {
     window.clearInterval(pollTimer)
     pollTimer = undefined
@@ -4002,7 +4105,7 @@ app.onteardown = async () => {
       failures.push(error)
     }
   }
-  await runtimeTransitions.idle()
+  await runtimeCoordinator.idle()
   while (m7LifecycleTasks.size > 0) {
     const settled = await Promise.allSettled([...m7LifecycleTasks])
     failures.push(...settled
@@ -4011,7 +4114,7 @@ app.onteardown = async () => {
   }
   await cleanup(() => stopLocalRuntimeForSnapshot())
   await cleanup(async () => {
-    if (m7ActiveRun !== undefined) await stopM7Runtime()
+    if (activeRun() !== undefined) await stopM7Runtime()
   })
   await cleanup(() => stopValidationRuntime())
   await cleanup(() => stopIsolatedRuntime())
@@ -4022,7 +4125,6 @@ app.onteardown = async () => {
   await cleanup(() => renderer.dispose())
   await cleanup(() => runtimeTimer.dispose())
   runtimeAssetCache.clear()
-  m7Bundle = undefined
   const cleanupFailures = m7CleanupFailures.splice(0)
   failures.push(...cleanupFailures)
   if (failures.length > 0) {
@@ -4068,11 +4170,12 @@ stop.addEventListener('click', () => {
   void stopGame().catch(handleTransitionFailure)
 })
 activeGrant.addEventListener('click', () => {
-  if (m7ActiveRun === undefined || root.dataset.playState !== 'playing') return
+  const run = activeRun()
+  if (run === undefined || root.dataset.playState !== 'playing') return
   activeGrant.disabled = true
   void app.callServerTool({
     name: 'grant_active_runtime_control',
-    arguments: { ...m7ActiveRun },
+    arguments: { ...run },
   }).then(async result => {
     if (result.isError) throw new Error(resultError(result))
     status.textContent = 'One live validation is authorized for 60 seconds'
@@ -4083,7 +4186,7 @@ activeGrant.addEventListener('click', () => {
 runtimeDebug.addEventListener('change', () => {
   runtimeDebugMode = runtimeDebug.value
   root.dataset.runtimeDebug = runtimeDebugMode
-  if (m7ActiveRun !== undefined) postM7('set-debug', { debugMode: runtimeDebugMode })
+  if (activeRun() !== undefined) postM7('set-debug', { debugMode: runtimeDebugMode })
 })
 runtimeQuality.addEventListener('change', () => {
   const tier = runtimeQuality.value
@@ -4205,7 +4308,7 @@ for (const button of modeButtons) {
   button.addEventListener('click', () => {
     transformMode = button.dataset.mode as TransformControlsMode
     transform?.setMode(transformMode)
-    if (workspace !== undefined && m7ActiveRun !== undefined) {
+    if (workspace !== undefined && activeRun() !== undefined) {
       postM7('set-transform-mode', { mode: transformMode })
     }
     refreshModeButtons()
@@ -4399,7 +4502,7 @@ async function runSave(
 ): Promise<void> {
   let failed = false
   try {
-    await runtimeTransitions.enqueue('save', M7_REQUEST_TIMEOUT, async context => ({
+    await runtimeCoordinator.enqueue('save', M7_REQUEST_TIMEOUT, async context => ({
       phase: 'edit-ready',
       committed: await saveOperation(context),
       value: undefined,
@@ -4409,8 +4512,8 @@ async function runSave(
     throw error
   } finally {
     if (root.dataset.sync === 'saving') root.dataset.sync = failed ? 'error' : 'clean'
-    projectRuntimeUi(runtimeTransitions.snapshot())
-    if (failed && runtimeTransitions.snapshot().phase === 'edit-ready') save.disabled = false
+    projectRuntimeUi(runtimeCoordinator.snapshot())
+    if (failed && runtimeCoordinator.snapshot().phase === 'edit-ready') save.disabled = false
   }
 }
 
@@ -4472,7 +4575,7 @@ async function saveProjectPort(
     if (pendingEditorOperations.length === 0) throw new Error('No Runtime scene edits to save')
     const savedProjectId = projectId
     const savedRevision = revision
-    const savedRun = m7ActiveRun
+    const savedRun = activeRun()
     const operations = [...pendingEditorOperations]
     status.textContent = 'Saving Runtime scene edits'
     if (savedRun === undefined || !m7RunIsCurrent(savedRun)) {
@@ -4903,26 +5006,26 @@ const diagnostics = {
       frame: Number(root.dataset.m5Frame ?? 0),
       frameAtStop: m5FrameAtStop,
       messagesAfterStop: m5MessagesAfterStop,
-      runtimeFrameVisible: !runtimeFrame.hidden,
+      runtimeFrameVisible: !runtimeFrame().hidden,
     },
     m7: {
-      active: m7ActiveRun !== undefined,
-      candidate: m7StartingRun !== undefined,
-      lifecyclePending: runtimeTransitions.snapshot().operation !== undefined,
-      lifecycle: runtimeTransitions.snapshot(),
-      runId: m7ActiveRun?.runId,
-      nonce: m7ActiveRun?.nonce,
-      validationRunId: m7ValidationRun?.runId,
-      validationNonce: m7ValidationRun?.nonce,
+      active: activeRun() !== undefined,
+      candidate: runtimeCoordinator.snapshot().candidate !== undefined,
+      lifecyclePending: runtimeCoordinator.snapshot().operation !== undefined,
+      lifecycle: runtimeCoordinator.snapshot(),
+      runId: activeRun()?.runId,
+      nonce: activeRun()?.nonce,
+      validationRunId: runtimeCoordinator.snapshot().validation?.run.runId,
+      validationNonce: runtimeCoordinator.snapshot().validation?.run.nonce,
       harnessCommands: [...runtimeHarnessCommands],
-      build: m7Build,
+      build: activeRuntime()?.artifact.build,
       eventTypes: m7Events.map(event => event.type),
       errors: [...m7Errors],
       ready: m7Ready,
       metrics: m7Metrics,
       lastDispose: m7LastDispose,
       messagesAfterStop: m7MessagesAfterStop,
-      runtimeFrameVisible: !runtimeFrame.hidden,
+      runtimeFrameVisible: !runtimeFrame().hidden,
       buildRequests: m7BuildRequests,
       assetFetches: m7AssetFetches,
       validationStarts: m7ValidationStarts,
@@ -4977,22 +5080,25 @@ const diagnostics = {
   },
   stopM5Fixture: () => stopIsolatedRuntime(),
   requestM7Metrics: async () => {
-    if (m7ActiveRun === undefined) throw new Error('M7 runtime is not active')
-    const result = waitForM7Event(['metrics'], m7ActiveRun)
+    const run = activeRun()
+    if (run === undefined) throw new Error('M7 runtime is not active')
+    const result = waitForM7Event(['metrics'], run)
     postM7('metrics')
     return (await result).data
   },
   setM7DebugMode: async (mode: string) => {
-    if (m7ActiveRun === undefined) throw new Error('M7 runtime is not active')
+    const run = activeRun()
+    if (run === undefined) throw new Error('M7 runtime is not active')
     if (!workspace?.debugModes.includes(mode)) throw new Error(`unknown debug mode ${mode}`)
-    const result = waitForM7Event(['debug-mode'], m7ActiveRun)
+    const result = waitForM7Event(['debug-mode'], run)
     runtimeDebug.value = mode
     runtimeDebug.dispatchEvent(new Event('change'))
     return (await result).data
   },
   setM7TimeScale: async (timeScale: number) => {
-    if (m7ActiveRun === undefined) throw new Error('M7 runtime is not active')
-    const result = waitForM7Event(['time-scale'], m7ActiveRun)
+    const run = activeRun()
+    if (run === undefined) throw new Error('M7 runtime is not active')
+    const result = waitForM7Event(['time-scale'], run)
     postM7('set-time-scale', { timeScale })
     return (await result).data
   },
