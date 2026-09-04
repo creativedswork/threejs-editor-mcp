@@ -16,7 +16,7 @@ if (corpus === undefined) throw new Error('THREEJS_EDITOR_MCP_WORKSPACE is requi
 const artifactRoot = resolve(process.env.M10_ARTIFACTS ?? '.playwright-mcp/m10')
 const resultPath = resolve(process.env.M10_RESULT ?? '.playwright-mcp/m10-result.json')
 const selectedCase = process.env.M10_CASE ?? 'all'
-assert.ok(['all', 'p6', 'g1'].includes(selectedCase), `invalid M10_CASE: ${selectedCase}`)
+assert.ok(['all', 'p6', 'g1', 'capability'].includes(selectedCase), `invalid M10_CASE: ${selectedCase}`)
 const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m10-browser-'))
 const p6Workspace = join(root, 'p6')
 const g1Workspace = join(root, 'g1')
@@ -70,6 +70,14 @@ page.on('console', message => {
   }
 })
 page.on('pageerror', error => browserProblems.push(`pageerror: ${error.message}`))
+if (selectedCase === 'capability') {
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, 'gpu', {
+      configurable: true,
+      get: () => undefined,
+    })
+  })
+}
 await page.goto(`http://127.0.0.1:${String(address.port)}`)
 
 async function resourceText(uri) {
@@ -235,7 +243,27 @@ async function stop(run) {
 
 try {
   const result = { browserProblems }
-  if (selectedCase !== 'g1') {
+  if (selectedCase === 'capability') {
+    const p6 = await buildWorkspace(p6Workspace)
+    const failed = await loadRuntime(p6, 'final', true)
+    assert.equal(failed.startup.data.code, 'WEBGPU_UNAVAILABLE')
+    assert.deepEqual(failed.startup.data.capability, {
+      backend: 'webgpu',
+      available: false,
+      secureContext: true,
+      webgpuApi: false,
+      code: 'WEBGPU_UNAVAILABLE',
+      message: 'WebGPU is unavailable in this browser or GPU environment',
+    })
+    result.capabilityFailure = {
+      revision: p6.revision,
+      buildId: p6.build.buildId,
+      runId: failed.run.runId,
+      error: failed.startup.data,
+    }
+  }
+
+  if (selectedCase === 'all' || selectedCase === 'p6') {
     const p6 = await buildWorkspace(p6Workspace)
     const first = await loadRuntime(p6)
     await waitFrames(first.run, 60)
@@ -266,7 +294,7 @@ try {
     }
   }
 
-  if (selectedCase !== 'p6') {
+  if (selectedCase === 'all' || selectedCase === 'g1') {
     const g1 = await buildWorkspace(g1Workspace)
     await writeFile(join(artifactRoot, 'g1', 'bundle.js'), g1.bundle)
     const first = await loadRuntime(g1)

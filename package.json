@@ -51,6 +51,7 @@
     "test:e2e:m9": "node tests/m9-browser.mjs",
     "test:e2e:m9-ui": "node tests/m9-ui-browser.mjs",
     "test:e2e:m10": "node tests/m10-browser.mjs",
+    "test:e2e:m10-ui": "node tests/m10-ui-browser.mjs",
     "test:corpus:m8": "node tests/m8-corpus-build.mjs",
     "test:corpus:m9": "node tests/m9-corpus-build.mjs",
     "prepare:m10:p6": "node scripts/prepare-m10-p6.mjs",
