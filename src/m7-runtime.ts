@@ -5,6 +5,88 @@ export const WORKSPACE_EDITOR_STATE_PATH = 'threejs.editor.json'
 export const RUNTIME_COMMAND_MIN_TIMEOUT_MS = 2_000
 export const RUNTIME_COMMAND_SETTLEMENT_GRACE_MS = 2_000
 
+export type RuntimeBackend = 'webgl' | 'webgpu' | 'raw-webgpu'
+
+export interface RuntimeGpuCapability {
+  backend: RuntimeBackend
+  available: boolean
+  secureContext: boolean
+  webgpuApi: boolean
+  code?: 'WEBGPU_INSECURE_CONTEXT' | 'WEBGPU_UNAVAILABLE' | 'WEBGPU_INITIALIZATION_FAILED'
+  message?: string
+}
+
+export interface OwnedRuntimeResource {
+  resource: unknown
+  dispose?: (this: unknown) => void | Promise<void>
+}
+
+export function runtimeGpuCapability(
+  backend: RuntimeBackend,
+  webgpuApi: boolean,
+  secureContext: boolean,
+): RuntimeGpuCapability {
+  if (backend === 'webgl') {
+    return { backend, available: true, secureContext, webgpuApi }
+  }
+  if (!secureContext) {
+    return {
+      backend,
+      available: false,
+      secureContext,
+      webgpuApi,
+      code: 'WEBGPU_INSECURE_CONTEXT',
+      message: 'WebGPU requires a secure browser context',
+    }
+  }
+  if (!webgpuApi) {
+    return {
+      backend,
+      available: false,
+      secureContext,
+      webgpuApi,
+      code: 'WEBGPU_UNAVAILABLE',
+      message: 'WebGPU is unavailable in this browser or GPU environment',
+    }
+  }
+  return { backend, available: true, secureContext, webgpuApi }
+}
+
+export function runtimeGpuCapabilityError(
+  capability: RuntimeGpuCapability,
+  detail?: string,
+): Error & { code: NonNullable<RuntimeGpuCapability['code']>; capability: RuntimeGpuCapability } {
+  const code = capability.code ?? 'WEBGPU_INITIALIZATION_FAILED'
+  const message = detail ?? capability.message ?? 'WebGPU initialization failed'
+  return Object.assign(new Error(`[${code}] ${message}`), { code, capability })
+}
+
+export async function disposeOwnedRuntimeResources(
+  resources: OwnedRuntimeResource[],
+): Promise<{ disposed: number; failures: string[] }> {
+  const owned = resources.splice(0).reverse()
+  const failures: string[] = []
+  let disposed = 0
+  for (const entry of owned) {
+    const resource = entry.resource as {
+      dispose?: () => void | Promise<void>
+      destroy?: () => void | Promise<void>
+    } | undefined
+    const dispose = entry.dispose ?? resource?.dispose ?? resource?.destroy
+    if (typeof dispose !== 'function') {
+      failures.push('Owned GPU resource has no dispose or destroy method')
+      continue
+    }
+    try {
+      await dispose.call(resource)
+      disposed += 1
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error))
+    }
+  }
+  return { disposed, failures }
+}
+
 export function runtimeCommandSettlementDeadline(expiresAt: string): number {
   return Date.parse(expiresAt) + RUNTIME_COMMAND_SETTLEMENT_GRACE_MS
 }
@@ -134,6 +216,9 @@ export function m7BootstrapHtml(): string {
     const stableEditorUuid = ${stableEditorUuid.toString()}
     const shouldPickAfterPointerGesture = ${shouldPickAfterPointerGesture.toString()}
     const installOwnedAssetFetch = ${installOwnedAssetFetch.toString()}
+    const disposeOwnedRuntimeResources = ${disposeOwnedRuntimeResources.toString()}
+    const runtimeGpuCapability = ${runtimeGpuCapability.toString()}
+    const runtimeGpuCapabilityError = ${runtimeGpuCapabilityError.toString()}
     const canvas = document.querySelector('canvas')
     let active
     let starting
@@ -536,9 +621,12 @@ export function m7BootstrapHtml(): string {
       gpuTextures: current.renderer.info?.memory?.textures ?? 0,
       gpuGeometries: current.renderer.info?.memory?.geometries ?? 0,
       gpuPrograms: current.renderer.info?.programs?.length ?? 0,
+      gpuResources: current.gpuResources.length,
+      gpuResourcesDisposed: current.gpuResourcesDisposed,
       rendererCount: 1,
       secureContext: isSecureContext,
       webgpuApi: Boolean(navigator.gpu),
+      capabilities: current.capabilities,
       rendererBackend:
         current.renderer.backend?.constructor?.name
         ?? current.renderer.constructor.name,
@@ -1139,6 +1227,9 @@ export function m7BootstrapHtml(): string {
           exampleDisposeError = message(error)
         } finally {
           const inputListenersAfterExampleDispose = current.runtimeInputListeners.length
+          const disposedResources = await disposeOwnedRuntimeResources(current.gpuResources)
+          current.gpuResourcesDisposed += disposedResources.disposed
+          failures.push(...disposedResources.failures)
           cleanup(() => current.transform?.detach())
           cleanup(() => current.transformHelper?.removeFromParent())
           cleanup(() => current.transformPivot?.removeFromParent())
@@ -1155,6 +1246,8 @@ export function m7BootstrapHtml(): string {
             inputListenersAfterExampleDispose,
             runtimeInputListenersAfterDispose: current.runtimeInputListeners.length,
             capturedPointersAfterDispose: current.runtimeCapturedPointers.size,
+            gpuResourcesAfterDispose: current.gpuResources.length,
+            gpuResourcesDisposed: current.gpuResourcesDisposed,
             rendererDisposed: true,
             ...(exampleDisposeError === undefined ? {} : { exampleDisposeError }),
             ...(failures.length === 0 ? {} : { disposeError: failures.join('\\n') }),
@@ -1270,6 +1363,12 @@ export function m7BootstrapHtml(): string {
           throw new Error('raw-webgpu runtime is outside the M7 profile')
         }
         const backend = adapter.backend ?? request.backend
+        let capabilities = runtimeGpuCapability(
+          backend,
+          Boolean(navigator.gpu),
+          isSecureContext,
+        )
+        if (!capabilities.available) throw runtimeGpuCapabilityError(capabilities)
         if (canvas.clientWidth === 0 || canvas.clientHeight === 0) {
           await new Promise(resolve => {
             const observer = new ResizeObserver(() => {
@@ -1297,7 +1396,20 @@ export function m7BootstrapHtml(): string {
         renderer = backend === 'webgpu'
           ? new THREE.WebGPURenderer(options)
           : new THREE.WebGLRenderer(options)
-        if (typeof renderer.init === 'function') await renderer.init()
+        if (typeof renderer.init === 'function') {
+          try {
+            await renderer.init()
+          } catch (error) {
+            if (backend !== 'webgpu') throw error
+            capabilities = {
+              ...capabilities,
+              available: false,
+              code: 'WEBGPU_INITIALIZATION_FAILED',
+              message: message(error),
+            }
+            throw runtimeGpuCapabilityError(capabilities)
+          }
+        }
         if (pending.stopRequested) throw new Error('Runtime start cancelled')
         renderer.outputColorSpace =
           adapter.renderer?.outputColorSpace ?? THREE.SRGBColorSpace
@@ -1376,6 +1488,9 @@ export function m7BootstrapHtml(): string {
           runtimeInputEvents: new Map(),
           runtimeEventFacade: undefined,
           runtimeCapturedPointers: new Set(),
+          gpuResources: [],
+          gpuResourcesDisposed: 0,
+          capabilities,
           runtimeCanvas: undefined,
           pickCycle: undefined,
           selected: undefined,
@@ -1423,6 +1538,12 @@ export function m7BootstrapHtml(): string {
           controls,
           runtime: {
             get state() { return { ...current.state } },
+            get capabilities() { return { ...current.capabilities } },
+            ownGpuResource(resource, dispose) {
+              if (resource == null) throw new Error('GPU resource is required')
+              current.gpuResources.push({ resource, dispose })
+              return resource
+            },
             reportMetrics(value) { emit(runId, nonce, 'metrics', value) },
             reportStatus(status, detail = {}) {
               emit(runId, nonce, 'status', { status, ...detail })
@@ -1628,7 +1749,12 @@ export function m7BootstrapHtml(): string {
           }
           emit(runId, nonce, 'disposed', disposed.evidence)
         } else {
-          emit(runId, nonce, 'runtime-error', { message: message(error) })
+          emit(runId, nonce, 'runtime-error', {
+            message: message(error),
+            ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+            ...(error?.capability ? { capability: error.capability } : {}),
+            fatal: true,
+          })
         }
       } finally {
         if (starting === pending) starting = undefined
