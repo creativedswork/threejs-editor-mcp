@@ -255,7 +255,7 @@ async function waitForLatestTurn(minimumTurn = 1) {
       'storages/session_projcache.json',
     ), 'utf8'))
     const stats = sessionStore.tables?.sessions?.[sessionId]?.rows?.sessionStats?.val
-    if (stats?.lastTurn >= minimumTurn && stats.openStep === null) return
+    if (stats?.lastTurn >= minimumTurn && stats.openStep === null) return sessionId
     await new Promise(resolve_ => setTimeout(resolve_, 100))
   }
   throw new Error(`Replay turn did not settle within ${startupTimeout} ms`)
@@ -331,18 +331,31 @@ async function appFrame() {
   return app
 }
 
-async function callAppTool(name, arguments_) {
+async function catalogEditor() {
   const catalogResponse = await fetch(`${webUrl}/api/mcp-apps/catalog`)
   const catalog = await catalogResponse.json()
+  assert.equal(catalogResponse.ok, true, JSON.stringify(catalog))
   const editor = catalog.items.find(item => item.publicToolName === 'mcp__threejs__open_editor')
   assert.notEqual(editor, undefined)
+  return editor
+}
+
+async function callRuntimeTool(name, arguments_, ownerSessionId) {
+  const editor = await catalogEditor()
   const response = await fetch(`${webUrl}/api/mcp-apps/tool`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ viewId: editor.viewId, name, arguments: arguments_ }),
+    body: JSON.stringify({
+      viewId: editor.viewId,
+      name,
+      arguments: arguments_,
+      sessionId: ownerSessionId,
+      connectionGeneration: editor.connectionGeneration,
+    }),
   })
   const result = await response.json()
-  assert.equal(response.ok, true, JSON.stringify(result))
+  assert.equal(response.status, 200, JSON.stringify(result))
+  assert.notEqual(result.isError, true, JSON.stringify(result))
   return result
 }
 
@@ -376,7 +389,7 @@ try {
   stage('submitting open-editor replay prompt')
   await composer.fill('打开 threejs-volumetric-clouds/weather-volume-clouds')
   await composer.press('Enter')
-  await waitForLatestTurn()
+  const ownerSessionId = await waitForLatestTurn()
   stage('reloading settled replay session')
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
   await page.getByRole('tab', { name: '对话', exact: true }).click()
@@ -414,7 +427,7 @@ try {
     + '的云层覆盖度改为 0.46，并构建当前版本。',
   )
   await composer.press('Enter')
-  await waitForLatestTurn(2)
+  assert.equal(await waitForLatestTurn(2), ownerSessionId)
   await app.waitForFunction(previous => {
     const value = globalThis.__THREE_M7__.metrics()
     return value.revision !== previous
@@ -445,20 +458,17 @@ try {
       && value.m7?.metrics?.buildId === value.m7?.build?.buildId
   }, undefined, { timeout: 120_000 })
   const running = await app.evaluate(() => globalThis.__THREE_M7__.metrics())
-  const inspected = await callAppTool('inspect_project', {
+  const runtimeRef = running.m7?.lifecycle?.committed?.runtime?.run?.runtimeRef
+  assert.equal(typeof runtimeRef, 'string')
+  const evidence = await callRuntimeTool('capture_runtime_frame', {
     projectId: running.projectId,
-  })
-  assert.equal(inspected.isError, undefined, JSON.stringify(inspected))
-  assert.equal(typeof inspected.structuredContent.runtime?.runtimeRef, 'string')
-  const evidence = await callAppTool('capture_runtime_frame', {
-    projectId: running.projectId,
-    runtimeRef: inspected.structuredContent.runtime.runtimeRef,
+    runtimeRef,
     target: 'validation',
     deterministic: true,
     format: 'jpeg',
     maxWidth: 512,
     maxHeight: 512,
-  })
+  }, ownerSessionId)
   assert.equal(evidence.isError, undefined, JSON.stringify(evidence))
   const evidenceRuntime = evidence.structuredContent.runtime
   const afterEvidence = await app.evaluate(() => globalThis.__THREE_M7__.metrics())
