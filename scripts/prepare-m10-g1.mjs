@@ -71,7 +71,12 @@ function createAvatarGltf() {
     0, 0, 0,
     -0.18, 0.15, 0,
     0.18, 0.15, 0,
-  ]), 5126, 'VEC3', { components: 3, target: 34962 })
+  ]), 5126, 'VEC3', {
+    components: 3,
+    target: 34962,
+    min: [-0.18, 0, 0],
+    max: [0.18, 0.15, 0],
+  })
   const indices = addAccessor(
     new Uint16Array([0, 1, 2, 2, 1, 3]),
     5123,
@@ -107,7 +112,7 @@ function createAvatarGltf() {
   )
   const buffer = Buffer.concat(chunks)
 
-  return {
+  const json = {
     asset: { version: '2.0', generator: 'threejs-editor-mcp M10 G1' },
     scene: 0,
     scenes: [{ nodes: [0, 1] }],
@@ -157,13 +162,27 @@ function createAvatarGltf() {
         roughnessFactor: 0.4,
       },
     }],
-    buffers: [{
-      byteLength: buffer.length,
-      uri: `data:application/octet-stream;base64,${buffer.toString('base64')}`,
-    }],
+    buffers: [{ byteLength: buffer.length }],
     bufferViews,
     accessors,
   }
+  const jsonBytes = Buffer.from(JSON.stringify(json))
+  const jsonPadding = (4 - jsonBytes.length % 4) % 4
+  const binPadding = (4 - buffer.length % 4) % 4
+  const jsonChunk = Buffer.concat([jsonBytes, Buffer.alloc(jsonPadding, 0x20)])
+  const binChunk = Buffer.concat([buffer, Buffer.alloc(binPadding)])
+  const glb = Buffer.alloc(12 + 8 + jsonChunk.length + 8 + binChunk.length)
+  glb.writeUInt32LE(0x46546c67, 0)
+  glb.writeUInt32LE(2, 4)
+  glb.writeUInt32LE(glb.length, 8)
+  glb.writeUInt32LE(jsonChunk.length, 12)
+  glb.writeUInt32LE(0x4e4f534a, 16)
+  jsonChunk.copy(glb, 20)
+  const binHeader = 20 + jsonChunk.length
+  glb.writeUInt32LE(binChunk.length, binHeader)
+  glb.writeUInt32LE(0x004e4942, binHeader + 4)
+  binChunk.copy(glb, binHeader + 8)
+  return glb
 }
 
 await rm(destination, { recursive: true, force: true })
@@ -171,8 +190,8 @@ await mkdir(resolve(destination, 'src'), { recursive: true })
 await mkdir(resolve(destination, 'assets'), { recursive: true })
 
 await writeFile(
-  resolve(destination, 'assets/avatar.gltf'),
-  `${JSON.stringify(createAvatarGltf())}\n`,
+  resolve(destination, 'assets/avatar.glb'),
+  createAvatarGltf(),
 )
 await writeFile(resolve(destination, 'src/parameters.json'), `${JSON.stringify({
   moveSpeed: 3,
@@ -191,7 +210,7 @@ export default {
   camera: { fov: 52, near: 0.1, far: 80, position: [4, 3, 7] },
   controls: { enabled: false },
   async setup({ canvas, scene, camera, resolveAsset }) {
-    const gltf = await new GLTFLoader().loadAsync(resolveAsset("../assets/avatar.gltf"));
+    const gltf = await new GLTFLoader().loadAsync(resolveAsset("../assets/avatar.glb"));
     const player = gltf.scene.getObjectByName("Player");
     let skinnedMesh;
     gltf.scene.traverse((object) => {
@@ -247,7 +266,7 @@ export default {
       oscillator.stop(audioContext.currentTime + 0.06);
       audioUnlocked = audioContext.state === "running";
     };
-    canvas.tabIndex = 0;
+    canvas.setAttribute("tabindex", "0");
     canvas.addEventListener("keydown", keyDown);
     canvas.addEventListener("keyup", keyUp);
     canvas.addEventListener("pointerdown", () => {

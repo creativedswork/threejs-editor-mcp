@@ -57,7 +57,7 @@ try {
   assert.match(source, /createCompressedGltfProfile/)
   assert.match(source, /runtime\.ownGpuResource\(fire/)
   assert.match(source, /disposeFluidFire\(fire, renderPipeline\)/)
-  assert.match(source, /parameters\.pressureIterations/)
+  assert.match(source, /\.\.\.parameters/)
 
   const client = new Client({ name: 'm10-corpus-build', version: '0.0.0' })
   await client.connect(new StdioClientTransport({

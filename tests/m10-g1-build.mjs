@@ -18,7 +18,11 @@ try {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
     stdio: 'pipe',
   })
-  const gltf = JSON.parse(await readFile(join(workspace, 'assets/avatar.gltf'), 'utf8'))
+  const glb = await readFile(join(workspace, 'assets/avatar.glb'))
+  assert.equal(glb.readUInt32LE(0), 0x46546c67)
+  assert.equal(glb.readUInt32LE(4), 2)
+  assert.equal(glb.readUInt32LE(8), glb.length)
+  const gltf = JSON.parse(glb.subarray(20, 20 + glb.readUInt32LE(12)).toString())
   assert.equal(gltf.skins.length, 1)
   assert.equal(gltf.animations.length, 1)
   assert.equal(gltf.meshes[0].primitives[0].targets.length, 1)
@@ -52,7 +56,7 @@ try {
     assert.deepEqual(built.structuredContent.diagnostics, [])
     assert.equal(built.structuredContent.backend, 'webgl')
     assert.equal(built.structuredContent.assets.length, 1)
-    assert.equal(built.structuredContent.assets[0].mediaType, 'model/gltf+json')
+    assert.equal(built.structuredContent.assets[0].mediaType, 'model/gltf-binary')
 
     const bundle = (await client.readResource({
       uri: built.structuredContent.bundleUri,
