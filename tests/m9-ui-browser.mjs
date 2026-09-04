@@ -431,9 +431,9 @@ try {
   ), 'utf8')
   assert.match(source, /clouds\.coverage = 0\.46;/)
 
-  await page.locator(
-    `[data-mcp-app-update="threejs:project:${ai.projectId}"]`,
-  ).last().getByRole('button', { name: 'Locate Editor', exact: true }).click()
+  await page.locator('[data-mcp-app-header-action]')
+    .getByTitle('Open mcp__threejs__open_editor fullscreen', { exact: true }).click()
+  await page.locator('[data-mcp-app-view][data-display-mode="fullscreen"]').waitFor()
   app = await appFrame()
   stage('starting runtime')
   await app.getByRole('button', { name: 'Play', exact: true }).click()
