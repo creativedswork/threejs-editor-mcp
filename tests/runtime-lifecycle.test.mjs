@@ -119,6 +119,23 @@ test('rejects interactive stable phases without a committed Runtime', async () =
   assert.equal(controller.snapshot().phase, 'recoverable-failure')
 })
 
+test('allows a committed Runtime aggregate to restart after recoverable failure', async () => {
+  const coordinator = new RuntimeCoordinator()
+  await bootstrap(coordinator)
+  await assert.rejects(
+    coordinator.enqueue('reload', 1_000, async () => {
+      throw new Error('recoverable Runtime failure')
+    }),
+    /recoverable Runtime failure/,
+  )
+  assert.equal(coordinator.snapshot().phase, 'recoverable-failure')
+  await coordinator.enqueue('play', 1_000, async () => ({
+    phase: 'playing',
+    value: undefined,
+  }))
+  assert.equal(coordinator.snapshot().phase, 'playing')
+})
+
 test('promotes one candidate as the complete committed aggregate', async () => {
   const coordinator = new RuntimeCoordinator()
   await bootstrap(coordinator)

@@ -30,6 +30,8 @@ test('M9 settles fatal Runtime teardown as one recoverable failure', async () =>
   assert.match(failure, /await stopM7Runtime\(false, true, context\)[\s\S]*throw failure/)
   assert.match(failure, /if \(error !== failure\) recordRuntimeError\(error\)/)
   assert.doesNotMatch(failure, /phase: 'disposed'/)
+  assert.match(source, /const recoverable = phase === 'recoverable-failure'/)
+  assert.match(source, /play\.disabled = \(!recoverable && editorDisabled\)/)
 })
 
 async function fixture() {

@@ -308,6 +308,7 @@ export class RuntimeCoordinator<
     const phase = this.#snapshot.phase
     const allowed = command === 'play'
       ? phase === 'edit-ready'
+        || (phase === 'recoverable-failure' && this.#snapshot.committed !== undefined)
       : command === 'stop'
         ? phase === 'playing'
         : command === 'save'

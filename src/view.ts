@@ -885,8 +885,9 @@ function refreshPlayButtons(): void {
   const phase = snapshot.phase
   const stable = phase === 'edit-ready' || phase === 'playing'
   const active = phase !== 'edit-ready' && phase !== 'disposed'
-  play.disabled = editorDisabled
-    || phase !== 'edit-ready'
+  const recoverable = phase === 'recoverable-failure' && snapshot.committed !== undefined
+  play.disabled = (!recoverable && editorDisabled)
+    || (phase !== 'edit-ready' && !recoverable)
     || navigationTab !== 'scene'
     || root.dataset.sync !== 'clean'
   stop.disabled = phase !== 'playing'
