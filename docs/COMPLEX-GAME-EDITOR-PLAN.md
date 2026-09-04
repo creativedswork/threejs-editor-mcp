@@ -3,9 +3,10 @@
 状态（2026-09-04）：
 
 - M6-M8.2 已验收；
-- M9 核心实现与 S1/S2 已本地提交，Milestone 自测暂停；
+- M9 核心实现、兼容修复与集中自测已完成，当前为
+  `MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE`；
 - Runtime 架构治理 R0-R5 已于 2026-09-04 全部验收；
-- 本轮未恢复 M9，也未进入 M10、M11 或 Release Hardening；
+- 尚未接受 M9，也未进入 M10、M11 或 Release Hardening；
 - 尚未执行 push。
 基线：`threejs-editor-mcp@0.1.0`，现有 M0-M4 已完成
 外部测试语料：`Threejs-Awesome-Graphics-Agent-Skills@0.8.0`，固定 commit
@@ -1056,11 +1057,12 @@ Snow 50-cycle soak 统一留到 Release Hardening。
 
 ### M9：高级 Pipeline 与大型本地资产
 
-**状态（2026-09-03）：PAUSED_BY_RUNTIME_REMEDIATION。核心实现与 S1/S2 已本地原子
-提交；历史定向测试、corpus build 与 standalone browser 证据继续保留。完整 DSH
-Replay UI 曾在 `open_editor` 成功后停留于 App loading，后续 Runtime/Harness
-问题已归入 R0-R5。R 系列完成并验收后，从 Milestone 自测恢复，不重复实现已提交的
-M9 Slice。详见 `reports/M9-validation.md`。**
+**状态（2026-09-04）：MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE。核心实现、S1/S2
+与 R0-R5 后兼容修复均已本地原子提交。集中自测和 collector-backed fresh DSH Replay
+已通过 quality 保存、Agent Clouds 修改/build、fullscreen Play、deterministic capture、
+source/build/run/evidence identity equality、WebGL context loss recoverable diagnostic
+及 distinct-run restart；最终 `browserProblems: []`。等待用户验收，不进入 M10。
+详见 `reports/M9-validation.md`。**
 
 目标：覆盖 multipass FFT、post-processing、EXR/3D texture/bin 资产。
 
