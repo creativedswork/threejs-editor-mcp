@@ -20,6 +20,18 @@ import { RuntimeAssetCache } from '../src/runtime-asset-cache.ts'
 const RESOURCE_CHUNK_BYTES = 256 * 1024
 const serverPath = fileURLToPath(new URL('../dist/server.js', import.meta.url))
 
+test('M9 settles fatal Runtime teardown as one recoverable failure', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const failure = source.slice(
+    source.indexOf('async function failM7Runtime('),
+    source.indexOf("window.addEventListener('message'", source.indexOf('async function failM7Runtime(')),
+  )
+  assert.match(failure, /const failure = new Error\(message\)/)
+  assert.match(failure, /await stopM7Runtime\(false, true, context\)[\s\S]*throw failure/)
+  assert.match(failure, /if \(error !== failure\) recordRuntimeError\(error\)/)
+  assert.doesNotMatch(failure, /phase: 'disposed'/)
+})
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m9-root-'))
   const parent = await mkdtemp(join(tmpdir(), 'threejs-editor-m9-workspace-'))

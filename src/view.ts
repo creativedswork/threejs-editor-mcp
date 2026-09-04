@@ -3566,16 +3566,17 @@ async function failM7Runtime(run: M7Run, message: string): Promise<void> {
   playingProject = undefined
   playingRevision = undefined
   playingRuntimeState = undefined
+  const failure = new Error(message)
   try {
     await runtimeCoordinator.enqueue('reload', M7_LIFECYCLE_TIMEOUT, async context => {
       const active = activeRun()
       if (active !== undefined && sameM7Runtime(active, run)) {
         await stopM7Runtime(false, true, context)
       }
-      return { phase: 'disposed', committed: null, value: undefined }
+      throw failure
     })
   } catch (error) {
-    recordRuntimeError(error)
+    if (error !== failure) recordRuntimeError(error)
   }
   status.textContent = `Runtime error: ${message.split('\n')[0]}`
 }
