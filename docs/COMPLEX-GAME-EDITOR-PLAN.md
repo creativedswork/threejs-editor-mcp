@@ -1086,6 +1086,9 @@ identity equality、WebGL context loss recoverable diagnostic 及 distinct-run r
 
 ### M10：WebGPU Compute 与典型游戏系统
 
+状态：**MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE（2026-09-05）**；
+验收证据见 [`reports/M10-validation.md`](../reports/M10-validation.md)。
+
 目标：验证高复杂 GPU 系统和真实 gameplay 依赖。
 
 实施：
