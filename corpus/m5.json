@@ -29,6 +29,9 @@
     "m9Cases": [
       "threejs-spectral-ocean/spectral-cascade-ocean",
       "threejs-volumetric-clouds/weather-volume-clouds"
+    ],
+    "m10Cases": [
+      "threejs-procedural-vfx/volumetric-fluid-fire"
     ]
   },
   "m5Fixtures": {
