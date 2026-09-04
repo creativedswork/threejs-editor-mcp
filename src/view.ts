@@ -2963,7 +2963,9 @@ async function settleRuntimeHarnessCommand(
 async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Promise<void> {
   let targetRun: M7Run
   let targetBuildId: string
-  let targetIdentity: RuntimeIdentity
+  let targetIdentity: RuntimeIdentity & {
+    target: RuntimeHarnessCommand['target']
+  }
   try {
     const active = activeRuntime()
     if (active === undefined
@@ -2997,16 +2999,14 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
           sourceRevision: command.runtime.revision,
         },
       },
+      target: command.target,
     }
     const startedResult = await app.callServerTool({
       name: 'start_runtime_command',
       arguments: {
         ...runtimeAddress(command.runtime),
         commandId: command.commandId,
-        targetRuntime: {
-          ...targetIdentity,
-          target: command.target,
-        },
+        targetRuntime: targetIdentity,
       },
     }, {
       timeout: M7_LIFECYCLE_TIMEOUT,

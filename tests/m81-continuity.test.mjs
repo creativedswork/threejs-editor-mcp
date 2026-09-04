@@ -552,6 +552,17 @@ test('M8.1 marks a claimed Runtime command before execution can fail', async () 
   assert.ok(prepare >= 0 && start > prepare && dispatch > start)
 })
 
+test('M8.1 reuses one target-bearing Runtime identity for start and settlement', async () => {
+  const viewSource = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const target = viewSource.indexOf('target: command.target,')
+  const start = viewSource.indexOf('targetRuntime: targetIdentity', target)
+  const settle = viewSource.indexOf(
+    'evidence: { ...result, runtime: targetIdentity }',
+    start,
+  )
+  assert.ok(target >= 0 && start > target && settle > start)
+})
+
 test('M8.1 derives settlement grace from the absolute execution deadline', () => {
   const expiresAt = '2026-08-25T00:00:02.000Z'
   assert.equal(
