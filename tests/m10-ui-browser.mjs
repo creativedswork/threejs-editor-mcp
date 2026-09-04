@@ -294,15 +294,15 @@ try {
   })
   page.on('console', message => {
     if (message.type() === 'error' || message.type() === 'warning') {
-      const text = message.text()
-      const source = message.location().url
-      if (!/http:\/\/127\.0\.0\.1:777[78]\//u.test(source)
-        && !/http:\/\/127\.0\.0\.1:777[78]\//u.test(text)) {
-        browserProblems.push(`${message.type()}: ${text}`)
-      }
+      browserProblems.push(`${message.type()}: ${message.text()}`)
     }
   })
   page.on('pageerror', error => browserProblems.push(`pageerror: ${error.message}`))
+  page.on('requestfailed', request => {
+    browserProblems.push(
+      `requestfailed: ${request.url()} (${request.failure()?.errorText ?? 'unknown error'})`,
+    )
+  })
 
   await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   const composer = await readyComposer(page)
