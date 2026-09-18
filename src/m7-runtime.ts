@@ -150,6 +150,7 @@ export function shouldPickAfterPointerGesture(
 export function installOwnedAssetFetch(
   target: { fetch: typeof fetch },
   ownedAssets: Map<string, Blob>,
+  resolveAsset: (url: string) => string = url => url,
 ): () => void {
   const originalFetch = target.fetch
   target.fetch = (input, init) => {
@@ -158,7 +159,7 @@ export function installOwnedAssetFetch(
       : input instanceof URL
         ? input.href
         : input.url
-    const blob = ownedAssets.get(url)
+    const blob = ownedAssets.get(resolveAsset(url))
     return blob === undefined
       ? originalFetch.call(target, input, init)
       : Promise.resolve(new Response(blob))
@@ -437,6 +438,9 @@ export function m7BootstrapHtml(): string {
         const value = Reflect.get(target, property, target)
         return typeof value === 'function' ? value.bind(target) : value
       },
+      set(target, property, value) {
+        return Reflect.set(target, property, value, target)
+      },
     })
     const createRuntimeRenderer = (renderer, runtimeCanvas) => new Proxy(renderer, {
       get(target, property) {
@@ -577,11 +581,12 @@ export function m7BootstrapHtml(): string {
     }
     const metrics = current => {
       const drawingBufferSize = new current.THREE.Vector2()
-      current.renderer.getDrawingBufferSize(drawingBufferSize)
+      if (current.renderer) current.renderer.getDrawingBufferSize(drawingBufferSize)
+      else drawingBufferSize.set(canvas.width, canvas.height)
       let gpuRenderer
       let gpuRendererUnmasked = false
       try {
-        const context = current.renderer.getContext?.()
+        const context = current.renderer?.getContext?.()
         const debug = context?.getExtension?.('WEBGL_debug_renderer_info')
         if (debug) {
           gpuRenderer = context.getParameter(debug.UNMASKED_RENDERER_WEBGL)
@@ -613,24 +618,26 @@ export function m7BootstrapHtml(): string {
       runtimeInputEvents: Object.fromEntries(current.runtimeInputEvents),
       runtimeEventFacade: current.runtimeEventFacade,
       capturedPointers: current.runtimeCapturedPointers.size,
-      rendererCanvasFacade: current.runtimeRenderer.domElement !== canvas,
+      rendererCanvasFacade: current.runtimeRenderer === undefined
+        || current.runtimeRenderer.domElement !== canvas,
       resizeCount: current.resizeCount,
       devicePixelRatio: current.state.dpr,
       clientSize: [canvas.clientWidth, canvas.clientHeight],
       drawingBufferSize: drawingBufferSize.toArray(),
-      gpuTextures: current.renderer.info?.memory?.textures ?? 0,
-      gpuGeometries: current.renderer.info?.memory?.geometries ?? 0,
-      gpuPrograms: current.renderer.info?.programs?.length ?? 0,
+      gpuTextures: current.renderer?.info?.memory?.textures ?? 0,
+      gpuGeometries: current.renderer?.info?.memory?.geometries ?? 0,
+      gpuPrograms: current.renderer?.info?.programs?.length ?? 0,
       gpuResources: current.gpuResources.length,
       gpuResourcesDisposed: current.gpuResourcesDisposed,
-      rendererCount: 1,
+      rendererCount: current.renderer === undefined ? 0 : 1,
       secureContext: isSecureContext,
       webgpuApi: Boolean(navigator.gpu),
       capabilities: current.capabilities,
       rendererBackend:
-        current.renderer.backend?.constructor?.name
-        ?? current.renderer.constructor.name,
-      renderPath: current.state.debugMode === 'no-post'
+        current.renderer?.backend?.constructor?.name
+        ?? current.renderer?.constructor?.name
+        ?? 'RawWebGPU',
+      renderPath: current.renderer && current.state.debugMode === 'no-post'
         ? 'direct-renderer'
         : current.example?.render
           ? 'example-render'
@@ -640,8 +647,8 @@ export function m7BootstrapHtml(): string {
       debugMode: current.state.debugMode,
       gpuRenderer,
       gpuRendererUnmasked,
-      draws: current.renderer.info?.render?.calls ?? 0,
-      triangles: current.renderer.info?.render?.triangles ?? 0,
+      draws: current.renderer?.info?.render?.calls ?? 0,
+      triangles: current.renderer?.info?.render?.triangles ?? 0,
       ...(typeof current.example?.metrics === 'function'
         ? current.example.metrics()
         : {}),
@@ -927,10 +934,11 @@ export function m7BootstrapHtml(): string {
       const expectedWidth = Math.floor(width * dpr)
       const expectedHeight = Math.floor(height * dpr)
       const size = new current.THREE.Vector2()
-      current.renderer.getDrawingBufferSize(size)
+      if (current.renderer) current.renderer.getDrawingBufferSize(size)
+      else size.set(canvas.width, canvas.height)
       if (size.x === expectedWidth && size.y === expectedHeight) return false
-      current.renderer.setPixelRatio(dpr)
-      current.renderer.setSize(width, height, false)
+      current.renderer?.setPixelRatio(dpr)
+      current.renderer?.setSize(width, height, false)
       if (current.camera.isPerspectiveCamera) {
         current.camera.aspect = width / height
         current.camera.updateProjectionMatrix()
@@ -1194,7 +1202,7 @@ export function m7BootstrapHtml(): string {
       if (current) {
         cleanup(() => current.layoutObserver?.disconnect())
         cleanup(() => cancelAnimationFrame(current.animation))
-        cleanup(() => current.renderer.setAnimationLoop?.(null))
+        cleanup(() => current.renderer?.setAnimationLoop?.(null))
         try {
           cancelRuntimeInput(current)
         } catch (error) {
@@ -1236,9 +1244,9 @@ export function m7BootstrapHtml(): string {
           cleanup(() => current.transform?.dispose())
           cleanup(() => disposeRuntimeCanvas(current))
           cleanup(() => current.controls?.dispose())
-          cleanup(() => current.renderer.dispose())
-          if (!preserveSurface && !current.renderer.getContext?.().isContextLost?.()) {
-            cleanup(() => current.renderer.forceContextLoss?.())
+          cleanup(() => current.renderer?.dispose())
+          if (!preserveSurface && !current.renderer?.getContext?.().isContextLost?.()) {
+            cleanup(() => current.renderer?.forceContextLoss?.())
           }
           evidence = {
             ...evidence,
@@ -1325,7 +1333,6 @@ export function m7BootstrapHtml(): string {
             assetBlobs.set(url, blob)
           }
         }
-        restoreAssetFetch = installOwnedAssetFetch(window, assetBlobs)
         globalThis.__THREEJS_EDITOR_ASSETS__ = assetUrls
         globalThis.__THREEJS_EDITOR_REGISTER_INLINE_ASSET__ = (hash, mediaType, base64) => {
           const existing = assetUrls.get(hash)
@@ -1356,11 +1363,9 @@ export function m7BootstrapHtml(): string {
           editorState,
           resolveAsset,
         } = module
+        restoreAssetFetch = installOwnedAssetFetch(window, assetBlobs, resolveAsset)
         if (!adapter || typeof adapter.setup !== 'function') {
           throw new Error('Workspace entry must default-export an adapter with setup(context)')
-        }
-        if (adapter.backend === 'raw-webgpu' || request.backend === 'raw-webgpu') {
-          throw new Error('raw-webgpu runtime is outside the M7 profile')
         }
         const backend = adapter.backend ?? request.backend
         let capabilities = runtimeGpuCapability(
@@ -1393,10 +1398,12 @@ export function m7BootstrapHtml(): string {
           preserveDrawingBuffer: true,
           ...(adapter.renderer?.options ?? {}),
         }
-        renderer = backend === 'webgpu'
-          ? new THREE.WebGPURenderer(options)
-          : new THREE.WebGLRenderer(options)
-        if (typeof renderer.init === 'function') {
+        renderer = backend === 'raw-webgpu'
+          ? undefined
+          : backend === 'webgpu'
+            ? new THREE.WebGPURenderer(options)
+            : new THREE.WebGLRenderer(options)
+        if (typeof renderer?.init === 'function') {
           try {
             await renderer.init()
           } catch (error) {
@@ -1411,12 +1418,14 @@ export function m7BootstrapHtml(): string {
           }
         }
         if (pending.stopRequested) throw new Error('Runtime start cancelled')
-        renderer.outputColorSpace =
-          adapter.renderer?.outputColorSpace ?? THREE.SRGBColorSpace
-        renderer.toneMapping =
-          adapter.renderer?.toneMapping ?? THREE.ACESFilmicToneMapping
-        renderer.toneMappingExposure = adapter.renderer?.exposure ?? 1
-        if (adapter.renderer?.clearColor != null) {
+        if (renderer) {
+          renderer.outputColorSpace =
+            adapter.renderer?.outputColorSpace ?? THREE.SRGBColorSpace
+          renderer.toneMapping =
+            adapter.renderer?.toneMapping ?? THREE.ACESFilmicToneMapping
+          renderer.toneMappingExposure = adapter.renderer?.exposure ?? 1
+        }
+        if (renderer && adapter.renderer?.clearColor != null) {
           renderer.setClearColor(
             adapter.renderer.clearColor,
             adapter.renderer.clearAlpha ?? 1,
@@ -1527,7 +1536,9 @@ export function m7BootstrapHtml(): string {
         }
         const runtimeCanvas = createRuntimeCanvas(current)
         current.runtimeCanvas = runtimeCanvas
-        current.runtimeRenderer = createRuntimeRenderer(renderer, runtimeCanvas)
+        current.runtimeRenderer = renderer === undefined
+          ? undefined
+          : createRuntimeRenderer(renderer, runtimeCanvas)
         active = current
         current.setupPromise = Promise.resolve(adapter.setup({
           THREE,
@@ -1562,6 +1573,9 @@ export function m7BootstrapHtml(): string {
           throw error
         }
         if (current.stopped || active !== current) return
+        if (backend === 'raw-webgpu' && typeof current.example.render !== 'function') {
+          throw new Error('raw-webgpu adapter must provide render(frame)')
+        }
         current.example.setDebugMode?.(current.state.debugMode)
         current.example.setQualityTier?.(current.state.qualityTier)
         const viewState = request.viewState
@@ -1663,7 +1677,7 @@ export function m7BootstrapHtml(): string {
                 current.needsInitialUpdate = false
               }
               current.controls?.update()
-              if (current.state.debugMode === 'no-post') {
+              if (current.renderer && current.state.debugMode === 'no-post') {
                 current.renderer.render(current.scene, current.camera)
               } else if (current.example.render) {
                 await current.example.render({
@@ -1675,10 +1689,12 @@ export function m7BootstrapHtml(): string {
                   rawDelta,
                   state: current.state,
                 })
-              } else if (typeof current.renderer.renderAsync === 'function') {
+              } else if (typeof current.renderer?.renderAsync === 'function') {
                 await current.renderer.renderAsync(current.scene, current.camera)
-              } else {
+              } else if (current.renderer) {
                 current.renderer.render(current.scene, current.camera)
+              } else {
+                throw new Error('raw-webgpu adapter must provide render(frame)')
               }
               current.frame += 1
               if (current.pendingDebugMode !== undefined) {
