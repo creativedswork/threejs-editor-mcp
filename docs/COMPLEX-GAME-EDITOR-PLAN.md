@@ -1086,7 +1086,7 @@ identity equality、WebGL context loss recoverable diagnostic 及 distinct-run r
 
 ### M10：WebGPU Compute 与典型游戏系统
 
-状态：**MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE（Ash Growth 验收反馈已修复，2026-09-18）**；
+状态：**ACCEPTED（用户于 2026-09-18 验收通过）**；
 验收证据见 [`reports/M10-validation.md`](../reports/M10-validation.md)。
 
 目标：验证高复杂 GPU 系统和真实 gameplay 依赖。
@@ -1111,6 +1111,8 @@ identity equality、WebGL context loss recoverable diagnostic 及 distinct-run r
 产物：`reports/M10-validation.md`、P6/G1 GIF、capability matrix。
 
 ### M11：社区契约与 0.2.0 发布
+
+状态：**SCOPED / AWAITING_EXECUTION（2026-09-18）**。
 
 目标：把案例接入、诊断和发布变成社区可重复流程。
 

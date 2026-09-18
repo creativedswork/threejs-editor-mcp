@@ -1,29 +1,29 @@
 # M10 Validation
 
-Status: **MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE (ASH FIX VERIFIED)**
+Status: **ACCEPTED (2026-09-18)**
 
 ## Execution checkpoint
 
 EXECUTION_CHECKPOINT
-- Updated at: 2026-09-18 12:53:08 +0800
+- Updated at: 2026-09-18 22:57:40 +0800
 - Milestone: M10 - WebGPU Compute and gameplay systems
-- Slice: acceptance Fix F1 - Ash Growth loader and open outcome
-- Phase: milestone-candidate
+- Slice: acceptance Fix F2 - raw WebGPU renderer ownership
+- Phase: accepted
 - Slice state: COMMITTED_LOCAL
-- Completed facts: The uploaded Session `session-a5034018-398e-4a04-be20-fc95c8a58676` proved `open_editor` returned success for Ash Growth before its App Runtime settled, so the Agent claimed the project loaded without observing the later failure. Ash Growth also used three Draco-compressed rock GLBs while the Gallery adapter omitted the pinned `/node_modules/three/.../draco/gltf/` decoder resources. Commit `fdaff58` injects hash-verified pinned Draco/Basis assets, reports `open_editor` as pending, publishes a failed open status to model context, and wakes the same Session once on failure. Ash Growth build and browser Runtime now pass.
-- Repository state: `/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp`, branch `main`, HEAD `fdaff58`. F1 committed only its owned hunks in `src/builder.ts`, `src/workspaces.ts`, `src/server.ts`, `src/view.ts`, and new `tests/m10-ash-growth-build.mjs`; unrelated local edits remain unstaged.
-- Intended changes: None for F1. Preserve unrelated local edits while retaining commit `fdaff58` and this checkpoint update.
-- Explicit exclusions: Preserve all unrelated tracked and untracked local changes; do not stage or commit them. Do not modify `dsh-uni-editor`; its existing MCP Apps message capability is sufficient. No M11, Release Hardening, push, PR, rebase, amend, deploy, historical evidence cleanup, or P7 architecture.
-- Verification: Retained M10 evidence remains valid. F1 isolated candidate bundles compile. `tests/m10-ash-growth-build.mjs` PASS: pending open semantics; build `a9a41c7b...`; 17 assets including 3 pinned Draco decoder assets; browser Runtime `webgl`, frame `1`; pixel sample lit `2400/2400`, colors `1541`; synthetic App load failure publishes structured status `failed` and exactly one Session wake message. `node --check` and `git diff --check` PASS.
-- Evidence paths: uploaded `/Users/bytedanceo/Downloads/session.jsonl 2`; F1 regression `tests/m10-ash-growth-build.mjs`; ignored candidate bundles `.tmp/m10-ash-candidate/{server,view}.js`. Retained P6/G1 evidence paths remain unchanged.
-- Run identity: Ash candidate project `example-a0bbc1c1863ce8d601014d87bae7376cf2cbb78355b807fc509e520f`, revision `abda8db24c6453b2a7810f69842da7877c8fd3b2abc3f9375a9b752161f732b9`, build `a9a41c7b2c6b6e6dba495d111d1b6687291ea64b646c42b0ce246057ecc50027`. Isolated candidate DSH is live at `http://127.0.0.1:61240`.
-- Resource ownership: This M10 Owner owns only the F1 hunks, new test, and candidate DSH PID `88632` on port `61240`. Existing dirty files and the running `127.0.0.1:3080` DSH instance remain outside F1 lifecycle ownership.
-- Active command: Candidate DSH web profile, PID `88632`, URL `http://127.0.0.1:61240`; readiness HTTP `200`; stop after user acceptance or rejection.
-- Continuity constraints: Preserve baseline dirty files byte-for-byte and keep the index limited to explicitly owned M10 files. Reuse the single M7 Runtime/coordinator/identity path.
-- Invalidators: HEAD or branch changes outside owned commits; any pre-existing dirty file changes because of M10 work; unknown staged files; deletion or mutation of retained evidence; source/revision mismatch against a recorded result.
-- Blockers and risks: No F1 implementation blocker remains. The existing DSH process on `127.0.0.1:3080` still uses its previously loaded MCP server and must be restarted or repointed before manual retest.
-- Exact next action: User opens `http://127.0.0.1:61240`, selects the Gallery examples workspace, and retries Ash Growth; keep M10 at `AWAITING_ACCEPTANCE`.
-- Stop condition: Stop at `MILESTONE_CANDIDATE` / `AWAITING_ACCEPTANCE`, or earlier only for an unresolvable dirty-file ownership conflict, missing required hardware/credentials, or a material scope/architecture change.
+- Completed facts: Uploaded Session `session-1372f69e-87d0-4457-aa68-4c1c8c412497` opened `GPU-Culled Flower Field` as project `example-25de29b62548dd13e2f7fb8e0fdf299d13e691f3d839a7455d18081f` at revision `a32765d7af4652448239f48fc1256386da2153d4550032f3b38d5972341e607f`. Import succeeded, then the shared M7 Runtime rejected the declared `raw-webgpu` backend before `setup()` with `raw-webgpu runtime is outside the M7 profile`. The user confirmed that F2 may supersede F1's temporary `No P7 architecture` exclusion, provided the fix remains one M7 Runtime with a renderer-self-managed compatibility branch. Commit `9de5dfd` permits that branch, resolves raw `fetch()` asset aliases, and supports native canvas writes without creating a second Runtime implementation. The user completed manual acceptance on 2026-09-18.
+- Repository state: `/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp`, branch `main`, HEAD `9de5dfd`. F2 committed only its owned hunks in `src/m7-runtime.ts` and `tests/m10-p7-raw-webgpu.mjs`; unrelated local edits remain unstaged.
+- Intended changes: None. Preserve unrelated local edits while retaining commit `9de5dfd` and this acceptance record.
+- Explicit exclusions: No second Runtime implementation, no changes to the external corpus or `dsh-uni-editor`, and no unrelated Runtime registry/debug work. No M11, Release Hardening, push, PR, rebase, amend, deploy, or historical evidence cleanup.
+- Verification: `tests/m10-p7-raw-webgpu.mjs` PASS against the exact P7 corpus project: ready build `69d406ba...`, 1,843,288-byte bundle, 2 assets, Runtime backend `raw-webgpu`, frame `1`, no Three renderer, `1,048,576` candidates, browser-composited pixel sample lit `2400/2400` with `1185` colors, and Stop without `runtime-error`. Focused capability and asset-fetch tests PASS `4/4`; syntax and owned `git diff --check` PASS.
+- Evidence paths: uploaded `/Users/bytedanceo/Downloads/dsh-session-session-1372f69e-87d0-4457-aa68-4c1c8c412497 (1)/session.jsonl`; regression `tests/m10-p7-raw-webgpu.mjs`; isolated candidate bundles `.tmp/m10-ash-candidate/{server,view}.js`. External corpus remains pinned to `98453747cc0678f6a5d910f38d7483596a5f9a40`.
+- Run identity: P7 project `example-25de29b62548dd13e2f7fb8e0fdf299d13e691f3d839a7455d18081f`, revision `a32765d7af4652448239f48fc1256386da2153d4550032f3b38d5972341e607f`, build `69d406bacaa8150d4900cec7ebfea0d402d64c53b4cf7ff259123e8f11870988`. Isolated smoke Runtime was disposed after verification.
+- Resource ownership: The M10 candidate DSH and Three.js MCP child were stopped after acceptance. Existing dirty files and the running `127.0.0.1:3080` DSH instance remain outside M10 lifecycle ownership.
+- Active command: N/A.
+- Continuity constraints: Preserve all baseline dirty hunks byte-for-byte; keep one M7 Runtime/coordinator/identity path and one sandbox canvas.
+- Invalidators: HEAD or branch changes outside owned commits; concurrent edits to `src/m7-runtime.ts`; unknown staged files; external corpus revision drift; verification source/revision mismatch.
+- Blockers and risks: No open-path blocker remains. Browser-composited pixels are verified, but `capture_runtime_frame` still relies on 2D readback of the WebGPU presentation canvas and is not claimed as P7 evidence; cross-platform raw-WebGPU coverage remains deferred to Release Hardening.
+- Exact next action: Define the M11 evidence and release slices before implementation.
+- Stop condition: M10 is closed; do not reopen it without new acceptance evidence.
 
 ## Smoke failure and repair ledger
 
@@ -48,6 +48,7 @@ EXECUTION_CHECKPOINT
 | Strict real-provider evidence | `2d8153c` | Unfiltered browser diagnostics, project-bound App lifecycle, real-provider G1/P6 Runtime recording, and endpoint diagnosis. |
 | Candidate documentation | `d88f590` | M10 plan status and complete validation evidence moved to `MILESTONE_CANDIDATE / AWAITING_ACCEPTANCE`. |
 | Acceptance Fix F1 | `fdaff58` | Ash Growth pinned decoder resources plus pending/success/failure open lifecycle feedback. |
+| Acceptance Fix F2 | `9de5dfd` | Raw WebGPU renderer ownership, asset fetch resolution, canvas facade support, and focused P7 Runtime evidence. |
 
 ## Capability matrix
 
@@ -58,7 +59,7 @@ EXECUTION_CHECKPOINT
 | WebGPU, secure, API absent | Fatal `WEBGPU_UNAVAILABLE`, typed capability payload, no fallback | `.playwright-mcp/m10-capability-result.json` | PASS |
 | WebGPU, insecure | Fatal `WEBGPU_INSECURE_CONTEXT` before renderer construction | `tests/m10-runtime.test.mjs` | PASS |
 | WebGPU renderer initialization failure | Fatal `WEBGPU_INITIALIZATION_FAILED` with capability payload | generated Runtime contract assertion | PASS |
-| Raw WebGPU P7 | Non-blocking C5 stretch; no separate architecture created | not executed | UNVERIFIED / NON-BLOCKING |
+| Raw WebGPU P7 | C5 renderer-self-managed branch in the shared M7 Runtime | `tests/m10-p7-raw-webgpu.mjs` | PASS on macOS Chrome |
 
 ## Concentrated self-test
 
@@ -194,9 +195,9 @@ required, and no P6 corpus asset enters the published package.
 ## Release Hardening deferred
 
 The full suite, full TypeScript check, lint/check aggregate, packed-install
-verification, cumulative review, push, PR, and release remain deferred until
-explicit Release Hardening authorization. P7 raw WebGPU remains the optional C5
-gap and did not block mandatory S1-S3.
+verification, cumulative review, cross-platform raw-WebGPU coverage, raw
+presentation-surface Harness capture, push, PR, and release remain deferred
+until explicit Release Hardening authorization.
 
 ## Human acceptance
 
@@ -205,6 +206,7 @@ gap and did not block mandatory S1-S3.
 3. Open G1, click the canvas to unlock audio, move with `W`, pause/resume, and select skeleton debug.
 4. Restart G1 and verify the player returns to the origin.
 5. Inspect the capability matrix and confirm unavailable WebGPU produces a typed fatal error rather than a black screen or WebGL fallback.
+6. Open P7 GPU-Culled Flower Field and verify the raw WebGPU field renders and Stop completes.
 
 Any missing P6/G1 behavior, identity mismatch, nonzero GPU resources after P6
 dispose, raw browser warning/error, untyped capability failure, fixture-only
