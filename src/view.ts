@@ -2290,7 +2290,7 @@ async function publishRuntimeModelContext(run: M7Run, signal?: AbortSignal): Pro
   await app.updateModelContext({
     content: [{
       type: 'text',
-      text: `The active Three.js Runtime reference is ${JSON.stringify({
+      text: `The Three.js project is open and its Runtime is ready. The active Runtime reference is ${JSON.stringify({
         projectId: run.projectId,
         runtimeRef: run.runtimeRef,
       })}. Use this opaque reference for subsequent Runtime Harness tool calls.`,
@@ -2307,6 +2307,50 @@ async function publishRuntimeModelContext(run: M7Run, signal?: AbortSignal): Pro
     timeout: M7_LIFECYCLE_TIMEOUT,
     maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
   })
+}
+
+async function publishOpenFailure(
+  nextProjectId: string,
+  error: unknown,
+  signal: AbortSignal,
+): Promise<void> {
+  const capabilities = app.getHostCapabilities()
+  const failure = runtimeMessage(error).split('\n')[0]?.slice(0, 500)
+  if (capabilities?.updateModelContext !== undefined) {
+    await app.updateModelContext({
+      content: [{
+        type: 'text',
+        text: `The Three.js project failed to open${
+          failure === undefined ? '.' : `: ${failure}`
+        } Do not claim that it loaded and do not retry unless the user asks.`,
+      }],
+      structuredContent: {
+        kind: 'threejs-editor-open-status',
+        open: {
+          projectId: nextProjectId,
+          status: 'failed',
+          ...failure === undefined ? {} : { error: failure },
+        },
+      },
+    }, {
+      signal,
+      timeout: M7_LIFECYCLE_TIMEOUT,
+      maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+    })
+  }
+  if (capabilities?.message === undefined) return
+  const result = await app.sendMessage({
+    role: 'user',
+    content: [{
+      type: 'text',
+      text: 'The Three.js Editor has finished processing the open request. Report its final App status from MCP App context without retrying the open request.',
+    }],
+  }, {
+    signal,
+    timeout: M7_LIFECYCLE_TIMEOUT,
+    maxTotalTimeout: M7_LIFECYCLE_TIMEOUT,
+  })
+  if (result.isError === true) throw new Error('Host rejected the Editor open status message')
 }
 
 async function reportRuntimeDiagnostics(
@@ -4234,6 +4278,10 @@ app.ontoolresult = result => {
     if (tearingDown) return
     root.dataset.sync = 'error'
     status.textContent = error instanceof Error ? error.message : String(error)
+    runtimeEffects.run(
+      'open-failure',
+      signal => publishOpenFailure(nextProjectId, error, signal),
+    )
   })
 }
 app.onhostcontextchanged = context => {

@@ -32,6 +32,8 @@ import {
   assetStringLiterals,
   buildIdFor,
   buildWorkspace,
+  pinnedThreeRuntimeAsset,
+  pinnedThreeRuntimeAssetPaths,
   PINNED_RUNTIME_DEPENDENCIES,
   moduleSpecifiers,
   type FailedBuild,
@@ -1359,16 +1361,45 @@ export class WorkspaceStore {
       }
       const match = Object.entries(manifest.files)
         .find(([, file]) => !file.text && file.sha256 === sha256)
-      if (match === undefined) throw new Error('resource is not part of the requested revision')
-      const [, file] = match
-      return { path: registration.path, file }
+      if (match !== undefined) {
+        const [, file] = match
+        return { kind: 'workspace' as const, path: registration.path, file }
+      }
+      const buildId = buildIdFor({
+        projectId,
+        revision,
+        entry: manifest.entry,
+        backend: manifest.backend,
+        files: [],
+      })
+      const build = await this.readStoredBuild(registration.path, buildId)
+      const asset = build?.status === 'ready' && build.revision === revision
+        ? build.assets.find(candidate => (
+            candidate.sha256 === sha256
+            && candidate.path.startsWith('node_modules/three/examples/jsm/libs/')
+          ))
+        : undefined
+      const pinned = asset === undefined
+        ? undefined
+        : await pinnedThreeRuntimeAsset(sha256)
+      if (pinned === undefined
+        || asset?.path !== pinned.path
+        || asset.size !== pinned.bytes.byteLength
+        || asset.mediaType !== pinned.mediaType) {
+        throw new Error('resource is not part of the requested revision')
+      }
+      return { kind: 'pinned' as const, pinned }
     })
-    const bytes = await this.verifiedResourceObject(resource.path, sha256, resource.file.size)
+    const bytes = resource.kind === 'pinned'
+      ? Buffer.from(resource.pinned.bytes)
+      : await this.verifiedResourceObject(resource.path, sha256, resource.file.size)
     const offset = chunk * RESOURCE_CHUNK_BYTES
     if (offset >= bytes.length) throw new Error('resource chunk is out of range')
     return {
       bytes: bytes.subarray(offset, Math.min(offset + RESOURCE_CHUNK_BYTES, bytes.length)),
-      mediaType: resource.file.mediaType,
+      mediaType: resource.kind === 'pinned'
+        ? resource.pinned.mediaType
+        : resource.file.mediaType,
       size: bytes.length,
       offset,
     }
@@ -2765,6 +2796,7 @@ export class WorkspaceStore {
         queue.push(resolved)
       }
       for (const specifier of assetSpecifiers(filePath, sourceText)) {
+        if (pinnedThreeRuntimeAssetPaths(specifier).length > 0) continue
         const resolved = await this.resolveAssetFiles(source, specifier, filePath)
         if (resolved.length === 0) {
           return `Project asset is outside the selected DSH workspace: ${specifier}.`
@@ -2810,6 +2842,7 @@ export class WorkspaceStore {
         queue.push(resolved)
       }
       for (const specifier of assetSpecifiers(filePath, sourceText)) {
+        if (pinnedThreeRuntimeAssetPaths(specifier).length > 0) continue
         const resolved = await this.resolveAssetFiles(source, specifier, filePath)
         if (resolved.length === 0) {
           throw new Error(`workspace asset not found: ${specifier}`)

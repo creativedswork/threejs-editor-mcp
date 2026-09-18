@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import {
   basename,
@@ -19,7 +20,7 @@ import {
 import ts from 'typescript'
 import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
 
-export const BUILDER_VERSION = 'm9-resource-pipeline-v1'
+export const BUILDER_VERSION = 'm10-loader-profile-v1'
 export const PINNED_RUNTIME_DEPENDENCIES = {
   three: '0.185.1',
   postprocessing: '6.37.4',
@@ -218,6 +219,59 @@ interface ModuleSpecifier {
 
 const ASSET_REQUEST =
   /^(?:(?:\/(?:dev|skills)\/|\.\.?\/|assets\/)[^"'`$?#]+\.(?:avif|basis|bin|exr|gif|glb|gltf|hdr|jpe?g|ktx2|png|webp)|\/(?:dev|skills)\/[^"'`$?#]+\/assets\/[^"'`$?#]+)(?:[?#][^"'`\s]*)?$/i
+const PINNED_THREE_RUNTIME_ASSET_DIRECTORIES = new Map<string, readonly string[]>([
+  [
+    '/node_modules/three/examples/jsm/libs/draco/',
+    ['draco_decoder.js', 'draco_decoder.wasm', 'draco_wasm_wrapper.js'],
+  ],
+  [
+    '/node_modules/three/examples/jsm/libs/draco/gltf/',
+    ['draco_decoder.js', 'draco_decoder.wasm', 'draco_wasm_wrapper.js'],
+  ],
+  [
+    '/node_modules/three/examples/jsm/libs/basis/',
+    ['basis_transcoder.js', 'basis_transcoder.wasm'],
+  ],
+])
+const allPinnedThreeRuntimeAssetPaths = [...new Set(
+  [...PINNED_THREE_RUNTIME_ASSET_DIRECTORIES].flatMap(([directory, files]) => (
+    files.map(file => `${directory.slice(1)}${file}`)
+  )),
+)]
+const pinnedThreeRuntimeAssets = new Map<string, Promise<BuildFile>>()
+
+export function pinnedThreeRuntimeAssetPaths(request: string): string[] {
+  const clean = request.replace(/[?#].*$/, '')
+  const files = PINNED_THREE_RUNTIME_ASSET_DIRECTORIES.get(clean)
+  return files === undefined ? [] : files.map(file => `${clean.slice(1)}${file}`)
+}
+
+async function loadPinnedThreeRuntimeAsset(path: string): Promise<BuildFile> {
+  const pending = pinnedThreeRuntimeAssets.get(path) ?? (async () => {
+    const suffix = path.slice('node_modules/three/'.length)
+    const bytes = await readFile(join(threeRoot, ...suffix.split('/')))
+    return {
+      path,
+      bytes,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      mediaType: extname(path).toLowerCase() === '.wasm'
+        ? 'application/wasm'
+        : 'text/javascript',
+      text: false,
+    }
+  })()
+  pinnedThreeRuntimeAssets.set(path, pending)
+  return pending
+}
+
+export async function pinnedThreeRuntimeAsset(
+  sha256: string,
+): Promise<BuildFile | undefined> {
+  const assets = await Promise.all(
+    allPinnedThreeRuntimeAssetPaths.map(loadPinnedThreeRuntimeAsset),
+  )
+  return assets.find(asset => asset.sha256 === sha256)
+}
 
 function scriptKind(path: string): ts.ScriptKind {
   const extension = extname(path).toLowerCase()
@@ -259,7 +313,8 @@ export function assetStringLiterals(
       && !isDataKeyLiteral(node)
       && !(ts.isNoSubstitutionTemplateLiteral(node)
         && ts.isTaggedTemplateExpression(node.parent))
-      && ASSET_REQUEST.test(node.text)) {
+      && (ASSET_REQUEST.test(node.text)
+        || pinnedThreeRuntimeAssetPaths(node.text).length > 0)) {
       const start = node.getStart(file)
       literals.push({
         start,
@@ -516,6 +571,21 @@ function runtimeAssets(files: Map<string, BuildFile>): RuntimeAssets {
     aliases: [...aliases],
     css: [...css],
     inline: [...inline].map(([hash, [mediaType, base64]]) => [hash, mediaType, base64]),
+  }
+}
+
+async function addPinnedThreeRuntimeAssets(files: Map<string, BuildFile>): Promise<void> {
+  const paths = new Set<string>()
+  for (const file of files.values()) {
+    if (!file.text || !rewritesAssetLiterals(file.path)) continue
+    const source = new TextDecoder().decode(file.bytes)
+    for (const literal of assetStringLiterals(source, file.path)) {
+      for (const path of pinnedThreeRuntimeAssetPaths(literal.request)) paths.add(path)
+    }
+  }
+  for (const path of paths) {
+    if (files.has(path)) continue
+    files.set(path, await loadPinnedThreeRuntimeAsset(path))
   }
 }
 
@@ -792,6 +862,7 @@ export async function buildWorkspace(input: BuildWorkspaceInput): Promise<Worksp
     diagnostics: [],
   }
   const files = new Map(input.files.map(file => [file.path, file]))
+  await addPinnedThreeRuntimeAssets(files)
   if (!files.has(input.entry)) {
     return {
       ...base,
@@ -845,7 +916,7 @@ export async function buildWorkspace(input: BuildWorkspaceInput): Promise<Worksp
       bundleBytes: Buffer.byteLength(bundle),
       sourceMapBytes: Buffer.byteLength(sourceMap),
       inputs: Object.keys(result.metafile.inputs).map(safeInput).sort(),
-      assets: input.files
+      assets: [...files.values()]
         .filter(file => !file.text)
         .map(file => ({
           path: file.path,

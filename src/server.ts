@@ -1585,7 +1585,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'open_editor', {
     title: 'Open Three.js editor',
     description:
-      'Opens an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath. Successful project mutations update the same project-bound Editor automatically; do not call open_editor again unless the user explicitly requests a duplicate view. A successful call completes an open request; do not inspect or build unless the user explicitly asks. Never compile or serve project HTML as a fallback.',
+      'Requests an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath in the Editor. A successful tool result only accepts the open request; do not claim the App loaded until its follow-up status arrives. Successful project mutations update the same project-bound Editor automatically; do not call open_editor again unless the user explicitly requests a duplicate view. Never compile or serve project HTML as a fallback.',
     inputSchema: {
       projectId: projectIdSchema.optional(),
       projectPath: sessionProjectPathSchema.optional(),
@@ -1603,7 +1603,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     }
     if (projectPath !== undefined) {
       return summaryResult(
-        'Opened current DSH workspace example',
+        'Open request accepted for current DSH workspace example; App loading is pending',
         await workspaces.importSessionProject(
           dshWorkspacePath(extra._meta),
           projectPath,
@@ -1615,7 +1615,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       const candidates = await workspaces.discoverSessionProjects(path)
       if (candidates.length === 1) {
         return summaryResult(
-          'Opened current DSH workspace example',
+          'Open request accepted for current DSH workspace example; App loading is pending',
           await workspaces.importSessionProject(path, candidates[0].projectPath),
         )
       }
@@ -1625,13 +1625,15 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         )
       }
       return summaryResult(
-        'Opened current DSH workspace',
+        'Open request accepted for current DSH workspace; App loading is pending',
         await workspaces.registerSessionWorkspace(path),
       )
     }
     const workspace = await loadWorkspace(projectId)
     return summaryResult(
-      workspace === undefined ? 'Opened Three.js project' : 'Opened Three.js workspace',
+      workspace === undefined
+        ? 'Open request accepted for Three.js project; App loading is pending'
+        : 'Open request accepted for Three.js workspace; App loading is pending',
       workspace ?? await store.load(projectId),
     )
   })
