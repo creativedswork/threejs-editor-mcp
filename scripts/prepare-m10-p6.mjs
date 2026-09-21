@@ -9,6 +9,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { resetGeneratedWorkspace } from './generated-workspace.mjs'
 
 const EXPECTED_COMMIT = '98453747cc0678f6a5d910f38d7483596a5f9a40'
 const DEFAULT_CORPUS = '.tmp/corpus/graphics-agent-skills'
@@ -24,6 +25,26 @@ const commit = execFileSync('git', ['-C', corpus, 'rev-parse', 'HEAD'], {
 if (commit !== EXPECTED_COMMIT) {
   throw new Error(`P6 corpus must be ${EXPECTED_COMMIT}; received ${commit}`)
 }
+const dirty = execFileSync(
+  'git',
+  ['-C', corpus, 'status', '--porcelain=v1', '--untracked-files=all', '--', EXAMPLE, SKILL],
+  { encoding: 'utf8' },
+).trim()
+if (dirty !== '') {
+  throw new Error(`P6 corpus contains uncommitted source changes:\n${dirty}`)
+}
+await resetGeneratedWorkspace(destination, 'prepare-m10-p6', {
+  packageName: 'm10-volumetric-fluid-fire',
+  title: 'P6 Volumetric Fluid Fire',
+  entry: `${EXAMPLE}/scene.js`,
+  backend: 'webgpu',
+  provenance: {
+    path: 'M10-P6-SOURCE.json',
+    source: 'https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills',
+    commit: EXPECTED_COMMIT,
+    example: 'threejs-procedural-vfx/volumetric-fluid-fire',
+  },
+})
 
 function replaceOnce(source, from, to, label) {
   const offset = source.indexOf(from)
@@ -37,7 +58,6 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-await rm(destination, { recursive: true, force: true })
 await cp(resolve(corpus, EXAMPLE), resolve(destination, EXAMPLE), { recursive: true })
 await cp(resolve(corpus, SKILL), resolve(destination, SKILL), { recursive: true })
 await rm(resolve(destination, EXAMPLE, 'example.json'))

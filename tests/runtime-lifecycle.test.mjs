@@ -106,6 +106,62 @@ test('settles deadlines as recoverable failures and keeps the queue usable', asy
   assert.equal((await controller.idle()).phase, 'edit-ready')
 })
 
+test('keeps the queue blocked until timed-out transition cleanup settles', async () => {
+  const controller = new RuntimeTransitionController()
+  await bootstrap(controller)
+  let releaseCleanup
+  const cleanup = new Promise(resolve => {
+    releaseCleanup = resolve
+  })
+  let reloadStarted = false
+  const save = controller.enqueue('save', 10, async ({ signal }) => {
+    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
+    await cleanup
+    throw signal.reason
+  })
+  const reload = controller.enqueue('reload', 1_000, async () => {
+    reloadStarted = true
+    return { phase: 'edit-ready', value: undefined }
+  })
+
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(reloadStarted, false)
+  releaseCleanup()
+  await assert.rejects(save, /Runtime save timed out/)
+  await reload
+  assert.equal(reloadStarted, true)
+})
+
+test('rejects queued work until timed-out transition cleanup settles', async () => {
+  const controller = new RuntimeTransitionController()
+  await bootstrap(controller)
+  let releaseCleanup
+  const cleanup = new Promise(resolve => {
+    releaseCleanup = resolve
+  })
+  const save = controller.enqueue('save', 10, async () => cleanup)
+  const reload = controller.enqueue('reload', 2_000, async () => ({
+    phase: 'edit-ready',
+    value: undefined,
+  }))
+
+  await assert.rejects(save, /Runtime save timed out/)
+  await assert.rejects(reload, /cleanup is still in progress/)
+  let idleResolved = false
+  const idle = controller.idle().then(() => {
+    idleResolved = true
+  })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(idleResolved, false)
+  releaseCleanup({ phase: 'edit-ready', value: undefined })
+  await idle
+  await controller.enqueue('reload', 2_000, async () => ({
+    phase: 'edit-ready',
+    value: undefined,
+  }))
+  assert.equal((await controller.idle()).phase, 'edit-ready')
+})
+
 test('rejects interactive stable phases without a committed Runtime', async () => {
   const controller = new RuntimeTransitionController()
   await assert.rejects(

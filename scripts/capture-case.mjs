@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { chromium } from 'playwright'
-import { workspaceRuntimeHtml } from '../src/workspace-runtime.ts'
+import { workspaceRuntimeHtml } from '../dist/workspace-runtime.js'
 import { validateCaseDirectory } from './validate-cases.mjs'
 
 const repository = fileURLToPath(new URL('..', import.meta.url))
@@ -137,47 +137,53 @@ async function captureCase(options) {
   const caseDirectory = resolve(options.root, options.caseId)
   const manifest = await validateCaseDirectory(caseDirectory, options.root)
   const store = await mkdtemp(resolve(tmpdir(), 'threejs-editor-case-'))
-  const client = new Client({ name: 'threejs-editor-case-capture', version: '1.0.0' })
-  await client.connect(new StdioClientTransport({
-    command: process.execPath,
-    args: [options.server, '--root', store],
-  }))
-
-  const webServer = createServer((_request, response) => {
-    response.writeHead(200, {
-      'content-security-policy': "connect-src 'self'",
-      'content-type': 'text/html; charset=utf-8',
-    })
-    response.end('<!doctype html><title>Case Capture</title>')
-  })
-  await new Promise(resolveListen => webServer.listen(0, '127.0.0.1', resolveListen))
-  const address = webServer.address()
-  if (address === null || typeof address === 'string') throw new Error('capture server did not bind')
-
-  const browser = await chromium.launch({
-    ...(process.env.PLAYWRIGHT_CHROMIUM_PATH === undefined
-      ? { channel: 'chrome' }
-      : { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }),
-    headless: true,
-    args: process.platform === 'darwin' ? ['--use-angle=metal'] : [],
-  })
-  const problems = []
-  const page = await browser.newPage({
-    viewport: {
-      width: manifest.capture.viewport.width,
-      height: manifest.capture.viewport.height,
-    },
-    deviceScaleFactor: manifest.capture.viewport.dpr,
-    locale: 'en-US',
-  })
-  page.on('console', message => {
-    if (message.type() === 'error' || message.type() === 'warning') {
-      problems.push(`${message.type()}: ${message.text()}`)
-    }
-  })
-  page.on('pageerror', error => problems.push(`pageerror: ${error.message}`))
-
+  let client
+  let webServer
+  let browser
+  let primaryError
   try {
+    client = new Client({ name: 'threejs-editor-case-capture', version: '1.0.0' })
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [options.server, '--root', store],
+    }))
+
+    webServer = createServer((_request, response) => {
+      response.writeHead(200, {
+        'content-security-policy': "connect-src 'self'",
+        'content-type': 'text/html; charset=utf-8',
+      })
+      response.end('<!doctype html><title>Case Capture</title>')
+    })
+    await new Promise(resolveListen => webServer.listen(0, '127.0.0.1', resolveListen))
+    const address = webServer.address()
+    if (address === null || typeof address === 'string') {
+      throw new Error('capture server did not bind')
+    }
+
+    browser = await chromium.launch({
+      ...(process.env.PLAYWRIGHT_CHROMIUM_PATH === undefined
+        ? { channel: 'chrome' }
+        : { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }),
+      headless: true,
+      args: process.platform === 'darwin' ? ['--use-angle=metal'] : [],
+    })
+    const problems = []
+    const page = await browser.newPage({
+      viewport: {
+        width: manifest.capture.viewport.width,
+        height: manifest.capture.viewport.height,
+      },
+      deviceScaleFactor: manifest.capture.viewport.dpr,
+      locale: 'en-US',
+    })
+    page.on('console', message => {
+      if (message.type() === 'error' || message.type() === 'warning') {
+        problems.push(`${message.type()}: ${message.text()}`)
+      }
+    })
+    page.on('pageerror', error => problems.push(`pageerror: ${error.message}`))
+
     await mkdir(options.output, { recursive: true })
     const candidate = await buildCase(client, options.root, manifest.project.path)
     await page.goto(`http://127.0.0.1:${address.port}`)
@@ -186,55 +192,26 @@ async function captureCase(options) {
         + '<iframe title="Case Runtime" sandbox="allow-scripts"></iframe>',
     )
     const iframe = page.locator('iframe')
-    await iframe.evaluate((element, html) => {
-      element.srcdoc = html
-    }, workspaceRuntimeHtml())
-    const frame = await (await iframe.elementHandle()).contentFrame()
-    assert.notEqual(frame, null)
-    await frame.waitForSelector('canvas')
-
-    const run = {
-      projectId: candidate.projectId,
-      revision: candidate.revision,
-      buildId: candidate.build.buildId,
-      runId: randomUUID(),
-      nonce: randomUUID(),
-      evidenceToken: randomUUID(),
+    const loadRuntimeFrame = async () => {
+      await iframe.evaluate((element, html) => {
+        element.srcdoc = html
+      }, workspaceRuntimeHtml())
+      const frame = await (await iframe.elementHandle()).contentFrame()
+      assert.notEqual(frame, null)
+      await frame.waitForSelector('canvas')
     }
-    await page.evaluate(({ request, bundle, assets, qualityTier }) => {
+    await loadRuntimeFrame()
+
+    await page.evaluate(() => {
       globalThis.__caseEvents = []
       globalThis.addEventListener('message', event => {
         if (event.data?.channel === 'threejs-editor-m7-runtime') {
           globalThis.__caseEvents.push(event.data)
         }
       })
-      const payload = assets.map(asset => {
-        const raw = atob(asset.base64)
-        return {
-          sha256: asset.sha256,
-          mediaType: asset.mediaType,
-          bytes: Uint8Array.from(raw, character => character.charCodeAt(0)).buffer,
-        }
-      })
-      document.querySelector('iframe').contentWindow.postMessage({
-        channel: 'threejs-editor-m7-runtime',
-        action: 'run',
-        ...request,
-        bundle,
-        assets: payload,
-        backend: request.backend,
-        mode: 'run',
-        debugMode: 'final',
-        qualityTier,
-      }, '*')
-    }, {
-      request: { ...run, backend: candidate.build.backend },
-      bundle: candidate.bundle,
-      assets: candidate.assets,
-      qualityTier: manifest.capture.qualityTier,
     })
-
-    const event = async (types, commandId) => {
+    let run
+    const event = async (types, commandId, timeoutMs = 120_000) => {
       await page.waitForFunction(({ identity, accepted, command }) => (
         globalThis.__caseEvents.some(item => (
           item.runId === identity.runId
@@ -242,7 +219,7 @@ async function captureCase(options) {
             && accepted.includes(item.type)
             && (command === undefined || item.data?.commandId === command)
         ))
-      ), { identity: run, accepted: types, command: commandId }, { timeout: 120_000 })
+      ), { identity: run, accepted: types, command: commandId }, { timeout: timeoutMs })
       return page.evaluate(({ identity, accepted, command }) => (
         globalThis.__caseEvents.filter(item => (
           item.runId === identity.runId
@@ -252,10 +229,48 @@ async function captureCase(options) {
         )).at(-1)
       ), { identity: run, accepted: types, command: commandId })
     }
-    const startup = await event(['ready', 'runtime-error'])
-    assert.equal(startup.type, 'ready', JSON.stringify(startup))
+    const startRuntime = async () => {
+      run = {
+        projectId: candidate.projectId,
+        revision: candidate.revision,
+        buildId: candidate.build.buildId,
+        runId: randomUUID(),
+        nonce: randomUUID(),
+        evidenceToken: randomUUID(),
+      }
+      await page.evaluate(({ request, bundle, assets, qualityTier }) => {
+        const payload = assets.map(asset => {
+          const raw = atob(asset.base64)
+          return {
+            sha256: asset.sha256,
+            mediaType: asset.mediaType,
+            bytes: Uint8Array.from(raw, character => character.charCodeAt(0)).buffer,
+          }
+        })
+        document.querySelector('iframe').contentWindow.postMessage({
+          channel: 'threejs-editor-m7-runtime',
+          action: 'run',
+          ...request,
+          bundle,
+          assets: payload,
+          backend: request.backend,
+          mode: 'run',
+          timeScale: 0,
+          debugMode: 'final',
+          qualityTier,
+        }, '*')
+      }, {
+        request: { ...run, backend: candidate.build.backend },
+        bundle: candidate.bundle,
+        assets: candidate.assets,
+        qualityTier: manifest.capture.qualityTier,
+      })
+      const startup = await event(['ready', 'runtime-error'])
+      assert.equal(startup.type, 'ready', JSON.stringify(startup))
+      return run
+    }
 
-    const send = async (action, payload, types) => {
+    const send = async (action, payload, types, timeoutMs = 120_000) => {
       const commandId = payload?.commandId
       const offset = await page.evaluate(() => globalThis.__caseEvents.length)
       await iframe.evaluate((element, request) => {
@@ -276,18 +291,22 @@ async function captureCase(options) {
         identity: run,
         accepted: types,
         command: commandId,
-      }, { timeout: 120_000 })
-      return event(types, commandId)
+      }, { timeout: timeoutMs })
+      return event(types, commandId, timeoutMs)
     }
-    const waitFrames = frames => {
+    const waitFrames = async frames => {
       const commandId = randomUUID()
-      return send('harness-command', {
+      const timeoutMs = Math.max(30_000, Math.ceil(frames * 1_000 / 30) + 10_000)
+      const result = await send('harness-command', {
         commandId,
         kind: 'simulate-actions',
         target: 'validation',
-        expiresAt: new Date(Date.now() + 30_000).toISOString(),
-        actions: [{ type: 'waitFrames', frames }],
-      }, ['harness-result', 'harness-error'])
+        expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
+        actions: [{ type: 'waitFrames', frames, frameDurationMs: 1_000 / 60 }],
+      }, ['harness-result', 'harness-error'], timeoutMs + 5_000)
+      assert.equal(result.type, 'harness-result', JSON.stringify(result))
+      assert.equal(result.data.result.status, 'completed', JSON.stringify(result))
+      return result
     }
     const captureFrame = () => {
       const commandId = randomUUID()
@@ -302,24 +321,46 @@ async function captureCase(options) {
         maxHeight: manifest.capture.viewport.height,
       }, ['harness-result', 'harness-error'])
     }
+    const capturePlan = async () => {
+      await waitFrames(manifest.capture.warmupFrames)
+      await send('set-time-scale', { timeScale: 0 }, ['time-scale'])
+      const results = []
+      for (const capture of manifest.capture.frames) {
+        await iframe.evaluate((element, request) => {
+          element.contentWindow.postMessage({
+            channel: 'threejs-editor-m7-runtime',
+            ...request,
+          }, '*')
+        }, { ...run, action: 'set-debug', debugMode: capture.debugMode })
+        await waitFrames(capture.waitFrames)
+        const result = await captureFrame()
+        assert.equal(result.type, 'harness-result', JSON.stringify(result))
+        results.push({ capture, result: result.data.result })
+      }
+      return results
+    }
+    const stopRuntime = async () => {
+      const disposed = await send('stop', {}, ['disposed'])
+      assert.equal(disposed.data?.exampleDisposeError, undefined, JSON.stringify(disposed))
+      assert.equal(disposed.data?.disposeError, undefined, JSON.stringify(disposed))
+      return disposed
+    }
 
-    await waitFrames(manifest.capture.warmupFrames)
-    await send('set-time-scale', { timeScale: 0 }, ['time-scale'])
+    const firstRun = await startRuntime()
+    const firstResults = await capturePlan()
+    const metrics = await send('metrics', {}, ['metrics'])
+    const disposed = await stopRuntime()
+    await loadRuntimeFrame()
+    const replayRun = await startRuntime()
+    const replayResults = await capturePlan()
+    const replayDisposed = await stopRuntime()
     const captures = []
-    for (const capture of manifest.capture.frames) {
-      await iframe.evaluate((element, request) => {
-        element.contentWindow.postMessage({
-          channel: 'threejs-editor-m7-runtime',
-          ...request,
-        }, '*')
-      }, { ...run, action: 'set-debug', debugMode: capture.debugMode })
-      await waitFrames(capture.waitFrames)
-      const first = await captureFrame()
-      const repeated = await captureFrame()
-      assert.equal(first.type, 'harness-result', JSON.stringify(first))
-      assert.equal(repeated.type, 'harness-result', JSON.stringify(repeated))
-      assert.equal(first.data.result.digest, repeated.data.result.digest)
-      const bytes = Buffer.from(first.data.result.data, 'base64')
+    for (let index = 0; index < firstResults.length; index += 1) {
+      const { capture, result } = firstResults[index]
+      const replay = replayResults[index]
+      assert.equal(replay.capture.id, capture.id)
+      assert.equal(result.digest, replay.result.digest)
+      const bytes = Buffer.from(result.data, 'base64')
       const path = resolve(options.output, `${capture.id}.png`)
       await writeFile(path, bytes)
       captures.push({
@@ -329,13 +370,11 @@ async function captureCase(options) {
         path,
         sha256: sha256(bytes),
         bytes: bytes.length,
-        width: first.data.result.width,
-        height: first.data.result.height,
-        repeatedDigest: repeated.data.result.digest,
+        width: result.width,
+        height: result.height,
+        repeatedDigest: replay.result.digest,
       })
     }
-    const metrics = await send('metrics', {}, ['metrics'])
-    const disposed = await send('stop', {}, ['disposed'])
     assert.deepEqual(problems, [])
     const contactSheetPath = resolve(options.output, 'contact-sheet.png')
     const contactSheet = await createContactSheet(
@@ -353,11 +392,13 @@ async function captureCase(options) {
         projectId: candidate.projectId,
         revision: candidate.revision,
         buildId: candidate.build.buildId,
-        runId: run.runId,
+        runId: firstRun.runId,
+        replayRunId: replayRun.runId,
         backend: candidate.build.backend,
         browser: browser.version(),
         metrics: metrics.data,
         teardown: disposed.data,
+        replayTeardown: replayDisposed.data,
       },
       captures: captures.map(({ path: _path, ...capture }) => capture),
       contactSheet,
@@ -366,11 +407,24 @@ async function captureCase(options) {
     await mkdir(dirname(options.report), { recursive: true })
     await writeFile(options.report, `${JSON.stringify(report, null, 2)}\n`)
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
-    await browser.close()
-    await client.close()
-    await new Promise(resolveClose => webServer.close(resolveClose))
-    await rm(store, { recursive: true, force: true })
+    const cleanup = await Promise.allSettled([
+      browser?.close(),
+      client?.close(),
+      webServer?.listening
+        ? new Promise(resolveClose => webServer.close(resolveClose))
+        : Promise.resolve(),
+      rm(store, { recursive: true, force: true }),
+    ])
+    const cleanupErrors = cleanup.flatMap(result => (
+      result.status === 'rejected' ? [result.reason] : []
+    ))
+    if (primaryError === undefined && cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, 'case capture cleanup failed')
+    }
   }
 }
 

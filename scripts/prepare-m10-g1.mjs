@@ -1,7 +1,17 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { resetGeneratedWorkspace } from './generated-workspace.mjs'
 
-const destination = resolve(process.argv[2] ?? '.tmp/m10-g1-workspace')
+const destination = await resetGeneratedWorkspace(
+  process.argv[2] ?? '.tmp/m10-g1-workspace',
+  'prepare-m10-g1',
+  {
+    packageName: 'm10-gameplay-systems',
+    title: 'G1 Gameplay Systems',
+    entry: 'src/main.js',
+    backend: 'webgl',
+  },
+)
 
 function createAvatarGltf() {
   const chunks = []
@@ -185,7 +195,6 @@ function createAvatarGltf() {
   return glb
 }
 
-await rm(destination, { recursive: true, force: true })
 await mkdir(resolve(destination, 'src'), { recursive: true })
 await mkdir(resolve(destination, 'assets'), { recursive: true })
 

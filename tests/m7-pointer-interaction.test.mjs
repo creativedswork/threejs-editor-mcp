@@ -35,9 +35,12 @@ test('does not select through gizmo or camera gestures', () => {
 })
 
 test('emits a syntactically valid Runtime bootstrap script', () => {
-  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const html = workspaceRuntimeHtml()
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   assert.doesNotThrow(() => new Function(script))
+  assert.match(html, /<canvas tabindex="0"/)
+  assert.match(script, /'keydown',\s*'keyup',/)
 })
 
 test('degrades incompatible persisted editor operations without aborting startup', async () => {
@@ -68,6 +71,10 @@ test('validation frame pumping yields without throttled timers', () => {
   )
   assert.match(waitFrames, /await yieldTask\(\)/)
   assert.doesNotMatch(waitFrames, /setTimeout\(resolve, 0\)/)
+  assert.match(
+    waitFrames,
+    /await current\.framePromise\s+if \(current\.stopped \|\| active !== current\)/,
+  )
   assert.match(script, /const channel = new MessageChannel\(\)/)
 })
 
@@ -216,6 +223,36 @@ test('reuses one validated Runtime artifact for an unchanged revision', async ()
   assert.match(source, /buildRequests: m7BuildRequests/)
   assert.match(source, /assetFetches: m7AssetFetches/)
   assert.match(source, /validationStarts: m7ValidationStarts/)
+})
+
+test('keeps retained and restored Runtime state on the current lifecycle epoch', async () => {
+  const view = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const runtime = workspaceRuntimeHtml()
+  assert.match(view, /publishingRuntimeIdentity === undefined/)
+  assert.match(view, /queueMicrotask\(\(\) => projectRuntimeUi/)
+  assert.match(view, /modelContextRetryCount < 3/)
+  assert.match(view, /postM7Run\(run, 'sync-epoch'\)/)
+  assert.match(runtime, /action === 'sync-epoch'/)
+  assert.match(runtime, /'epoch-synced'/)
+  assert.match(runtime, /timeScale: Number\.isFinite\(request\.timeScale\)/)
+  assert.match(runtime, /operationObject\(current, operation\)[\s\S]*?applyOperation\(current, operation, false\)/)
+  assert.match(view, /postM7Run\(run, 'apply-draft-operations'/)
+  assert.match(view, /projectId === targetProjectId[\s\S]*?revision === targetRevision/)
+  assert.match(view, /void runSave\(async context =>/)
+  assert.match(view, /runtimeCoordinator\.setValidation\(current\.committed, undefined\)/)
+  assert.match(view, /status\.textContent = error instanceof Error[\s\S]*?finally\(\(\) => \{\s*saveCopy\.disabled = false/)
+})
+
+test('serializes project loads without dropping later results', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const loadProject = source.slice(
+    source.indexOf('async function loadProject('),
+    source.indexOf('app.ontoolresult ='),
+  )
+  assert.match(loadProject, /const previousLoad = loadQueue/)
+  assert.match(loadProject, /await previousLoad/)
+  assert.match(loadProject, /releaseLoad\(\)/)
+  assert.doesNotMatch(loadProject, /loadingId !== undefined/)
 })
 
 test('projects readiness from the Runtime transition controller', async () => {

@@ -45,12 +45,13 @@ importers:
       '@types/three':
         specifier: 0.185.4
         version: 0.185.4
-      playwright:
-        specifier: 1.61.1
-        version: 1.61.1
       tsdown:
         specifier: 0.22.14
         version: 0.22.14(typescript@6.0.3)
+    optionalDependencies:
+      playwright:
+        specifier: 1.61.1
+        version: 1.61.1
 
 packages:
 
@@ -1635,13 +1636,15 @@ snapshots:
 
   pkce-challenge@5.0.1: {}
 
-  playwright-core@1.61.1: {}
+  playwright-core@1.61.1:
+    optional: true
 
   playwright@1.61.1:
     dependencies:
       playwright-core: 1.61.1
     optionalDependencies:
       fsevents: 2.3.2
+    optional: true
 
   postprocessing@6.39.5(three@0.185.1):
     dependencies:

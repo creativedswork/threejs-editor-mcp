@@ -613,6 +613,8 @@ test('M6 workspaces preserve local files and commit revisioned atomic changes', 
     assert.equal(read.structuredContent.files[0].text, 'const linkedMarker = "initial"')
     assert.equal(read.structuredContent.files[1].text, 'unknown text stays exact\n')
     assert.equal(read.structuredContent.files[2].base64, binary.toString('base64'))
+    assert.match(read.content[0].text, /unknown text stays exact/)
+    assert.doesNotMatch(read.content[0].text, new RegExp(binary.toString('base64')))
 
     const searched = await client.callTool({
       name: 'search_project',
@@ -811,6 +813,7 @@ test('M6 workspaces preserve local files and commit revisioned atomic changes', 
     )
     assert.match(managedEntry, /export default/)
     assert.match(managedEntry, /setup\s*\(/)
+    assert.match(managedEntry, /canvas\.focus\(\)/)
     const managedBuild = await client.callTool({
       name: 'build_project',
       arguments: {

@@ -120,13 +120,14 @@ The capture command:
 2. builds the exact imported revision;
 3. starts an isolated Runtime in headless Chrome;
 4. applies the declared quality tier, warmup, and debug modes;
-5. captures every frame twice and compares their SHA-256 digests;
+5. replays the capture plan in a fresh Runtime and compares frame SHA-256 digests;
 6. writes PNG files and a contact sheet;
 7. records Runtime metrics and teardown evidence.
 
-`status: "passed"` means the Runtime path completed and the page emitted no
-browser warnings or errors. Browser problems fail the capture command. A
-successful capture does not replace case-specific interaction assertions.
+`status: "passed"` means both Runtime runs completed, produced matching frame
+digests, shut down without cleanup errors, and emitted no browser warnings or
+errors. A successful capture does not replace case-specific interaction
+assertions.
 
 The repository-owned reference is
 [`examples/runtime-contract`](../examples/runtime-contract). Its latest

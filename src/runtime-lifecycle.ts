@@ -54,6 +54,8 @@ export interface RuntimeTransitionResult<Runtime, Value> {
 
 export class RuntimeTransitionError extends Error {}
 
+const TRANSITION_CLEANUP_GRACE_MS = 1_000
+
 export class RuntimeCoordinator<
   Runtime,
   Candidate = never,
@@ -65,6 +67,7 @@ export class RuntimeCoordinator<
   ) => void>()
   readonly #idleWaiters = new Set<() => void>()
   #active?: { epoch: number; controller: AbortController }
+  #cleanupBarrier?: Promise<void>
   #pending = 0
   #tail = Promise.resolve()
   #snapshot: RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>
@@ -197,7 +200,9 @@ export class RuntimeCoordinator<
   }
 
   idle(): Promise<Readonly<RuntimeLifecycleSnapshot<Runtime, Candidate, Validation>>> {
-    if (this.#pending === 0 && this.#snapshot.operation === undefined) {
+    if (this.#pending === 0
+      && this.#snapshot.operation === undefined
+      && this.#cleanupBarrier === undefined) {
       return Promise.resolve(this.#snapshot)
     }
     return new Promise(resolve => {
@@ -212,6 +217,9 @@ export class RuntimeCoordinator<
       context: RuntimeTransitionContext<Runtime>,
     ) => Promise<RuntimeTransitionResult<Runtime, Value>>,
   ): Promise<Value> {
+    if (this.#cleanupBarrier !== undefined) {
+      throw new RuntimeTransitionError('Previous Runtime transition cleanup is still in progress')
+    }
     this.#assertCommand(command)
     const epoch = this.#snapshot.epoch + 1
     const controller = new AbortController()
@@ -235,8 +243,15 @@ export class RuntimeCoordinator<
         deadlineAt: startedAt + timeoutMs,
       },
     })
+    let running: Promise<RuntimeTransitionResult<Runtime, Value>> | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
+      running = transition({
+        epoch,
+        signal: controller.signal,
+        committed: this.#snapshot.committed,
+        isCurrent: () => this.isCurrent(epoch),
+      })
       const timedOut = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           const error = new RuntimeTransitionError(`Runtime ${command} timed out`)
@@ -245,12 +260,7 @@ export class RuntimeCoordinator<
         }, timeoutMs)
       })
       const result = await Promise.race([
-        transition({
-          epoch,
-          signal: controller.signal,
-          committed: this.#snapshot.committed,
-          isCurrent: () => this.isCurrent(epoch),
-        }),
+        running,
         timedOut,
       ])
       if (!this.isCurrent(epoch)) {
@@ -273,6 +283,29 @@ export class RuntimeCoordinator<
       })
       return result.value
     } catch (error) {
+      if (controller.signal.aborted && running !== undefined) {
+        const cleanup = running.then(() => undefined, () => undefined)
+        let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+        try {
+          const completed = await Promise.race([
+            cleanup.then(() => true),
+            new Promise<false>(resolve => {
+              cleanupTimer = setTimeout(() => resolve(false), TRANSITION_CLEANUP_GRACE_MS)
+            }),
+          ])
+          if (!completed) {
+            this.#cleanupBarrier = cleanup
+            void cleanup.finally(() => {
+              if (this.#cleanupBarrier === cleanup) {
+                this.#cleanupBarrier = undefined
+                this.#resolveIdle()
+              }
+            })
+          }
+        } finally {
+          if (cleanupTimer !== undefined) clearTimeout(cleanupTimer)
+        }
+      }
       if (this.#snapshot.epoch === epoch) {
         this.#setSnapshot({
           phase: command === 'save' && this.#snapshot.committed !== undefined
@@ -361,7 +394,13 @@ export class RuntimeCoordinator<
 
   #settled(): void {
     this.#pending -= 1
-    if (this.#pending !== 0 || this.#snapshot.operation !== undefined) return
+    this.#resolveIdle()
+  }
+
+  #resolveIdle(): void {
+    if (this.#pending !== 0
+      || this.#snapshot.operation !== undefined
+      || this.#cleanupBarrier !== undefined) return
     const waiters = [...this.#idleWaiters]
     this.#idleWaiters.clear()
     for (const resolve of waiters) resolve()

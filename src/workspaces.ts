@@ -88,6 +88,7 @@ const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
 const MAX_MUTATION_BYTES = 1024 * 1024
 const ABSOLUTE_MAX_FILE_BYTES = 64 * 1024 * 1024
 const MAX_TEXT_READ_BYTES = 512 * 1024
+const MAX_READ_RESPONSE_BYTES = 16 * 1024 * 1024
 const MAX_DISCOVERY_DIRECTORIES = 2048
 const MAX_DISCOVERED_PROJECTS = 200
 const RUNTIME_COMMAND_PREPARATION_TIMEOUT_MS = 180_000
@@ -269,6 +270,10 @@ const importedSourceSchema = z.object({
   entry: workspacePathSchema,
   revision: z.string().regex(/^[a-f0-9]{64}$/),
   files: z.record(workspacePathSchema, z.string().regex(/^[a-f0-9]{64}$/)),
+})
+const legacyImportedSourceSchema = z.strictObject({
+  format: z.literal('example-gallery'),
+  projectPath: z.string(),
 })
 const editorCommandSchema: z.ZodType<EditorCommandOperation> = z.discriminatedUnion('type', [
   z.object({
@@ -489,8 +494,15 @@ interface RuntimeRegistry {
   activeGrant?: ActiveRuntimeGrant
 }
 
-type StoredReadyBuild = Omit<ReadyBuild, 'bundle' | 'sourceMap'>
+type StoredReadyBuild = Omit<ReadyBuild, 'bundle' | 'sourceMap'> & {
+  bundleSha256: string
+  sourceMapSha256: string
+}
 type StoredBuild = StoredReadyBuild | FailedBuild
+type BuildArtifactAttestation = Pick<
+  StoredReadyBuild,
+  'bundleBytes' | 'sourceMapBytes' | 'bundleSha256' | 'sourceMapSha256'
+>
 
 function digest(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -526,6 +538,10 @@ function storedBuild(value: unknown): StoredBuild {
   if (build.status === 'ready'
     && (typeof build.bundleBytes !== 'number'
       || typeof build.sourceMapBytes !== 'number'
+      || typeof build.bundleSha256 !== 'string'
+      || !/^[a-f0-9]{64}$/.test(build.bundleSha256)
+      || typeof build.sourceMapSha256 !== 'string'
+      || !/^[a-f0-9]{64}$/.test(build.sourceMapSha256)
       || !Array.isArray(build.inputs)
       || !Array.isArray(build.assets))) {
     throw new Error('stored ready build metadata is invalid')
@@ -536,6 +552,10 @@ function storedBuild(value: unknown): StoredBuild {
 function isWithin(root: string, candidate: string): boolean {
   const path = relative(root, candidate)
   return path === '' || (!path.startsWith('..') && !isAbsolute(path))
+}
+
+function runtimeOwnerKey(owner: RuntimeOwner): string {
+  return digest(Buffer.from(`${owner.sessionId}\0${owner.connectionGeneration}`))
 }
 
 function validateProjectId(projectId: string): void {
@@ -560,7 +580,9 @@ function safePath(input: string): string {
 
 function workspaceFilePath(manifest: WorkspaceManifest, input: string): string {
   const path = safePath(input)
-  return !path.includes('/') && path === posix.basename(manifest.entry)
+  return manifest.files[path] === undefined
+    && !path.includes('/')
+    && path === posix.basename(manifest.entry)
     ? manifest.entry
     : path
 }
@@ -633,6 +655,37 @@ function isProfileSpecifier(specifier: string): boolean {
 
 function projectFilePath(projectPath: string, fileName: string): string {
   return projectPath === '' ? fileName : `${projectPath}/${fileName}`
+}
+
+function importedProjectId(source: ExampleSource): string {
+  return `example-${digest(new TextEncoder().encode(
+    `${source.root}\0${source.projectPath}`,
+  )).slice(0, 56)}`
+}
+
+function legacyImportedProjectId(source: ExampleSource, revision: string): string {
+  return `example-${digest(new TextEncoder().encode(
+    `${source.root}\0${source.projectPath}\0${revision}`,
+  )).slice(0, 56)}`
+}
+
+function generatedImportFiles(
+  projectId: string,
+  projectPath: string,
+): Map<string, Buffer> {
+  return new Map([
+    ['package.json', canonicalBytes({
+      name: projectId,
+      private: true,
+      type: 'module',
+      dependencies: PINNED_RUNTIME_DEPENDENCIES,
+    })],
+    ['THREEJS-EXAMPLE-SOURCE.json', canonicalBytes({
+      format: 'example-gallery',
+      projectPath,
+    })],
+    [WORKSPACE_EDITOR_STATE_PATH, canonicalBytes({ schemaVersion: 1, operations: [] })],
+  ])
 }
 
 function mediaType(path: string, bytes: Buffer): { mediaType: string; text: boolean } {
@@ -772,7 +825,7 @@ function managedTemplateSource(project: Project): string {
     '    }',
     '    const keyDown = event => keys.add(event.key.toLowerCase())',
     '    const keyUp = event => keys.delete(event.key.toLowerCase())',
-    '    const pointerDown = event => { updatePointer(event); pointer.buttons.add(event.button) }',
+    '    const pointerDown = event => { canvas.focus(); updatePointer(event); pointer.buttons.add(event.button) }',
     '    const pointerUp = event => { updatePointer(event); pointer.buttons.delete(event.button) }',
     "    canvas.addEventListener('keydown', keyDown)",
     "    canvas.addEventListener('keyup', keyUp)",
@@ -816,6 +869,7 @@ export class WorkspaceStore {
   private readonly runtimeRegistries = new Map<string, RuntimeRegistry>()
   private readonly runtimeCommands = new Map<string, RuntimeCommandState>()
   private readonly verifiedResourceObjects = new Map<string, Promise<VerifiedResourceObject>>()
+  private readonly trustedBuildArtifacts = new Map<string, BuildArtifactAttestation>()
   private readonly quota: WorkspaceQuota
 
   constructor(
@@ -969,18 +1023,35 @@ export class WorkspaceStore {
         `${candidate.issue} Select a DSH workspace that contains the complete project, then retry open_editor. Do not run npm, an external dev server, or an HTML fallback.`,
       )
     }
-    const files = await this.collectExampleFiles(source, candidate.entry)
     const examplePath = projectFilePath(source.projectPath, 'example.json')
-    files.set(examplePath, await readFile(await this.realFile(source.root, examplePath)))
+    const exampleBytes = await readFile(await this.realFile(source.root, examplePath))
+    const stableProjectId = importedProjectId(source)
+    const generatedFiles = generatedImportFiles(stableProjectId, candidate.projectPath)
+    const files = await this.collectExampleFiles(
+      source,
+      candidate.entry,
+      new Map([[examplePath, exampleBytes]]),
+      generatedFiles,
+    )
     const sourceRevision = digest(canonicalBytes([...files]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([filePath, bytes]) => [filePath, digest(bytes)])))
-    const stableProjectId = `example-${
-      digest(new TextEncoder().encode(
-        `${source.root}\0${source.projectPath}`,
-      )).slice(0, 56)
-    }`
-    await this.migrateImportedProject(stableProjectId, source)
+    const importedSource = importedSourceSchema.parse({
+      schemaVersion: 1,
+      root: source.root,
+      projectPath: source.projectPath,
+      entry: candidate.entry,
+      revision: sourceRevision,
+      files: Object.fromEntries([...files]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([filePath, bytes]) => [filePath, digest(bytes)])),
+    })
+    await this.migrateImportedProject(
+      stableProjectId,
+      source,
+      importedSource,
+      safeProjectPath(projectPath),
+    )
     const projectId = stableProjectId
     const current = this.workspaces.get(projectId)
     if (current !== undefined) {
@@ -997,25 +1068,15 @@ export class WorkspaceStore {
         await mkdir(dirname(destination), { recursive: true })
         await writeFile(destination, bytes, { flag: 'wx', mode: 0o600 })
       }
-      await writeFile(join(temporary, 'package.json'), canonicalBytes({
-        name: projectId,
-        private: true,
-        type: 'module',
-        dependencies: PINNED_RUNTIME_DEPENDENCIES,
-      }), { flag: 'wx', mode: 0o600 })
+      await writeFile(
+        join(temporary, 'package.json'),
+        generatedFiles.get('package.json')!,
+        { flag: 'wx', mode: 0o600 },
+      )
       await mkdir(join(temporary, '.threejs-editor'), { recursive: true })
       await writeFile(
         join(temporary, '.threejs-editor', 'source.json'),
-        canonicalBytes({
-          schemaVersion: 1,
-          root: source.root,
-          projectPath: source.projectPath,
-          entry: candidate.entry,
-          revision: sourceRevision,
-          files: Object.fromEntries([...files]
-            .sort(([left], [right]) => left.localeCompare(right))
-            .map(([filePath, bytes]) => [filePath, digest(bytes)])),
-        } satisfies ImportedSource),
+        canonicalBytes(importedSource),
         { flag: 'wx', mode: 0o600 },
       )
       await writeFile(
@@ -1059,15 +1120,12 @@ export class WorkspaceStore {
       )
       await writeFile(
         join(temporary, 'THREEJS-EXAMPLE-SOURCE.json'),
-        canonicalBytes({
-          format: candidate.format,
-          projectPath: candidate.projectPath,
-        }),
+        generatedFiles.get('THREEJS-EXAMPLE-SOURCE.json')!,
         { flag: 'wx', mode: 0o600 },
       )
       await writeFile(
         join(temporary, WORKSPACE_EDITOR_STATE_PATH),
-        canonicalBytes({ schemaVersion: 1, operations: [] }),
+        generatedFiles.get(WORKSPACE_EDITOR_STATE_PATH)!,
         { flag: 'wx', mode: 0o600 },
       )
       await rename(temporary, target)
@@ -1219,23 +1277,37 @@ export class WorkspaceStore {
   private async migrateImportedProject(
     stableProjectId: string,
     source: ExampleSource,
+    importedSource: ImportedSource,
+    legacyProjectPath: string,
   ): Promise<void> {
-    const matches: Array<[string, RegisteredWorkspace]> = []
+    const matches: Array<[string, RegisteredWorkspace, boolean]> = []
     for (const entry of this.workspaces) {
       const [projectId, registration] = entry
       if (registration.kind !== 'managed-workspace') continue
-      let imported: ImportedSource
       try {
-        imported = importedSourceSchema.parse(JSON.parse((await this.readMetadataFile(
+        const imported = importedSourceSchema.parse(JSON.parse((await this.readMetadataFile(
           registration.path,
           this.metadataPath(registration.path, 'source.json'),
         )).toString('utf8')))
+        if (imported.root === source.root && imported.projectPath === source.projectPath) {
+          matches.push([projectId, registration, false])
+        }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-        throw error
-      }
-      if (imported.root === source.root && imported.projectPath === source.projectPath) {
-        matches.push([projectId, registration])
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        let legacy: z.infer<typeof legacyImportedSourceSchema>
+        try {
+          legacy = legacyImportedSourceSchema.parse(JSON.parse((await this.readMetadataFile(
+            registration.path,
+            join(registration.path, 'THREEJS-EXAMPLE-SOURCE.json'),
+          )).toString('utf8')))
+        } catch (legacyError) {
+          if ((legacyError as NodeJS.ErrnoException).code === 'ENOENT') continue
+          throw legacyError
+        }
+        if (legacy.projectPath === legacyProjectPath
+          && await this.legacyImportedProjectMatches(projectId, registration.path, source)) {
+          matches.push([projectId, registration, true])
+        }
       }
     }
     if (matches.length === 0) return
@@ -1245,18 +1317,57 @@ export class WorkspaceStore {
         `managed import source ${source.root}:${source.projectPath} has conflicting project identities`,
       )
     }
-    const [legacyProjectId, registration] = matches[0]!
-    if (legacyProjectId === stableProjectId) return
+    const [matchedProjectId, registration, legacy] = matches[0]!
+    if (legacy) {
+      await this.writeAtomic(
+        registration.path,
+        this.metadataPath(registration.path, 'source.json'),
+        canonicalBytes(importedSource),
+      )
+    }
+    if (matchedProjectId === stableProjectId) return
     const target = join(await this.managedRoot, stableProjectId)
     await rename(registration.path, target)
-    this.workspaces.delete(legacyProjectId)
+    this.workspaces.delete(matchedProjectId)
     this.workspaces.set(stableProjectId, {
       path: target,
       kind: 'managed-workspace',
     })
-    if (this.sessionWorkspaceIds.delete(legacyProjectId)) {
+    if (this.sessionWorkspaceIds.delete(matchedProjectId)) {
       this.sessionWorkspaceIds.add(stableProjectId)
     }
+  }
+
+  private async legacyImportedProjectMatches(
+    projectId: string,
+    path: string,
+    source: ExampleSource,
+  ): Promise<boolean> {
+    let entries
+    try {
+      entries = await readdir(this.metadataPath(path, 'revisions'), { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+    const generated = new Set([
+      'package.json',
+      'THREEJS-EXAMPLE-SOURCE.json',
+      WORKSPACE_EDITOR_STATE_PATH,
+    ])
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      const manifest = workspaceManifestSchema.parse(JSON.parse((await this.readMetadataFile(
+        path,
+        this.metadataPath(path, 'revisions', entry.name),
+      )).toString('utf8')))
+      const revision = digest(canonicalBytes(Object.entries(manifest.files)
+        .filter(([filePath]) => !generated.has(filePath))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([filePath, file]) => [filePath, file.sha256])))
+      if (projectId === legacyImportedProjectId(source, revision)) return true
+    }
+    return false
   }
 
   private async loadUnlocked(projectId: string): Promise<WorkspaceSnapshot> {
@@ -1299,32 +1410,56 @@ export class WorkspaceStore {
     base64?: string
   }>> {
     const snapshot = await this.load(projectId)
-    return Promise.all(paths.map(async request => {
+    const selected = paths.map(request => {
       const path = workspaceFilePath(snapshot.manifest, request.path)
       const summary = snapshot.manifest.files[path]
       if (summary === undefined) throw new Error(`unknown workspace file ${path}`)
+      return { request, path, summary }
+    })
+    const result: Array<{
+      path: string
+      sha256: string
+      size: number
+      mediaType: string
+      text?: string
+      base64?: string
+    }> = []
+    let responseBytes = 0
+    for (const { request, path, summary } of selected) {
       const bytes = await this.readWorkspaceFile(snapshot.path, path)
       if (!summary.text) {
-        return {
+        const base64 = bytes.toString('base64')
+        responseBytes += Buffer.byteLength(base64)
+        if (responseBytes > MAX_READ_RESPONSE_BYTES) {
+          throw new Error('workspace file read exceeds the 16 MiB response limit')
+        }
+        result.push({
           path,
           sha256: summary.sha256,
           size: summary.size,
           mediaType: summary.mediaType,
-          base64: bytes.toString('base64'),
-        }
+          base64,
+        })
+        continue
       }
       const text = bytes.toString('utf8')
       const lines = text.split('\n')
       const start = Math.max(1, request.startLine ?? 1)
       const end = Math.min(lines.length, request.endLine ?? lines.length)
-      return {
+      const selectedText = lines.slice(start - 1, end).join('\n')
+      responseBytes += Buffer.byteLength(selectedText)
+      if (responseBytes > MAX_READ_RESPONSE_BYTES) {
+        throw new Error('workspace file read exceeds the 16 MiB response limit')
+      }
+      result.push({
         path,
         sha256: summary.sha256,
         size: summary.size,
         mediaType: summary.mediaType,
-        text: lines.slice(start - 1, end).join('\n'),
-      }
-    }))
+        text: selectedText,
+      })
+    }
+    return result
   }
 
   async search(
@@ -1369,37 +1504,63 @@ export class WorkspaceStore {
       const directory = this.metadataPath(snapshot.path, 'builds', buildId)
       await this.ensureSafeDirectory(snapshot.path, directory)
       const cached = await this.readStoredBuild(snapshot.path, buildId)
-      if (cached?.status === 'ready') {
-        return {
-          ...cached,
-          bundle: (await this.readMetadataFile(
-            snapshot.path,
-            join(directory, 'bundle.js'),
-          )).toString('utf8'),
-          sourceMap: (await this.readMetadataFile(
-            snapshot.path,
-            join(directory, 'bundle.js.map'),
-          )).toString('utf8'),
+      const currentCache = cached?.projectId === projectId
+        && cached.revision === snapshot.revision
+        && cached.buildId === buildId
+        && cached.entry === snapshot.manifest.entry
+        && cached.backend === snapshot.manifest.backend
+      if (cached?.status === 'ready' && currentCache) {
+        try {
+          const [bundle, sourceMap] = await Promise.all([
+            this.readVerifiedBuildArtifact(snapshot.path, cached, 'bundle.js'),
+            this.readVerifiedBuildArtifact(snapshot.path, cached, 'bundle.js.map'),
+          ])
+          const {
+            bundleSha256: _bundleSha256,
+            sourceMapSha256: _sourceMapSha256,
+            ...publicBuild
+          } = cached
+          return {
+            ...publicBuild,
+            bundle: bundle.toString('utf8'),
+            sourceMap: sourceMap.toString('utf8'),
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT'
+            && !(error instanceof Error
+              && error.message === 'Runtime build artifacts do not match ready build metadata')) {
+            throw error
+          }
         }
       }
-      if (cached?.status === 'failed') {
+      if (cached?.status === 'failed' && currentCache) {
         return cached
       }
 
       input.files = await Promise.all(Object.entries(snapshot.manifest.files).map(
-        async ([path, file]) => ({
-          path,
-          bytes: await this.readWorkspaceFile(snapshot.path, path),
-          sha256: file.sha256,
-          mediaType: file.mediaType,
-          text: file.text,
-        }),
+        async ([path, file]) => {
+          const bytes = await this.readWorkspaceFile(snapshot.path, path)
+          if (digest(bytes) !== file.sha256) {
+            throw new Error(`workspace file changed during build: ${path}`)
+          }
+          return {
+            path,
+            bytes,
+            sha256: file.sha256,
+            mediaType: file.mediaType,
+            text: file.text,
+          }
+        },
       ))
       const result = await buildWorkspace(input)
       let metadata: StoredBuild
       if (result.status === 'ready') {
         const { bundle, sourceMap, ...stored } = result
-        metadata = stored
+        metadata = {
+          ...stored,
+          bundleSha256: digest(Buffer.from(bundle)),
+          sourceMapSha256: digest(Buffer.from(sourceMap)),
+        }
         await this.writeAtomic(snapshot.path, join(directory, 'bundle.js'), bundle)
         await this.writeAtomic(snapshot.path, join(directory, 'bundle.js.map'), sourceMap)
       } else {
@@ -1420,6 +1581,16 @@ export class WorkspaceStore {
           diagnostics: result.diagnostics,
         }),
       )
+      if (metadata.status === 'ready') {
+        this.trustedBuildArtifacts.set(`${snapshot.path}\0${metadata.buildId}`, {
+          bundleBytes: metadata.bundleBytes,
+          sourceMapBytes: metadata.sourceMapBytes,
+          bundleSha256: metadata.bundleSha256,
+          sourceMapSha256: metadata.sourceMapSha256,
+        })
+      } else {
+        this.trustedBuildArtifacts.delete(`${snapshot.path}\0${metadata.buildId}`)
+      }
       return result
     })
   }
@@ -1444,9 +1615,10 @@ export class WorkspaceStore {
       || metadata.buildId !== buildId) {
       throw new Error('ready build artifact is unavailable')
     }
-    return (await this.readMetadataFile(
+    return (await this.readVerifiedBuildArtifact(
       registration.path,
-      this.metadataPath(registration.path, 'builds', buildId, artifact),
+      metadata,
+      artifact,
     )).toString('utf8')
   }
 
@@ -1541,7 +1713,12 @@ export class WorkspaceStore {
       }
       await this.writeAtomic(
         snapshot.path,
-        this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
+        this.metadataPath(
+          snapshot.path,
+          'editor-scenes',
+          ...owner === undefined ? [] : [runtimeOwnerKey(owner)],
+          `${revision}.json`,
+        ),
         canonicalBytes(document),
       )
     })
@@ -1567,9 +1744,11 @@ export class WorkspaceStore {
       this.removeExpiredPreparedRuntimes()
       const key = this.runtimeKey(projectId, owner)
       for (const [candidateKey, registry] of this.runtimeRegistries) {
+        const sessionId = registry.active?.execution.owner.sessionId
+          ?? registry.prepared?.execution.owner.sessionId
         if (candidateKey === key
           || !candidateKey.startsWith(`${projectId}\0`)
-          || registry.active?.execution.owner.sessionId !== owner.sessionId) continue
+          || sessionId !== owner.sessionId) continue
         this.runtimeRegistries.delete(candidateKey)
         this.rejectRuntimeCommand(candidateKey, {
           status: 'cancelled',
@@ -1731,6 +1910,8 @@ export class WorkspaceStore {
         revision,
         undefined,
       )
+      signal?.throwIfAborted()
+      const previousStoredRuntime = await this.readActiveRuntimeRecord(snapshot.path)
       const nextRuntimeRef = randomUUID()
       const next = activeRuntimeSchema.parse({
         execution: active.execution,
@@ -1740,11 +1921,27 @@ export class WorkspaceStore {
         ownerId: this.runtimeOwnerId,
         ownerPid: process.pid,
       })
+      await this.writeAtomic(snapshot.path, activePath, canonicalBytes(next))
+      if (signal?.aborted) {
+        if (previousStoredRuntime === undefined) {
+          await this.clearActiveRuntime(
+            snapshot.path,
+            next.projection.workspaceRevision,
+            next.execution.runId,
+          )
+        } else {
+          await this.writeAtomic(
+            snapshot.path,
+            activePath,
+            canonicalBytes(previousStoredRuntime),
+          )
+        }
+        signal.throwIfAborted()
+      }
       this.rejectRuntimeCommand(key, {
         status: 'cancelled',
         reason: 'Runtime revision changed',
       })
-      await this.writeAtomic(snapshot.path, activePath, canonicalBytes(next))
       this.runtimeRegistries.set(key, { active: next })
       return this.registeredRuntime(next)
     })
@@ -1985,6 +2182,12 @@ export class WorkspaceStore {
           )
         }
       }
+      if (this.runtimeCommands.get(commandId) !== pending) {
+        throw new RuntimeProtocolError(
+          'RUNTIME_COMMAND_STATE',
+          'Runtime Harness command was cancelled before execution',
+        )
+      }
       clearTimeout(pending.timer)
       const expiresAt = new Date(Date.now() + pending.command.timeoutMs).toISOString()
       const settlementDeadline = runtimeCommandSettlementDeadline(expiresAt)
@@ -2123,7 +2326,12 @@ export class WorkspaceStore {
       try {
         const bytes = await this.readMetadataFile(
           snapshot.path,
-          this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
+          this.metadataPath(
+            snapshot.path,
+            'editor-scenes',
+            ...owner === undefined ? [] : [runtimeOwnerKey(owner)],
+            `${revision}.json`,
+          ),
         )
         const document = parseDisposableMetadata(bytes, value => value)
         if (document === undefined) return undefined
@@ -2182,7 +2390,12 @@ export class WorkspaceStore {
       })
       await this.writeAtomic(
         snapshot.path,
-        this.metadataPath(snapshot.path, 'diagnostics', 'runtime.json'),
+        this.metadataPath(
+          snapshot.path,
+          'diagnostics',
+          ...owner === undefined ? [] : [runtimeOwnerKey(owner)],
+          'runtime.json',
+        ),
         canonicalBytes(diagnostics),
       )
       return diagnostics
@@ -2199,7 +2412,12 @@ export class WorkspaceStore {
       try {
         const bytes = await this.readMetadataFile(
           snapshot.path,
-          this.metadataPath(snapshot.path, 'diagnostics', 'runtime.json'),
+          this.metadataPath(
+            snapshot.path,
+            'diagnostics',
+            ...owner === undefined ? [] : [runtimeOwnerKey(owner)],
+            'runtime.json',
+          ),
         )
         const diagnostics = parseDisposableMetadata(bytes, value => diagnosticsSchema.parse(value))
         if (diagnostics === undefined) return undefined
@@ -2636,15 +2854,10 @@ export class WorkspaceStore {
         || build.buildId !== buildId) {
         throw new Error('Runtime buildId is missing, stale, or not a ready build for this revision')
       }
-      const directory = this.metadataPath(snapshot.path, 'builds', buildId)
-      const [bundle, sourceMap] = await Promise.all([
-        this.readMetadataFile(snapshot.path, join(directory, 'bundle.js')),
-        this.readMetadataFile(snapshot.path, join(directory, 'bundle.js.map')),
+      await Promise.all([
+        this.readVerifiedBuildArtifact(snapshot.path, build, 'bundle.js'),
+        this.readVerifiedBuildArtifact(snapshot.path, build, 'bundle.js.map'),
       ])
-      if (bundle.byteLength !== build.bundleBytes
-        || sourceMap.byteLength !== build.sourceMapBytes) {
-        throw new Error('Runtime build artifacts do not match ready build metadata')
-      }
     }
     return {
       snapshot,
@@ -2839,8 +3052,10 @@ export class WorkspaceStore {
       projectFilePath(source.projectPath, 'example.json'),
     )
     let manifest: Record<string, unknown>
+    let manifestBytes: Buffer
     try {
-      const parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown
+      manifestBytes = await readFile(manifestPath)
+      const parsed = JSON.parse(manifestBytes.toString('utf8')) as unknown
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error('example.json must contain an object')
       }
@@ -2866,7 +3081,17 @@ export class WorkspaceStore {
         ? 'webgpu'
         : 'webgl'
     const entry = projectFilePath(source.projectPath, 'scene.js')
-    const issue = await this.exampleAvailabilityIssue(source, entry)
+    const projectId = importedProjectId(source)
+    const included = new Map([[
+      projectFilePath(source.projectPath, 'example.json'),
+      manifestBytes,
+    ]])
+    const issue = await this.exampleAvailabilityIssue(
+      source,
+      entry,
+      included,
+      generatedImportFiles(projectId, projectPath === '' ? '.' : projectPath),
+    )
     return {
       projectPath: projectPath === '' ? '.' : projectPath,
       title,
@@ -2936,13 +3161,28 @@ export class WorkspaceStore {
   private async exampleAvailabilityIssue(
     source: ExampleSource,
     entry: string,
+    included: Map<string, Buffer> = new Map(),
+    generated: Map<string, Buffer> = new Map(),
   ): Promise<string | undefined> {
     const queue = [entry]
-    const visited = new Set<string>()
+    const visited = new Set(included.keys())
+    let total = [...included.values(), ...generated.values()]
+      .reduce((sum, bytes) => sum + bytes.length, 0)
+    if (visited.size + generated.size > this.quota.maxFiles) {
+      return 'Project exceeds workspace maxFiles.'
+    }
+    if ([...included.values(), ...generated.values()]
+      .some(bytes => bytes.length > this.quota.maxFileBytes)) {
+      return 'Project file exceeds workspace maxFileBytes.'
+    }
+    if (total > this.quota.maxTotalBytes) return 'Project exceeds workspace maxTotalBytes.'
     while (queue.length > 0) {
       const filePath = queue.shift()!
       if (visited.has(filePath)) continue
       visited.add(filePath)
+      if (visited.size + generated.size > this.quota.maxFiles) {
+        return 'Project exceeds workspace maxFiles.'
+      }
       let bytes: Buffer
       try {
         bytes = await readFile(await this.realFile(source.root, filePath))
@@ -2952,6 +3192,11 @@ export class WorkspaceStore {
         }
         throw error
       }
+      if (bytes.length > this.quota.maxFileBytes) {
+        return `Project file exceeds workspace maxFileBytes: ${filePath}.`
+      }
+      total += bytes.length
+      if (total > this.quota.maxTotalBytes) return 'Project exceeds workspace maxTotalBytes.'
       if (!mediaType(filePath, bytes).text) continue
       const sourceText = await dependencySource(filePath, bytes.toString('utf8'))
       if (sourceText === undefined) continue
@@ -2972,7 +3217,20 @@ export class WorkspaceStore {
       }
       for (const specifier of assetSpecifiers(filePath, sourceText)) {
         if (pinnedThreeRuntimeAssetPaths(specifier).length > 0) continue
-        const resolved = await this.resolveAssetFiles(source, specifier, filePath)
+        let resolved: string[]
+        try {
+          resolved = await this.resolveAssetFiles(
+            source,
+            specifier,
+            filePath,
+            this.quota.maxFiles,
+          )
+        } catch (error) {
+          if (error instanceof Error && error.message === 'selected project exceeds maxFiles') {
+            return 'Project exceeds workspace maxFiles.'
+          }
+          throw error
+        }
         if (resolved.length === 0) {
           return `Project asset is outside the selected DSH workspace: ${specifier}.`
         }
@@ -2985,10 +3243,21 @@ export class WorkspaceStore {
   private async collectExampleFiles(
     source: ExampleSource,
     entry: string,
+    included: Map<string, Buffer> = new Map(),
+    generated: Map<string, Buffer> = new Map(),
   ): Promise<Map<string, Buffer>> {
-    const files = new Map<string, Buffer>()
+    const files = new Map(included)
     const queue = [entry]
-    let total = 0
+    let total = [...included.values(), ...generated.values()]
+      .reduce((sum, bytes) => sum + bytes.length, 0)
+    if (files.size + generated.size > this.quota.maxFiles) {
+      throw new Error('selected project exceeds maxFiles')
+    }
+    if ([...included.values(), ...generated.values()]
+      .some(bytes => bytes.length > this.quota.maxFileBytes)) {
+      throw new Error('selected project exceeds maxFileBytes')
+    }
+    if (total > this.quota.maxTotalBytes) throw new Error('selected project exceeds maxTotalBytes')
     while (queue.length > 0) {
       const filePath = queue.shift()!
       if (files.has(filePath)) continue
@@ -2999,7 +3268,9 @@ export class WorkspaceStore {
       total += bytes.length
       if (total > this.quota.maxTotalBytes) throw new Error('selected project exceeds maxTotalBytes')
       files.set(filePath, bytes)
-      if (files.size > this.quota.maxFiles) throw new Error('selected project exceeds maxFiles')
+      if (files.size + generated.size > this.quota.maxFiles) {
+        throw new Error('selected project exceeds maxFiles')
+      }
       if (!mediaType(filePath, bytes).text) continue
       const sourceText = await dependencySource(filePath, bytes.toString('utf8'))
       if (sourceText === undefined) continue
@@ -3020,7 +3291,12 @@ export class WorkspaceStore {
       }
       for (const specifier of assetSpecifiers(filePath, sourceText)) {
         if (pinnedThreeRuntimeAssetPaths(specifier).length > 0) continue
-        const resolved = await this.resolveAssetFiles(source, specifier, filePath)
+        const resolved = await this.resolveAssetFiles(
+          source,
+          specifier,
+          filePath,
+          this.quota.maxFiles,
+        )
         if (resolved.length === 0) {
           throw new Error(`workspace asset not found: ${specifier}`)
         }
@@ -3067,6 +3343,7 @@ export class WorkspaceStore {
     source: ExampleSource,
     request: string,
     importer: string,
+    maxFiles: number,
   ): Promise<string[]> {
     const clean = request.split('?')[0]!
     const candidate = (clean.startsWith('/')
@@ -3091,11 +3368,13 @@ export class WorkspaceStore {
     }
     const files: string[] = []
     const visit = async (path: string, prefix: string): Promise<void> => {
-      for (const entry of await readdir(path, { withFileTypes: true })) {
+      const entries = await readdir(path, { withFileTypes: true })
+      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
         const relativePath = `${prefix}/${entry.name}`
         if (entry.isDirectory()) {
           await visit(await this.realFile(source.root, relativePath, true), relativePath)
         } else if (entry.isFile()) {
+          if (files.length >= maxFiles) throw new Error('selected project exceeds maxFiles')
           await this.realFile(source.root, relativePath)
           files.push(relativePath)
         }
@@ -3239,6 +3518,33 @@ export class WorkspaceStore {
       throw error
     }
     return parseDisposableMetadata(bytes, storedBuild)
+  }
+
+  private async readVerifiedBuildArtifact(
+    workspace: string,
+    build: StoredReadyBuild,
+    artifact: 'bundle.js' | 'bundle.js.map',
+  ): Promise<Buffer> {
+    const trusted = this.trustedBuildArtifacts.get(`${workspace}\0${build.buildId}`)
+    if (trusted === undefined
+      || trusted.bundleBytes !== build.bundleBytes
+      || trusted.sourceMapBytes !== build.sourceMapBytes
+      || trusted.bundleSha256 !== build.bundleSha256
+      || trusted.sourceMapSha256 !== build.sourceMapSha256) {
+      throw new Error('Runtime build artifacts do not match ready build metadata')
+    }
+    const bytes = await this.readMetadataFile(
+      workspace,
+      this.metadataPath(workspace, 'builds', build.buildId, artifact),
+    )
+    const expectedBytes = artifact === 'bundle.js' ? trusted.bundleBytes : trusted.sourceMapBytes
+    const expectedSha256 = artifact === 'bundle.js'
+      ? trusted.bundleSha256
+      : trusted.sourceMapSha256
+    if (bytes.byteLength !== expectedBytes || digest(bytes) !== expectedSha256) {
+      throw new Error('Runtime build artifacts do not match ready build metadata')
+    }
+    return bytes
   }
 
   private async readHead(path: string): Promise<string | undefined> {

@@ -47,6 +47,7 @@ try {
   await Promise.all([
     readFile(join(packageRoot, 'dist', 'server.js')),
     readFile(join(packageRoot, 'dist', 'view.js')),
+    readFile(join(packageRoot, 'dist', 'workspace-runtime.js')),
     readFile(join(packageRoot, 'README.md')),
     readFile(join(packageRoot, 'README.zh-CN.md')),
     readFile(join(packageRoot, 'LICENSE')),
@@ -79,6 +80,22 @@ try {
   } finally {
     await client.close()
   }
+
+  const captureReport = join(temporary, 'capture.json')
+  execFileSync(process.execPath, [
+    join(packageRoot, 'scripts', 'capture-case.mjs'),
+    join(packageRoot, 'examples'),
+    'runtime-contract',
+    '--server',
+    join(packageRoot, 'dist', 'server.js'),
+    '--output',
+    join(temporary, 'capture'),
+    '--report',
+    captureReport,
+  ], { cwd: packageRoot, stdio: 'pipe' })
+  const captured = JSON.parse(await readFile(captureReport, 'utf8'))
+  assert.equal(captured.status, 'passed')
+  assert.notEqual(captured.runtime.runId, captured.runtime.replayRunId)
 
   process.stdout.write(`${JSON.stringify({
     archive,

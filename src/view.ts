@@ -659,7 +659,7 @@ let selectionAnchor: { projectId: string | undefined; uuid: string } | undefined
 let projectId: string | undefined
 let project: Project | undefined
 let revision: string | undefined
-let loadingId: string | undefined
+let loadQueue = Promise.resolve()
 let loadToken = 0
 let remoteSnapshot: RemoteSnapshot | undefined
 let workspace: WorkspaceView | undefined
@@ -737,6 +737,9 @@ const runtimeEffects = new RuntimeEffects(M7_LIFECYCLE_TIMEOUT, ({ name, error }
   recordRuntimeWarning([`${name} unavailable: ${runtimeSummary(error) ?? 'unknown error'}`])
 })
 let publishedRuntimeIdentity: string | undefined
+let publishingRuntimeIdentity: string | undefined
+let modelContextRetryIdentity: string | undefined
+let modelContextRetryCount = 0
 const runtimeCoordinator = new RuntimeCoordinator<
   CommittedRuntime,
   M7StartingRun,
@@ -889,9 +892,39 @@ function projectRuntimeUi(
     : `${run.projectId}:${run.revision}:${run.runId}:${run.nonce}`
   if ((snapshot.phase === 'edit-ready' || snapshot.phase === 'playing')
     && run !== undefined
-    && identity !== publishedRuntimeIdentity) {
-    publishedRuntimeIdentity = identity
-    runtimeEffects.run('model-context', signal => publishRuntimeModelContext(run, signal))
+    && identity !== publishedRuntimeIdentity
+    && publishingRuntimeIdentity === undefined) {
+    if (modelContextRetryIdentity !== identity) {
+      modelContextRetryIdentity = identity
+      modelContextRetryCount = 0
+    }
+    publishingRuntimeIdentity = identity
+    runtimeEffects.run('model-context', async signal => {
+      let published = false
+      try {
+        await publishRuntimeModelContext(run, signal)
+        publishedRuntimeIdentity = identity
+        published = true
+        modelContextRetryCount = 0
+      } finally {
+        if (publishingRuntimeIdentity === identity) publishingRuntimeIdentity = undefined
+        const current = activeRun()
+        const currentIdentity = current === undefined
+          ? undefined
+          : `${current.projectId}:${current.revision}:${current.runId}:${current.nonce}`
+        if (currentIdentity !== undefined && currentIdentity !== identity) {
+          queueMicrotask(() => projectRuntimeUi(runtimeCoordinator.snapshot()))
+        } else if (!published
+          && currentIdentity === identity
+          && modelContextRetryCount < 3) {
+          modelContextRetryCount += 1
+          window.setTimeout(
+            () => projectRuntimeUi(runtimeCoordinator.snapshot()),
+            250 * modelContextRetryCount,
+          )
+        }
+      }
+    })
   }
 }
 
@@ -1491,8 +1524,20 @@ function clearWorkspaceDraft(targetProjectId = projectId): void {
 }
 
 async function restoreWorkspaceDraft(snapshot: RemoteSnapshot): Promise<void> {
-  const key = workspaceDraftKey()
-  if (key === undefined || workspace === undefined || project === undefined) return
+  const targetProjectId = projectId
+  const targetRevision = snapshot.revision
+  const token = loadToken
+  const key = workspaceDraftKey(targetProjectId)
+  if (key === undefined
+    || targetProjectId === undefined
+    || workspace === undefined
+    || project === undefined) return
+  const isCurrentTarget = (): boolean => !tearingDown
+    && loadToken === token
+    && projectId === targetProjectId
+    && revision === targetRevision
+    && workspace !== undefined
+    && project !== undefined
   let draft: WorkspaceDraft | undefined
   try {
     const encoded = localStorage.getItem(key)
@@ -1506,15 +1551,48 @@ async function restoreWorkspaceDraft(snapshot: RemoteSnapshot): Promise<void> {
     return
   }
 
-  restoredDraftOperations = [...draft.editorOperations]
   await runtimeCoordinator.idle()
   await runtimeEffects.idle()
-  if (tearingDown || workspace === undefined || project === undefined) return
+  if (!isCurrentTarget()) return
   const baseline = cloneProject(history[0]?.project ?? project)
-  const restored = applyOfficialEditorCommands(
-    cloneProject(baseline),
-    draft.editorOperations,
-  ).project as Project
+  let restored: Project
+  try {
+    restored = applyOfficialEditorCommands(
+      cloneProject(baseline),
+      draft.editorOperations,
+    ).project as Project
+  } catch (error) {
+    restoredDraftOperations = []
+    root.dataset.draft = 'incompatible'
+    status.textContent = `Unsaved draft is incompatible: ${
+      error instanceof Error ? error.message : String(error)
+    }`
+    return
+  }
+  const run = activeRun()
+  if (run !== undefined
+    && (run.projectId !== targetProjectId || run.revision !== targetRevision)) return
+  if (run !== undefined && draft.editorOperations.length > 0) {
+    const applied = waitForM7Event(
+      ['editor-scene', 'runtime-error'],
+      run,
+      10_000,
+    )
+    postM7Run(run, 'apply-draft-operations', {
+      operations: draft.editorOperations,
+    })
+    const event = await applied
+    if (!isCurrentTarget()) return
+    if (event.type === 'runtime-error') {
+      restoredDraftOperations = []
+      root.dataset.draft = 'incompatible'
+      status.textContent = `Unsaved draft is incompatible: ${
+        typeof event.data?.message === 'string' ? event.data.message : 'Runtime rejected the draft'
+      }`
+      return
+    }
+  }
+  restoredDraftOperations = [...draft.editorOperations]
   restored.title = draft.title
   restored.script.source = draft.scriptSource
   replaceRuntime(restored, true)
@@ -2797,6 +2875,17 @@ async function setM7Mode(
   return event
 }
 
+async function syncM7Epoch(run: M7Run, signal: AbortSignal): Promise<void> {
+  const synced = waitForM7Event(
+    ['epoch-synced'],
+    run,
+    10_000,
+    signal,
+  )
+  postM7Run(run, 'sync-epoch')
+  await synced
+}
+
 function postM7Run(
   run: M7Run,
   action: string,
@@ -2932,7 +3021,6 @@ async function stopValidationRuntime(): Promise<void> {
   const snapshot = runtimeCoordinator.snapshot()
   const validation = snapshot.validation
   if (validation === undefined) return
-  runtimeCoordinator.setValidation(snapshot.committed, undefined)
   const disposed = waitForM7Event(
     ['disposed'],
     validation.run,
@@ -2942,7 +3030,18 @@ async function stopValidationRuntime(): Promise<void> {
     validation.frame,
   )
   postM7Run(validation.run, 'stop', {}, validation.frame)
-  await disposed
+  try {
+    await disposed
+  } catch (error) {
+    validation.frame.srcdoc = ''
+    validation.frame.hidden = true
+    throw error
+  } finally {
+    const current = runtimeCoordinator.snapshot()
+    if (current.validation === validation) {
+      runtimeCoordinator.setValidation(current.committed, undefined)
+    }
+  }
 }
 
 async function ensureValidationRuntime(
@@ -3513,6 +3612,7 @@ async function startM7Runtime(
       runtimeCoordinator.setCandidate(token, starting)
       m7ValidationStarts += 1
     }
+    await stopValidationRuntime()
     const committedResult = await app.callServerTool({
       name: 'commit_runtime_run',
       arguments: {
@@ -3540,7 +3640,6 @@ async function startM7Runtime(
       runtimeRef: registered.runtimeRef,
       projectionGeneration: registeredIdentity.projection.generation,
     }
-    await stopValidationRuntime()
     promoteM7CandidateFrame(candidateFrame)
     const nextCommitted: CommittedRuntime = {
       projectId: startProjectId,
@@ -4218,6 +4317,8 @@ async function pullLatest(timeout = 60_000): Promise<void> {
         }
       }
       showConflict(snapshot)
+      const run = context.committed?.runtime?.run
+      if (run !== undefined) await syncM7Epoch(run, context.signal)
       return {
         phase: workspaceMode === 'run' ? 'playing' : 'edit-ready',
         committed: context.committed,
@@ -4230,11 +4331,20 @@ async function pullLatest(timeout = 60_000): Promise<void> {
 }
 
 async function loadProject(nextProjectId: string): Promise<void> {
-  if (tearingDown || loadingId === nextProjectId) return
+  if (tearingDown) return
+  const previousLoad = loadQueue
+  let releaseLoad!: () => void
+  loadQueue = new Promise<void>(resolve => {
+    releaseLoad = resolve
+  })
+  await previousLoad
+  if (tearingDown) {
+    releaseLoad()
+    return
+  }
   const token = ++loadToken
   const preserveDirty = projectId === nextProjectId
     && (root.dataset.sync === 'dirty' || root.dataset.sync === 'conflict')
-  loadingId = nextProjectId
   const previousPhase = runtimeCoordinator.snapshot().phase === 'playing'
     ? 'playing'
     : 'edit-ready'
@@ -4263,6 +4373,8 @@ async function loadProject(nextProjectId: string): Promise<void> {
       if (preserveDirty) {
         showConflict(snapshot)
         persistWorkspaceDraft()
+        const run = context.committed?.runtime?.run
+        if (run !== undefined) await syncM7Epoch(run, context.signal)
         return {
           phase: previousPhase,
           committed: context.committed,
@@ -4288,7 +4400,7 @@ async function loadProject(nextProjectId: string): Promise<void> {
       await restoreWorkspaceDraft(loadedSnapshot)
     }
   } finally {
-    if (token === loadToken) loadingId = undefined
+    releaseLoad()
   }
 }
 
@@ -4933,6 +5045,10 @@ deferExternal.addEventListener('click', () => {
 saveCopy.addEventListener('click', () => {
   if (projectId === undefined || project === undefined || remoteSnapshot === undefined) return
   if (workspace !== undefined) {
+    if (runtimeCoordinator.snapshot().phase !== 'edit-ready') {
+      status.textContent = 'Stop Play before saving a conflict revision'
+      return
+    }
     const savedProjectId = projectId
     const remote = remoteSnapshot
     let changes: Array<{
@@ -4973,27 +5089,43 @@ saveCopy.addEventListener('click', () => {
     }
     saveCopy.disabled = true
     status.textContent = 'Saving local revision'
-    void app.callServerTool({
-      name: 'apply_project_files',
-      arguments: {
-        projectId: savedProjectId,
-        baseRevision: remote.revision,
-        changes,
-      },
-    }).then(async result => {
+    void runSave(async context => {
+      const result = await app.callServerTool({
+        name: 'apply_project_files',
+        arguments: {
+          projectId: savedProjectId,
+          baseRevision: remote.revision,
+          changes,
+        },
+      }, {
+        signal: context.signal,
+        timeout: M7_REQUEST_TIMEOUT,
+        maxTotalTimeout: M7_REQUEST_TIMEOUT,
+      })
       if (result.isError) throw new Error(resultError(result))
       const pulled = await app.callServerTool({
         name: 'pull_project',
         arguments: { projectId: savedProjectId },
+      }, {
+        signal: context.signal,
+        timeout: M7_REQUEST_TIMEOUT,
+        maxTotalTimeout: M7_REQUEST_TIMEOUT,
       })
       const snapshot = snapshotFromResult(pulled)
       if (snapshot === undefined) throw new Error('saved Workspace revision was not returned')
+      if (!context.isCurrent()
+        || projectId !== savedProjectId
+        || remoteSnapshot !== remote) {
+        throw new Error('Conflict revision changed while saving')
+      }
       clearWorkspaceDraft(savedProjectId)
-      await adoptSnapshot(
+      return applySnapshotPort(
         snapshot.project,
         snapshot.revision,
         'Saved local revision',
         snapshot.workspace,
+        'edit',
+        context,
       )
     }).catch(error => {
       status.textContent = error instanceof Error ? error.message : String(error)

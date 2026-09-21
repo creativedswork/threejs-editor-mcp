@@ -241,10 +241,10 @@ export function editorProjectFromSnapshots(
   const objects = new Map<string, THREE.Object3D>()
   for (const snapshot of snapshots) {
     const color = snapshot.material?.properties.find(property => property.name === 'color')
-    const material = snapshot.material === undefined
+    const material = snapshot.material === undefined && snapshot.color === undefined
       ? new THREE.MeshNormalMaterial()
       : new THREE.MeshStandardMaterial({
-          color: color?.kind === 'color' ? color.value : '#ffffff',
+          color: color?.kind === 'color' ? color.value : snapshot.color ?? '#ffffff',
         })
     if (snapshot.material !== undefined) {
       Object.defineProperty(material, 'uuid', { value: snapshot.material.uuid })

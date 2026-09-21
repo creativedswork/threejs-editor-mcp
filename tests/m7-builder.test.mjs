@@ -218,6 +218,59 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
     assert.equal(cached.structuredContent.buildId, built.structuredContent.buildId)
     assert.equal(after.mtimeMs, before.mtimeMs)
 
+    const bundlePath = join(buildDirectory, 'bundle.js')
+    const sourceMapPath = join(buildDirectory, 'bundle.js.map')
+    const originalBundle = await readFile(bundlePath)
+    const originalSourceMap = await readFile(sourceMapPath)
+    const corrupt = bytes => {
+      const copy = Buffer.from(bytes)
+      copy[0] ^= 1
+      return copy
+    }
+    await writeFile(bundlePath, corrupt(originalBundle))
+    await writeFile(sourceMapPath, corrupt(originalSourceMap))
+    await assert.rejects(
+      game.client.readResource({ uri: built.structuredContent.bundleUri }),
+      /build artifacts do not match/,
+    )
+    const corruptRuntime = await game.client.callTool({
+      name: 'prepare_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        buildId: built.structuredContent.buildId,
+        runId: 'aaaaaaaa-1111-4111-8111-111111111111',
+        nonce: 'bbbbbbbb-2222-4222-8222-222222222222',
+      },
+      _meta: runtimeMeta,
+    })
+    assert.equal(corruptRuntime.isError, true)
+    assert.match(corruptRuntime.content[0].text, /build artifacts do not match/)
+    const repaired = await game.client.callTool({
+      name: 'build_project',
+      arguments: { projectId: 'm7-builder', revision },
+    })
+    assert.equal(repaired.structuredContent.status, 'ready')
+    assert.deepEqual(await readFile(bundlePath), originalBundle)
+    assert.deepEqual(await readFile(sourceMapPath), originalSourceMap)
+
+    const buildMetadataPath = join(buildDirectory, 'build.json')
+    const forgedBundle = corrupt(originalBundle)
+    const forgedMetadata = JSON.parse(await readFile(buildMetadataPath, 'utf8'))
+    forgedMetadata.bundleSha256 = createHash('sha256').update(forgedBundle).digest('hex')
+    await writeFile(bundlePath, forgedBundle)
+    await writeFile(buildMetadataPath, `${JSON.stringify(forgedMetadata, null, 2)}\n`)
+    await assert.rejects(
+      game.client.readResource({ uri: built.structuredContent.bundleUri }),
+      /build artifacts do not match/,
+    )
+    const repairedForgery = await game.client.callTool({
+      name: 'build_project',
+      arguments: { projectId: 'm7-builder', revision },
+    })
+    assert.equal(repairedForgery.structuredContent.status, 'ready')
+    assert.deepEqual(await readFile(bundlePath), originalBundle)
+
     const runId = '11111111-2222-4333-8444-555555555555'
     const registered = await activateRuntime(game.client, {
       projectId: 'm7-builder',
@@ -868,26 +921,38 @@ test('M8 rejects symlinked Runtime metadata files', async () => {
     })
 
     const metadata = join(game.workspace, '.threejs-editor')
+    const owner = ownerMeta['ai.deepseek.dsh/session']
+    const ownerKey = createHash('sha256')
+      .update(`${owner.sessionId}\0${owner.connectionGeneration}`)
+      .digest('hex')
     const files = [
       {
         path: join(metadata, 'diagnostics', 'active-run.json'),
         check: () => game.client.callTool({
-          name: 'check_project',
-          arguments: { projectId: 'm7-builder' },
+          name: 'report_diagnostics',
+          arguments: {
+            projectId: 'm7-builder',
+            testedRevision: revision,
+            runId,
+            errors: [],
+            warnings: [],
+          },
         }),
       },
       {
-        path: join(metadata, 'editor-scenes', `${revision}.json`),
+        path: join(metadata, 'editor-scenes', ownerKey, `${revision}.json`),
         check: () => game.client.callTool({
           name: 'inspect_editor',
           arguments: { projectId: 'm7-builder' },
+          _meta: ownerMeta,
         }),
       },
       {
-        path: join(metadata, 'diagnostics', 'runtime.json'),
+        path: join(metadata, 'diagnostics', ownerKey, 'runtime.json'),
         check: () => game.client.callTool({
           name: 'check_project',
           arguments: { projectId: 'm7-builder' },
+          _meta: ownerMeta,
         }),
       },
     ]

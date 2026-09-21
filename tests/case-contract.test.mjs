@@ -100,3 +100,52 @@ test('case validation rejects capture modes absent from example.json', async () 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('case validation rejects directories outside its root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-case-root-'))
+  const outside = await mkdtemp(join(tmpdir(), 'threejs-editor-case-outside-'))
+  try {
+    await assert.rejects(
+      validateCaseDirectory(outside, root),
+      /case directory must be within the validation root/,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('case validation rejects quality tiers unsupported by the backend', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'threejs-editor-case-quality-'))
+  await writeFile(join(root, 'scene.js'), 'export default { setup() { return {} } }\n')
+  await writeFile(join(root, 'example.json'), JSON.stringify({
+    title: 'Invalid Quality',
+    backend: 'WebGL2',
+    defaultViewport: { width: 640, height: 360 },
+    defaultDpr: 1,
+    debugModes: ['final'],
+  }))
+  await writeFile(join(root, 'case.json'), JSON.stringify({
+    schemaVersion: 1,
+    source: { type: 'repository', license: 'MIT' },
+    compatibility: {
+      level: 'C1',
+      lane: 'deterministic-core',
+      blocking: true,
+    },
+    capture: {
+      qualityTier: 'quality',
+      warmupFrames: 0,
+      frames: [{ id: 'final', debugMode: 'final', waitFrames: 0 }],
+      contactSheet: { columns: 1 },
+    },
+  }))
+  try {
+    await assert.rejects(
+      validateCaseDirectory(root),
+      /capture qualityTier quality is not supported/,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

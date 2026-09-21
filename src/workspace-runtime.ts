@@ -228,7 +228,7 @@ export function workspaceRuntimeHtml(): string {
   </style>
 </head>
 <body>
-  <canvas aria-label="Three.js Workspace editor canvas"></canvas>
+  <canvas tabindex="0" aria-label="Three.js Workspace editor canvas"></canvas>
   <script>
   (() => {
     const channel = ${JSON.stringify(WORKSPACE_RUNTIME_CHANNEL)}
@@ -324,6 +324,8 @@ export function workspaceRuntimeHtml(): string {
       'contextmenu',
       'dblclick',
       'gotpointercapture',
+      'keydown',
+      'keyup',
       'lostpointercapture',
       'mousedown',
       'mousemove',
@@ -783,7 +785,44 @@ export function workspaceRuntimeHtml(): string {
       commandId,
       expiresAt,
       commandTarget,
+      frameDurationMs,
     ) => {
+      if (commandTarget === 'validation'
+        && Number.isFinite(frameDurationMs)
+        && frameDurationMs > 0) {
+        const previousCapturePaused = current.capturePaused
+        const previousTimeScale = current.state.timeScale
+        current.capturePaused = true
+        current.state.timeScale = 1
+        cancelAnimationFrame(current.animation)
+        try {
+          await current.framePromise
+          for (let frame = 0; frame < frames; frame += 1) {
+            if (cancelledHarnessCommands.has(commandId)) {
+              throw new Error('Runtime Harness command cancelled')
+            }
+            if (current.stopped || active !== current) {
+              throw new Error('Runtime disposed during player action')
+            }
+            if (Date.now() >= Date.parse(expiresAt)) {
+              throw new Error('Runtime Harness command timed out')
+            }
+            current.renderFrame(current.previous + frameDurationMs)
+            await current.framePromise
+            if (current.stopped || active !== current) {
+              throw new Error('Runtime disposed during player action')
+            }
+          }
+          return
+        } finally {
+          current.state.timeScale = previousTimeScale
+          current.capturePaused = previousCapturePaused
+          current.previous = performance.now()
+          if (!current.stopped && !current.capturePaused && !current.modeTransitioning) {
+            current.animation = requestAnimationFrame(current.renderFrame)
+          }
+        }
+      }
       const targetFrame = current.frame + frames
       const deadline = Date.parse(expiresAt)
       while (true) {
@@ -840,7 +879,14 @@ export function workspaceRuntimeHtml(): string {
     }
     const dispatchAction = async (current, action, commandId, expiresAt, target) => {
       if (action.type === 'waitFrames') {
-        await waitFrames(current, action.frames, commandId, expiresAt, target)
+        await waitFrames(
+          current,
+          action.frames,
+          commandId,
+          expiresAt,
+          target,
+          action.frameDurationMs,
+        )
         return false
       }
       if (action.type === 'keyDown' || action.type === 'keyUp') {
@@ -1074,9 +1120,40 @@ export function workspaceRuntimeHtml(): string {
       current.selected.updateMatrix()
       current.selected.updateMatrixWorld(true)
     }
-    const applyOperation = (current, operation, notify = true) => {
+    const operationObject = (current, operation) => {
       const object = current.objects.get(operation?.objectUuid)
       if (!object) throw new Error('Unknown Runtime editor object ' + operation?.objectUuid)
+      if (operation.type === 'set_material_color' && !editableMaterial(object)) {
+        throw new Error('Runtime editor object has no editable color')
+      }
+      if (operation.type === 'set_material_value') {
+        const material = objectMaterial(object)
+        if (!material || typeof material[operation.property] !== 'number') {
+          throw new Error(
+            'Runtime editor object has no editable material value ' + operation.property,
+          )
+        }
+      } else if (operation.type === 'set_material_boolean') {
+        const material = objectMaterial(object)
+        if (!material || typeof material[operation.property] !== 'boolean') {
+          throw new Error(
+            'Runtime editor object has no editable material boolean ' + operation.property,
+          )
+        }
+      } else if (![
+        'set_position',
+        'set_rotation',
+        'set_scale',
+        'set_name',
+        'set_visible',
+        'set_material_color',
+      ].includes(operation.type)) {
+        throw new Error('Unsupported Runtime editor operation ' + operation?.type)
+      }
+      return object
+    }
+    const applyOperation = (current, operation, notify = true) => {
+      const object = operationObject(current, operation)
       if (operation.type === 'set_position') {
         object.position.fromArray(operation.value)
       } else if (operation.type === 'set_rotation') {
@@ -1103,15 +1180,8 @@ export function workspaceRuntimeHtml(): string {
         material.needsUpdate = true
       } else if (operation.type === 'set_material_boolean') {
         const material = objectMaterial(object)
-        if (!material || typeof material[operation.property] !== 'boolean') {
-          throw new Error(
-            'Runtime editor object has no editable material boolean ' + operation.property,
-          )
-        }
         material[operation.property] = operation.value
         material.needsUpdate = true
-      } else {
-        throw new Error('Unsupported Runtime editor operation ' + operation?.type)
       }
       object.updateMatrix()
       current.scene.updateMatrixWorld(true)
@@ -1556,7 +1626,9 @@ export function workspaceRuntimeHtml(): string {
             qualityTier: editorState?.qualityTier ?? request.qualityTier ?? 'default',
             paused: request.mode !== 'run',
             dpr: Math.min(devicePixelRatio || 1, 2),
-            timeScale: 1,
+            timeScale: Number.isFinite(request.timeScale)
+              ? Math.min(Math.max(request.timeScale, 0), 4)
+              : 1,
           },
           frame: 0,
           elapsed: adapter.initialTime ?? 0,
@@ -1973,12 +2045,17 @@ export function workspaceRuntimeHtml(): string {
         || active.projectId !== request.projectId
         || active.runId !== runId
         || active.nonce !== nonce) return
-      if (action === 'apply-draft-operations') {
+      if (action === 'sync-epoch') {
+        emit(runId, nonce, 'epoch-synced', {})
+      } else if (action === 'apply-draft-operations') {
         const current = active
         if (current.revisionTransition !== undefined
           || current.revision !== request.revision) return
         try {
           await mutateBetweenFrames(current, () => {
+            for (const operation of request.operations ?? []) {
+              operationObject(current, operation)
+            }
             for (const operation of request.operations ?? []) {
               applyOperation(current, operation, false)
             }

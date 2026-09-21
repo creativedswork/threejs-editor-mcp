@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { cp, link, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
+import {
+  cp,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,14 +27,14 @@ import {
 
 const serverPath = fileURLToPath(new URL('../dist/server.js', import.meta.url))
 
-async function connect(root) {
+async function connect(root, args = []) {
   const client = new Client({
     name: 'threejs-editor-mcp-m81-continuity-test',
     version: '0.0.0',
   })
   await client.connect(new StdioClientTransport({
     command: process.execPath,
-    args: [serverPath, '--root', root],
+    args: [serverPath, '--root', root, ...args],
   }))
   return client
 }
@@ -253,6 +264,20 @@ test('M8.1 accepts the canonical entry basename as its explicit alias', async ()
       },
     })
     assert.match(canonical.structuredContent.files[0].text, /version: 2/)
+
+    await writeFile(
+      join(root, '.managed-workspaces', opened.structuredContent.projectId, 'scene.js'),
+      'export default { root: true }\n',
+    )
+    const exact = await client.callTool({
+      name: 'read_project_files',
+      arguments: {
+        projectId: opened.structuredContent.projectId,
+        files: [{ path: 'scene.js' }],
+      },
+    })
+    assert.equal(exact.structuredContent.files[0].path, 'scene.js')
+    assert.match(exact.structuredContent.files[0].text, /root: true/)
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
@@ -261,7 +286,7 @@ test('M8.1 accepts the canonical entry basename as its explicit alias', async ()
 })
 
 test('M8.1 atomically migrates a revision-derived imported project without losing metadata', async () => {
-  const { root, workspace } = await fixture()
+  const { root, workspace, project } = await fixture()
   try {
     const firstClient = await connect(root)
     const initialResult = await firstClient.callTool({
@@ -285,7 +310,12 @@ test('M8.1 atomically migrates a revision-derived imported project without losin
     assert.notEqual(legacyProjectId, initial.projectId)
     const marker = join(stablePath, '.threejs-editor', 'diagnostics', 'upgrade-marker.json')
     await writeFile(marker, '{"preserved":true}\n')
+    await rm(join(stablePath, '.threejs-editor', 'source.json'))
     await rename(stablePath, join(root, '.managed-workspaces', legacyProjectId))
+    await writeFile(
+      join(project, 'scene.js'),
+      'export default { setup() { return { version: 2 } } }\n',
+    )
 
     const upgradedClient = await connect(root)
     const reopened = await upgradedClient.callTool({
@@ -309,11 +339,136 @@ test('M8.1 atomically migrates a revision-derived imported project without losin
       ),
       '{"preserved":true}\n',
     )
+    const migratedSource = JSON.parse(await readFile(
+      join(
+        root,
+        '.managed-workspaces',
+        initial.projectId,
+        '.threejs-editor',
+        'source.json',
+      ),
+      'utf8',
+    ))
+    assert.notEqual(migratedSource.revision, source.revision)
+    assert.equal(
+      migratedSource.files['pool/scene.js'],
+      createHash('sha256').update(await readFile(join(project, 'scene.js'))).digest('hex'),
+    )
+    assert.match(
+      await readFile(
+        join(root, '.managed-workspaces', initial.projectId, 'pool', 'scene.js'),
+        'utf8',
+      ),
+      /version: 1/,
+    )
     await assert.rejects(
       readFile(join(root, '.managed-workspaces', legacyProjectId, '.threejs-editor', 'HEAD')),
       error => error.code === 'ENOENT',
     )
   } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test('M8.1 does not claim a legacy import from a different workspace root', async () => {
+  const first = await fixture()
+  const secondWorkspace = await mkdtemp(join(tmpdir(), 'threejs-editor-m81-workspace-b-'))
+  const secondProject = join(secondWorkspace, 'pool')
+  await mkdir(secondProject)
+  await writeFile(join(secondProject, 'example.json'), JSON.stringify({
+    title: 'Second Pool',
+    backend: 'WebGL',
+  }))
+  await writeFile(join(secondProject, 'scene.js'), 'export default { marker: "B" }\n')
+  try {
+    const firstClient = await connect(first.root)
+    const initial = await firstClient.callTool({
+      name: 'open_editor',
+      arguments: { projectPath: 'pool' },
+      _meta: { 'ai.deepseek.dsh/workspace': { cwd: first.workspace } },
+    })
+    await firstClient.close()
+    const stablePath = join(
+      first.root,
+      '.managed-workspaces',
+      initial.structuredContent.projectId,
+    )
+    const source = JSON.parse(await readFile(
+      join(stablePath, '.threejs-editor', 'source.json'),
+      'utf8',
+    ))
+    const legacyProjectId = `example-${
+      createHash('sha256')
+        .update(`${source.root}\0${source.projectPath}\0${source.revision}`)
+        .digest('hex')
+        .slice(0, 56)
+    }`
+    await rm(join(stablePath, '.threejs-editor', 'source.json'))
+    await rename(stablePath, join(first.root, '.managed-workspaces', legacyProjectId))
+
+    const secondClient = await connect(first.root)
+    const opened = await secondClient.callTool({
+      name: 'open_editor',
+      arguments: { projectPath: 'pool' },
+      _meta: { 'ai.deepseek.dsh/workspace': { cwd: secondWorkspace } },
+    })
+    await secondClient.close()
+    assert.equal(opened.isError, undefined)
+    assert.notEqual(opened.structuredContent.projectId, legacyProjectId)
+    assert.match(
+      await readFile(
+        join(
+          first.root,
+          '.managed-workspaces',
+          opened.structuredContent.projectId,
+          'pool',
+          'scene.js',
+        ),
+        'utf8',
+      ),
+      /marker: "B"/,
+    )
+    assert.match(
+      await readFile(
+        join(first.root, '.managed-workspaces', legacyProjectId, 'pool', 'scene.js'),
+        'utf8',
+      ),
+      /version: 1/,
+    )
+  } finally {
+    await rm(first.root, { recursive: true, force: true })
+    await rm(first.workspace, { recursive: true, force: true })
+    await rm(secondWorkspace, { recursive: true, force: true })
+  }
+})
+
+test('M8.1 includes generated import files in availability quotas', async () => {
+  const { root, workspace } = await fixture()
+  const client = await connect(root, ['--workspace-max-files', '4'])
+  const meta = { 'ai.deepseek.dsh/workspace': { cwd: workspace } }
+  try {
+    const listed = await client.callTool({
+      name: 'list_projects',
+      arguments: {},
+      _meta: meta,
+    })
+    const candidate = listed.structuredContent.workspaceProjects
+      .find(project => project.projectPath === 'pool')
+    assert.equal(candidate.available, false)
+    assert.match(candidate.issue, /maxFiles/)
+    const opened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectPath: 'pool' },
+      _meta: meta,
+    })
+    assert.equal(opened.isError, true)
+    assert.deepEqual(
+      (await readdir(join(root, '.managed-workspaces'))).filter(name => !name.startsWith('.')),
+      [],
+    )
+  } finally {
+    await client.close()
     await rm(root, { recursive: true, force: true })
     await rm(workspace, { recursive: true, force: true })
   }
@@ -781,18 +936,90 @@ test('M8.1 isolates Runtime identities and control leases by Harness Session', a
     }
     const runtimeB = {
       ...runtimeA,
-      runId: '44444444-4444-4444-8444-444444444444',
       nonce: '55555555-5555-4555-8555-555555555555',
     }
+    const staleMeta = {
+      'ai.deepseek.dsh/session': {
+        sessionId: ownerA.sessionId,
+        connectionGeneration: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      },
+    }
+    const stalePrepared = await client.callTool({
+      name: 'prepare_runtime_run',
+      arguments: {
+        ...runtimeA,
+        runId: '66666666-6666-4666-8666-666666666666',
+        nonce: '77777777-7777-4777-8777-777777777777',
+      },
+      _meta: staleMeta,
+    })
     const registrationA = await activateRuntime(client, runtimeA, metaA)
+    const staleCommit = await client.callTool({
+      name: 'commit_runtime_run',
+      arguments: {
+        projectId: 'game',
+        runtimeRef: stalePrepared.structuredContent.runtimeRef,
+      },
+      _meta: staleMeta,
+    })
+    assert.equal(staleCommit.isError, true)
+    assert.match(staleCommit.content[0].text, /prepared Runtime run is missing/)
     await activateRuntime(client, runtimeB, metaB)
-    for (const [meta, runtime] of [[metaA, runtimeA], [metaB, runtimeB]]) {
+    for (const [meta, runtime, name, uuid] of [
+      [metaA, runtimeA, 'Owner A object', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'],
+      [metaB, runtimeB, 'Owner B object', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'],
+    ]) {
+      const scene = await client.callTool({
+        name: 'report_editor_scene',
+        arguments: {
+          projectId: 'game',
+          revision: runtime.revision,
+          runId: runtime.runId,
+          objects: [{
+            uuid,
+            path: `scene/${name}#0`,
+            name,
+            type: 'Object3D',
+            visible: true,
+            position: [0, 0, 0],
+            rotationDegrees: [0, 0, 0],
+            scale: [1, 1, 1],
+            commands: ['set_position'],
+          }],
+        },
+        _meta: meta,
+      })
+      assert.equal(scene.isError, undefined)
+      const diagnostics = await client.callTool({
+        name: 'report_diagnostics',
+        arguments: {
+          projectId: 'game',
+          testedRevision: runtime.revision,
+          runId: runtime.runId,
+          errors: [`${name} error`],
+          warnings: [],
+        },
+        _meta: meta,
+      })
+      assert.equal(diagnostics.isError, undefined)
       const inspected = await client.callTool({
         name: 'inspect_project',
         arguments: { projectId: 'game' },
         _meta: meta,
       })
       assert.equal(inspected.structuredContent.runtime.runtimeRef, runtime.runtimeRef)
+      const editor = await client.callTool({
+        name: 'inspect_editor',
+        arguments: { projectId: 'game' },
+        _meta: meta,
+      })
+      assert.equal(editor.structuredContent.objects[0].name, name)
+      const checked = await client.callTool({
+        name: 'check_project',
+        arguments: { projectId: 'game' },
+        _meta: meta,
+      })
+      assert.deepEqual(checked.structuredContent.errors, [`${name} error`])
     }
 
     const pendingA = client.callTool({

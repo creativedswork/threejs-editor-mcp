@@ -1,28 +1,28 @@
 # M11 Validation
 
-Status: **RELEASE_HARDENING**
+Status: **RELEASE_CANDIDATE**
 
 ## Execution checkpoint
 
 EXECUTION_CHECKPOINT
-- Updated at: 2026-09-21 21:25:16 +0800
+- Updated at: 2026-09-22 00:11:50 +0800
 - Milestone: M11 - community contract and 0.2.0 release
 - Slice: packed 0.2.0 candidate
 - Phase: release-hardening
-- Slice state: IMPLEMENTING
+- Slice state: VERIFIED
 - Completed facts: The user accepted the compatibility and error-propagation audit on 2026-09-21, authorized M11 implementation, and approved Release Hardening plus commit, push, PR, and npm publication. Runtime modules, build identifiers, diagnostics, and user-visible Runtime messages now use responsibility-based names while retaining existing wire identifiers and E2E compatibility aliases. The public `Threejs-editor-mcp-showcase` video supplied the six-panel Runtime cover at timestamp 00:07. The community case validator, capture runner, owned Runtime fixture, format guide, contributor guide, security guide, dependency profile guide, and V1/V2 migration guide are implemented. Package and README versions are prepared as `0.2.0`, and `CHANGELOG.md` records the candidate scope. Fixed debug collectors were removed from both release repositories.
-- Repository state: `threejs-editor-mcp`, branch `main`, HEAD `75f96e3`. No staged files. The checkout contains unrelated tracked and untracked debugging work.
-- Intended changes: Run cumulative tests and reviews, make both READMEs release-oriented, build and inspect the production package, install it into a fresh Harness profile, run the complete G1 workflow, commit and push the owned changes in `threejs-editor-mcp` and `dsh-uni-editor`, open both pull requests, and publish `threejs-editor-mcp@0.2.0`. `tests/m10-real-model-browser.mjs` now preserves an explicitly supplied packed Server path.
+- Repository state: `threejs-editor-mcp`, branch `release/threejs-editor-mcp-0.2.0`, candidate HEAD `8314253` plus the reviewed hardening diff. No files are staged. The checkout contains unrelated tracked and untracked debugging work.
+- Intended changes: Commit and push the verified release-owned changes in `threejs-editor-mcp`, push the existing `dsh-uni-editor` continuity commits, open both pull requests with real-flow GIF evidence, and publish only `threejs-editor-mcp@0.2.0`.
 - Explicit exclusions: Do not redesign Runtime ownership, add a third Runtime abstraction, rewrite historical reports, change compatible wire identifiers, include unrelated debug files, publish `dsh-uni-editor`, modify YouTube metadata, or prepare X/Xiaohongshu copy before npm publication succeeds.
-- Verification: `threejs-editor-mcp` final `release:check` PASS: upstream sync, typecheck, production build, 88/88 tests, tarball install, installed CLI and MCP smoke. The inspected tarball contains 34 files, including the versioned README cover, community scripts, owned example, and report. `dsh-uni-editor` `check` PASS with 28 passed and one external-artifact test skipped; `pack:dry-run` PASS with 17 files. Strict case capture status is `passed` with stable hashes, no browser problems, and complete teardown. Fresh packed G1 PASS with a normal configured provider, real `open_editor` and `build_project` calls, gameplay movement, running audio, skeleton debug mode, Runtime evidence, and `browserProblems: []`.
+- Verification: `threejs-editor-mcp` final `release:check` PASS: upstream sync, typecheck, production build, 100/100 tests, tarball install, installed CLI, MCP smoke, and installed-package capture. The inspected tarball contains 22 files, including `dist/workspace-runtime.js`, the versioned README cover, community scripts, owned example, and report. `dsh-uni-editor` `check` PASS with 28 passed and one external-artifact test skipped; `pack:dry-run` PASS with 17 files. Strict two-Runtime case capture status is `passed` with stable cross-run hashes, no browser problems, and complete teardown. Fresh packed G1 PASS with a normal configured provider, real `open_editor` and `build_project` calls, gameplay movement, running audio, skeleton debug mode, Runtime evidence, and `browserProblems: []`.
 - Evidence paths: `reports/assets/m11-six-runtime-cover.png`, `reports/m11-community-case-report.json`, `reports/assets/m11-runtime-contract/`, `.tmp/m11-fresh-g1-packed/M10-real-model-result.json`, `.tmp/m11-fresh-g1-packed/host.log`, `.playwright-mcp/m11-fresh-g1-packed/`, and focused test files listed below.
-- Run identity: Strict capture run `e203fa0a-8610-4ec8-91f8-926db6d6ebd5` is closed. Fresh G1 model session `session-e604fe56-2003-4969-82a6-292ddd0ad3ff`, project `workspace-04be30c6317524a3906788f8c07acef0f490ceceb8661d1b4b6959`, build `520fa609c95d0d0c32d1715276fa39bd57585edc9ff06dcba5f0108ee28e5fdf`, and Runtime evidence digest `4d25e16efd4485aa8a7173eb2395346a8d1ac9569ec4830a1a50b7813f845509`; all isolated processes are closed.
+- Run identity: Strict capture runs `8cfc5b15-6651-4b5b-8573-bb2b66319c78` and `a3dab6cc-587a-4bc3-9f5b-22a02b7b21ea` are closed. Fresh G1 model session `session-e604fe56-2003-4969-82a6-292ddd0ad3ff`, project `workspace-04be30c6317524a3906788f8c07acef0f490ceceb8661d1b4b6959`, build `520fa609c95d0d0c32d1715276fa39bd57585edc9ff06dcba5f0108ee28e5fdf`, and Runtime evidence digest `4d25e16efd4485aa8a7173eb2395346a8d1ac9569ec4830a1a50b7813f845509`; all isolated processes are closed.
 - Resource ownership: This Agent owns the accepted compatibility hunks, M11 Runtime naming changes, media assets, case-contract changes, and this report. Existing `3080` processes, browser Session state, and other dirty files remain externally owned. Temporary port `7781` is closed.
 - Active command: N/A. Fresh packed G1 completed and cleaned its isolated Host, browser, and MCP Server processes.
 - Continuity constraints: Preserve all unrelated dirty hunks. Do not change `dist/` while the externally owned Server remains active. Do not describe version metadata or an isolated bundle as a packed-install or release result.
 - Invalidators: Concurrent edits to owned hunks, HEAD or branch changes, staged files from another task, or a rebuild/restart of the existing `3080` Three.js MCP child.
-- Blockers and risks: PR GIF, security review, and cumulative code review remain pending. Unrelated dirty files must stay outside the release commits. The copied user profile was rejected as Fresh Harness evidence because unrelated bundles affected Host startup.
-- Exact next action: Classify the release-owned diff in both repositories, create release branches, and make local candidate commits without staging unrelated debugging files.
+- Blockers and risks: PR GIF, remote PR creation, and npm publication remain pending. Cumulative code review is clean after fixing project-load serialization, deterministic final-frame failure reporting, generated-Workspace deletion confinement, and pre-marker migration. Security review found no exploitable issue in either release delta. Unrelated dirty files must stay outside the release commits.
+- Exact next action: Commit only the release-owned hardening files, push both branches, open both pull requests, and record the real-model PR GIF against the exact submitted commits.
 - Stop condition: A confirmed release blocker, missing publication credential, remote conflict that cannot be resolved without rewriting unowned history, or successful npm publication and promotion-copy handoff.
 
 ## Slice ledger
@@ -34,7 +34,7 @@ EXECUTION_CHECKPOINT
 | Six-panel video cover | IMPLEMENTED | README cover extracted from the approved public video at 00:07 and linked to the new video. |
 | Community case contract | IMPLEMENTED | Recursive validator and capture CLI reuse `example.json`; the owned C1 fixture produced deterministic frame and contact-sheet evidence. |
 | Guides and migration | IMPLEMENTED | Added contributor, security, dependency profile, community case, and V1/V2 migration documentation linked from both READMEs. |
-| Packed 0.2.0 candidate | PENDING | Version and changelog are prepared; production pack, fresh install, complete Harness E2E, and package-content evidence await Release Hardening approval. |
+| Packed 0.2.0 candidate | VERIFIED | Production pack, clean install, installed CLI/MCP/capture checks, strict capture, and Fresh Harness G1 passed. |
 
 ## Audit scope
 
@@ -99,11 +99,11 @@ The user accepted this Slice on 2026-09-21. Its criteria covered:
 - `check_project` keeping missing or stale Runtime evidence inconclusive; and
 - malformed example metadata not hiding valid examples.
 
-## Deferred to Release Hardening
+## Release completion
 
-- full repository tests, typecheck, lint, production build, packed install, and release checks;
-- cumulative code review of all M11 changes;
-- repeated browser runs and the complete external corpus matrix;
-- final verification that only release-owned files enter each commit.
+- Cumulative `bits-code-guard` review is clean after all reproduced findings were fixed and rechecked.
+- `TRAE-security-review` found no demonstrably exploitable issue in either release delta.
+- Full local checks, production builds, packed installs, and the real-provider G1 acceptance flow passed.
+- PR GIF publication, remote PR creation, and npm publication remain.
 
-No files are staged. No commit, push, PR, service restart, or publication was performed.
+No files are staged. Unrelated debug files and `reports/M9-ui-stage.log` remain excluded.

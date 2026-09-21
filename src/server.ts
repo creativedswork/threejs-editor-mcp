@@ -202,6 +202,7 @@ const playerActionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('waitFrames'),
     frames: z.number().int().min(1).max(600),
+    frameDurationMs: z.number().positive().max(100).optional(),
   }),
 ])
 const runtimeEvidenceIdentitySchema = runtimeIdentitySchema.extend({
@@ -762,9 +763,10 @@ function assertEditorOperationsAdvertised(
       )
     }
     if (operation.type === 'set_material_color') {
-      if (!object.material?.properties.some(property => (
+      const advertised = object.material?.properties.some(property => (
         property.name === 'color' && property.command === operation.type
-      ))) {
+      )) ?? object.color !== undefined
+      if (!advertised) {
         throw new Error(
           `material does not advertise color: ${operation.objectUuid}`,
         )
@@ -2365,7 +2367,10 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   }, async ({ projectId, files }) => {
     const snapshot = await workspaces.load(projectId)
     const result = await workspaces.readFiles(projectId, files)
-    return textResult(`Workspace files:\n${JSON.stringify(result)}`, {
+    const modelResult = result.map(({ base64, ...file }) => (
+      base64 === undefined ? file : { ...file, binary: 'available in structuredContent' }
+    ))
+    return textResult(`Workspace files:\n${JSON.stringify(modelResult)}`, {
       projectId,
       revision: snapshot.revision,
       files: result,

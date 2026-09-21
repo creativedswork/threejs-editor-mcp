@@ -95,10 +95,12 @@
     "typescript": "6.0.3",
     "zod": "4.4.3"
   },
+  "optionalDependencies": {
+    "playwright": "1.61.1"
+  },
   "devDependencies": {
     "@types/node": "22.20.1",
     "@types/three": "0.185.4",
-    "playwright": "1.61.1",
     "tsdown": "0.22.14"
   }
 }

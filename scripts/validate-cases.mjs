@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
-import { dirname, relative, resolve, sep } from 'node:path'
+import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 
@@ -130,6 +130,13 @@ function backend(example) {
       : 'webgl'
 }
 
+function qualityTiers(example) {
+  const value = typeof example.backend === 'string' ? example.backend.toLowerCase() : ''
+  return value.includes('postprocessing')
+    ? ['balanced', 'performance', 'quality']
+    : ['default']
+}
+
 export async function discoverCaseDirectories(root) {
   const absoluteRoot = resolve(root)
   const directories = []
@@ -152,8 +159,12 @@ export async function discoverCaseDirectories(root) {
 }
 
 export async function validateCaseDirectory(caseDirectory, root = caseDirectory) {
-  const absoluteRoot = resolve(root)
-  const directory = resolve(caseDirectory)
+  const absoluteRoot = await realpath(resolve(root))
+  const directory = await realpath(resolve(caseDirectory))
+  const projectPath = relative(absoluteRoot, directory)
+  if (isAbsolute(projectPath) || projectPath === '..' || projectPath.startsWith(`..${sep}`)) {
+    fail(directory, 'case directory must be within the validation root')
+  }
   const casePath = resolve(directory, 'case.json')
   const examplePath = resolve(directory, 'example.json')
   const entryPath = resolve(directory, 'scene.js')
@@ -178,6 +189,12 @@ export async function validateCaseDirectory(caseDirectory, root = caseDirectory)
   if (typeof example.title !== 'string' || example.title.trim() === '') {
     fail(examplePath, 'example.json title must be a non-empty string')
   }
+  if (!qualityTiers(example).includes(spec.capture.qualityTier)) {
+    fail(
+      casePath,
+      `capture qualityTier ${spec.capture.qualityTier} is not supported by example.json backend`,
+    )
+  }
   const debugModes = exampleDebugModes(example, examplePath)
   const captureIds = spec.capture.frames.map(frame => frame.id)
   if (new Set(captureIds).size !== captureIds.length) {
@@ -189,15 +206,21 @@ export async function validateCaseDirectory(caseDirectory, root = caseDirectory)
     }
   }
 
-  const projectPath = slash(relative(absoluteRoot, directory)) || '.'
-  const artifactRoot = projectPath === '.' ? 'artifacts' : `${projectPath}/artifacts`
+  const normalizedProjectPath = slash(projectPath) || '.'
+  const artifactRoot = normalizedProjectPath === '.'
+    ? 'artifacts'
+    : `${normalizedProjectPath}/artifacts`
   return {
-    id: projectPath,
-    caseFile: projectPath === '.' ? 'case.json' : `${projectPath}/case.json`,
+    id: normalizedProjectPath,
+    caseFile: normalizedProjectPath === '.'
+      ? 'case.json'
+      : `${normalizedProjectPath}/case.json`,
     project: {
-      path: projectPath,
+      path: normalizedProjectPath,
       title: example.title,
-      entry: projectPath === '.' ? 'scene.js' : `${projectPath}/scene.js`,
+      entry: normalizedProjectPath === '.'
+        ? 'scene.js'
+        : `${normalizedProjectPath}/scene.js`,
       backend: backend(example),
     },
     source: spec.source,
