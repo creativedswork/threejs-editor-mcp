@@ -7,7 +7,7 @@ The Agent edits source. You inspect the live scene, move objects, adjust
 parameters, and press Play in the same chat card. Both sides work on the same
 project revision.
 
-[![Six Three.js projects open in MCP Apps](https://unpkg.com/threejs-editor-mcp@0.2.0/reports/assets/m11-six-runtime-cover.png)](https://www.youtube.com/watch?v=pbrUQos2n9k)
+<img width="1000" height="400" alt="Three.js projects open in MCP Apps" src="https://github.com/user-attachments/assets/dab21bc8-540d-4582-ab0d-1a9013805ab0">
 
 [Watch the 80-second showcase](https://www.youtube.com/watch?v=pbrUQos2n9k)
 · [Install](#install)

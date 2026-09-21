@@ -4,7 +4,7 @@
 
 在 DeepSeek Harness 里和 AI Agent 一起制作 Three.js 工程。Agent 修改源码，你在同一张对话卡片里查看场景、移动物体、调整参数并进入 Play。双方操作始终绑定同一个 project revision。
 
-[![在 MCP Apps 中同时打开六个 Three.js 工程](https://unpkg.com/threejs-editor-mcp@0.2.0/reports/assets/m11-six-runtime-cover.png)](https://www.youtube.com/watch?v=pbrUQos2n9k)
+<img width="1000" height="400" alt="在 MCP Apps 中打开 Three.js 工程" src="https://github.com/user-attachments/assets/dab21bc8-540d-4582-ab0d-1a9013805ab0">
 
 [观看 80 秒演示](https://www.youtube.com/watch?v=pbrUQos2n9k)
 · [安装](#安装)
