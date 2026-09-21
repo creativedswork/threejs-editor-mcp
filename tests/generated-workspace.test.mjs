@@ -37,6 +37,20 @@ test('generated Workspace reset replaces only its own prior output', async () =>
   }
 })
 
+test('generated Workspace reset accepts the standard temporary-directory alias', async () => {
+  const parent = await mkdtemp('/tmp/threejs-editor-temp-alias-')
+  const destination = join(parent, 'workspace')
+  try {
+    const generated = await resetGeneratedWorkspace(destination, 'test-generator')
+    assert.equal(
+      await readFile(join(generated, '.threejs-editor', 'generated-workspace'), 'utf8'),
+      'test-generator\n',
+    )
+  } finally {
+    await rm(parent, { recursive: true, force: true })
+  }
+})
+
 test('generated Workspace reset migrates a recognized pre-marker output', async () => {
   const parent = await mkdtemp(join(tmpdir(), 'threejs-editor-legacy-'))
   const destination = join(parent, 'workspace')

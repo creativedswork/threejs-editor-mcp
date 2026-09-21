@@ -41,7 +41,14 @@ function childPath(root, path) {
 
 async function verifiedDestination(destination) {
   const lexical = resolve(destination)
-  const roots = [resolve(process.cwd()), resolve(tmpdir())]
+  const requestedRoots = [resolve(process.cwd()), resolve(tmpdir()), resolve('/tmp')]
+  const canonicalRoots = await Promise.all(requestedRoots.map(
+    root => realpath(root).catch(() => undefined),
+  ))
+  const roots = [...new Set([
+    ...requestedRoots,
+    ...canonicalRoots.filter(root => root !== undefined),
+  ])]
     .sort((left, right) => right.length - left.length)
   for (const root of roots) {
     const child = childPath(root, lexical)
