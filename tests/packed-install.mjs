@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
+  cp,
   mkdtemp,
   mkdir,
   readFile,
@@ -81,10 +82,12 @@ try {
     await client.close()
   }
 
+  const captureRoot = join(temporary, 'capture-source')
+  await cp(join(packageRoot, 'examples'), captureRoot, { recursive: true })
   const captureReport = join(temporary, 'capture.json')
   execFileSync(process.execPath, [
     join(packageRoot, 'scripts', 'capture-case.mjs'),
-    join(packageRoot, 'examples'),
+    captureRoot,
     'runtime-contract',
     '--server',
     join(packageRoot, 'dist', 'server.js'),
