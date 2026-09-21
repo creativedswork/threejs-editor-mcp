@@ -62,7 +62,7 @@ const cases = {
 const pinnedRuntimeDependencies = {
   '@petamoriken/float16': '3.9.2',
   'astronomy-engine': '2.1.19',
-  'postprocessing': '6.37.4',
+  'postprocessing': '6.39.5',
   'three': '0.185.1',
   'three-stdlib': '2.36.0',
 }

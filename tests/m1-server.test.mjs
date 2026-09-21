@@ -718,7 +718,7 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.equal(content?.text?.includes('data-fullscreen'), true)
     assert.equal(content?.text?.includes('requestDisplayMode'), true)
     assert.equal(content?.text?.includes('updateModelContext'), true)
-    assert.equal(content?.text?.includes('supersedes every earlier Runtime identity'), true)
+    assert.equal(content?.text?.includes('Use this opaque reference'), true)
     assert.equal(content?.text?.includes('data-runtime-sandbox'), true)
     assert.equal(content?.text?.includes('sandbox="allow-scripts"'), true)
     assert.equal(content?.text?.includes('allow-same-origin'), false)
@@ -751,7 +751,7 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       ['color.js', 'main.js'],
     )
     assert.deepEqual(runtimeManifest.modules[1].dependencies, [{
-      token: '__M5_COLOR_MODULE__',
+      token: '__ISOLATION_FIXTURE_COLOR_MODULE__',
       path: 'color.js',
     }])
 

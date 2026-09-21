@@ -2,6 +2,9 @@
 
 Status: M8.1 implementation contract
 
+Architecture debt and the proposed convergence path are tracked in
+[Runtime Harness Architecture Audit](runtime-harness-architecture-audit.md).
+
 ## Identities
 
 The protocol keeps project, view, and execution identity separate:
@@ -98,11 +101,18 @@ The Three.js Server owns:
 The Host transports standard MCP calls and rich content without interpreting Three.js
 semantics.
 
-Each request requires the exact Runtime identity and owner metadata. Commands target an
-isolated validation Runtime by default. Active Runtime access additionally requires
-`activeIntent: "user-requested"` and a current one-shot grant issued from an explicit
-Editor UI action. The Server binds that grant to the exact Runtime and owner, expires it
-after 60 seconds, and consumes it before dispatch.
+Each model request uses the opaque `runtimeRef` from the latest Editor context. The
+Server resolves that reference and creates the command under one project lock. Commands
+target an isolated validation Runtime by default. Active Runtime access requires a current
+one-shot grant issued from an explicit Editor UI action. The Server binds that grant to
+the exact Runtime and owner, expires it after 60 seconds, and consumes it before dispatch.
+`activeIntent: "user-requested"` is accepted only as a deprecated compatibility hint and
+does not grant access.
+
+The model must not infer active intent. If a request selects the active Runtime without
+explicit user confirmation, the tool stops and asks the user to align intent. After
+confirmation, a missing grant is recovered by asking the user to authorize one live
+Runtime check in the Editor; the model does not silently switch Runtime targets.
 
 The broker permits one pending command per Project and Owner. Cancellation, timeout,
 revision rollover, disposal, stale identity, foreign Session, or foreign connection
@@ -119,12 +129,19 @@ Logs use a 2,000-entry ring, 2,048-character messages, cursor pagination, and a
 500-entry response limit. Captures copy only the Runtime canvas and are bounded to
 1,024 pixels per dimension and 512 KiB of base64 data.
 
-At registration the Server issues an evidence token. The parent sends it in the initial
-Runtime bootstrap message before project code is imported. Evidence must carry that token
-back to both the parent and Server, while model-visible tool results strip it. The token
-binds evidence to the registered Runtime and prevents accidental or cross-Runtime
-attribution; project code executing in the same Runtime realm is not treated as a separate
+At registration the Server issues a Runtime token for lifecycle compatibility. Each
+Harness command additionally receives a one-shot evidence token. The parent sends the
+command token only to the selected target Runtime, and evidence must carry it back to both
+the parent and Server. Model-visible tool results strip all evidence tokens. The command
+token binds evidence to the command, target execution, projection generation, owner, and
+deadline; project code executing in the same Runtime realm is not treated as a separate
 tamper-resistant security principal.
+
+An Editor-only revision rollover preserves the mounted active iframe's execution and
+loaded build identity while advancing its projection generation. Active evidence must
+match that execution and build. Every validation command uses a distinct internal
+execution identity and may use a distinct ready build matching the exact requested Project
+and revision.
 
 ## Prompt Lifecycle
 

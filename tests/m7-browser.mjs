@@ -166,6 +166,59 @@ async function clickAppButton(appFrame, name) {
   })
 }
 
+// #region debug-point A-E:publish-trace
+async function observePixelReadback(appFrame, label, initial) {
+  const { runtime, runtimeFrame } = await runtimeSurface(appFrame)
+  const samples = [initial]
+  for (let index = 0; index < 6; index += 1) {
+    await page.waitForTimeout(100)
+    samples.push(await pixelStats(runtimeFrame))
+  }
+  const identity = await appFrame.evaluate(() => {
+    const frames = [...document.querySelectorAll('iframe.runtime-sandbox')]
+    return {
+      metrics: globalThis.__THREE_M7__.metrics().m7,
+      activeFrames: frames.filter(frame => frame.hasAttribute('data-runtime-sandbox')).length,
+      candidateFrames: frames.filter(frame => frame.hasAttribute('data-runtime-candidate')).length,
+    }
+  })
+  const screenshot = resolve(
+    process.env.M2_DEBUG_EVIDENCE_ROOT ?? artifacts,
+    `${label}.png`,
+  )
+  await runtime.screenshot({ path: screenshot })
+  await fetch('http://127.0.0.1:7778/event', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'hidden-candidate-ready-timeout',
+      runId: 'pre-fix',
+      hypothesisId: 'F,G,H',
+      location: 'tests/m7-browser.mjs:observePixelReadback',
+      msg: '[DEBUG] Post-promotion pixel samples',
+      ts: Date.now(),
+      data: { label, samples, identity, screenshot },
+    }),
+  }).catch(() => undefined)
+  return { samples, identity, screenshot }
+}
+
+async function publishCandidateDebugTrace() {
+  if (diagnosticAppFrame === undefined) return []
+  const trace = await diagnosticAppFrame.evaluate(
+    () => globalThis.__THREE_M2_DEBUG_TRACE__ ?? [],
+  ).catch(() => [])
+  await Promise.all(trace.map(entry => fetch('http://127.0.0.1:7778/event', {
+    method: 'POST',
+    body: JSON.stringify({
+      ...entry,
+      sessionId: 'hidden-candidate-ready-timeout',
+      runId: 'pre-fix',
+    }),
+  }).catch(() => undefined)))
+  return trace
+}
+// #endregion
+
 async function callHarnessTool(name, arguments_) {
   const catalogResponse = await fetch(`${webUrl}/api/mcp-apps/catalog`)
   assert.equal(catalogResponse.status, 200)
@@ -388,6 +441,11 @@ try {
   assert.equal(afterStop.build.buildId, firstRun.build.buildId)
   assert.deepEqual(runtimeWork(afterStop), runtimeWork(firstRun))
   const firstStopPixels = await pixelStats((await runtimeSurface(appFrame)).runtimeFrame)
+  const firstStopPixelEvidence = await observePixelReadback(
+    appFrame,
+    'first-stop-runtime',
+    firstStopPixels,
+  )
   assertRenderedPixels(firstStopPixels)
 
   await clickAppButton(appFrame, 'Play')
@@ -538,6 +596,11 @@ try {
   assert.equal(saveStartedWhileLifecyclePending.m7.lifecyclePending, true)
   assert.equal(saveStartedWhileLifecyclePending.sync, 'saving')
   const secondStopPixels = await pixelStats((await runtimeSurface(appFrame)).runtimeFrame)
+  const secondStopPixelEvidence = await observePixelReadback(
+    appFrame,
+    'second-stop-runtime',
+    secondStopPixels,
+  )
   assertRenderedPixels(secondStopPixels)
   await appFrame.waitForFunction(previousRevision => {
     const metrics = globalThis.__THREE_M7__.metrics()
@@ -554,6 +617,7 @@ try {
   assert.equal(immediateSaveOutcome.m7.runId, editingWhileLifecyclePending.m7.runId)
 
   assert.deepEqual(appProblems, [])
+  const candidateDebugTrace = await publishCandidateDebugTrace()
   process.stdout.write(`${JSON.stringify({
     webUrl,
     transport: 'deterministic replay',
@@ -574,6 +638,8 @@ try {
       messagesAfterStop: afterStop.messagesAfterStop,
       firstStopPixels,
       secondStopPixels,
+      firstStopPixelEvidence,
+      secondStopPixelEvidence,
       firstStopContinuity,
       secondStopContinuity,
       runtimeWork: runtimeWork(restarted),
@@ -596,9 +662,11 @@ try {
         positionX: Number(await overlapPositionX.inputValue()),
       },
     },
+    candidateDebugTrace,
     appProblems,
   }, null, 2)}\n`)
 } catch (error) {
+  const candidateDebugTrace = await publishCandidateDebugTrace()
   if (diagnosticAppFrame !== undefined) {
     const diagnostics = await diagnosticAppFrame
       .evaluate(() => ({
@@ -615,6 +683,7 @@ try {
     process.stderr.write(`M7 diagnostics:\n${JSON.stringify({
       ...diagnostics,
       runtimeTrace,
+      candidateDebugTrace,
       appProblems,
     }, null, 2)}\n`)
   }

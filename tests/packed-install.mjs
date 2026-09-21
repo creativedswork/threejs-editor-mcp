@@ -42,7 +42,7 @@ try {
 
   const packageRoot = join(installed, 'node_modules', 'threejs-editor-mcp')
   const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
-  assert.equal(manifest.version, '0.1.0')
+  assert.equal(manifest.version, '0.2.0')
   assert.equal(manifest.bin['threejs-editor-mcp'], 'dist/server.js')
   await Promise.all([
     readFile(join(packageRoot, 'dist', 'server.js')),
@@ -55,7 +55,7 @@ try {
   const command = join(installed, 'node_modules', '.bin', 'threejs-editor-mcp')
   const client = new Client({
     name: 'threejs-editor-packed-install',
-    version: '0.1.0',
+    version: '0.2.0',
   })
   await client.connect(new StdioClientTransport({
     command,

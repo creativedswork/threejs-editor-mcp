@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import {
   copyFile,
   link,
@@ -45,6 +46,45 @@ async function connect(root, allowlistedRoot, workspace, projectId = 'linked-gam
   })
   await client.connect(transport)
   return client
+}
+
+function runtimeMeta(sessionId) {
+  return {
+    'ai.deepseek.dsh/session': {
+      sessionId,
+      connectionGeneration: randomUUID(),
+    },
+  }
+}
+
+async function activateRuntime(client, projectId, revision, runId, meta) {
+  const built = await client.callTool({
+    name: 'build_project',
+    arguments: { projectId, revision },
+  })
+  assert.equal(built.structuredContent.status, 'ready')
+  const prepared = await client.callTool({
+    name: 'prepare_runtime_run',
+    arguments: {
+      projectId,
+      revision,
+      buildId: built.structuredContent.buildId,
+      runId,
+      nonce: randomUUID(),
+    },
+    _meta: meta,
+  })
+  assert.equal(prepared.isError, undefined)
+  const committed = await client.callTool({
+    name: 'commit_runtime_run',
+    arguments: {
+      projectId,
+      runtimeRef: prepared.structuredContent.runtimeRef,
+    },
+    _meta: meta,
+  })
+  assert.equal(committed.isError, undefined)
+  return committed.structuredContent
 }
 
 test('M6.1 opens the current DSH workspace without a model-visible path', async () => {
@@ -158,15 +198,14 @@ test('M8 does not release Runtime metadata through a symlinked parent', async ()
       arguments: { projectId: 'linked-game' },
     })
     const runId = '55555555-6666-4777-8888-999999999999'
-    const registered = await client.callTool({
-      name: 'register_runtime_run',
-      arguments: {
-        projectId: 'linked-game',
-        revision: opened.structuredContent.revision,
-        runId,
-      },
-    })
-    assert.equal(registered.isError, undefined)
+    const ownerMeta = runtimeMeta('symlink-parent')
+    const registered = await activateRuntime(
+      client,
+      'linked-game',
+      opened.structuredContent.revision,
+      runId,
+      ownerMeta,
+    )
 
     const diagnostics = join(workspace, '.threejs-editor', 'diagnostics')
     const externalDiagnostics = join(outside, 'diagnostics')
@@ -179,9 +218,9 @@ test('M8 does not release Runtime metadata through a symlinked parent', async ()
       name: 'release_runtime_run',
       arguments: {
         projectId: 'linked-game',
-        revision: opened.structuredContent.revision,
-        runId,
+        runtimeRef: registered.runtimeRef,
       },
+      _meta: ownerMeta,
     })
     assert.equal(released.isError, true)
     assert.match(released.content[0].text, /workspace metadata is not a regular file/)
@@ -214,14 +253,14 @@ test('M8 replaces Runtime tombstones without truncating external hard links', as
       arguments: { projectId: 'linked-game' },
     })
     const runId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
-    await client.callTool({
-      name: 'register_runtime_run',
-      arguments: {
-        projectId: 'linked-game',
-        revision: opened.structuredContent.revision,
-        runId,
-      },
-    })
+    const ownerMeta = runtimeMeta('hardlink-tombstone')
+    const registered = await activateRuntime(
+      client,
+      'linked-game',
+      opened.structuredContent.revision,
+      runId,
+      ownerMeta,
+    )
     const activePath = join(
       workspace,
       '.threejs-editor',
@@ -237,9 +276,9 @@ test('M8 replaces Runtime tombstones without truncating external hard links', as
       name: 'release_runtime_run',
       arguments: {
         projectId: 'linked-game',
-        revision: opened.structuredContent.revision,
-        runId,
+        runtimeRef: registered.runtimeRef,
       },
+      _meta: ownerMeta,
     })
     assert.equal(released.structuredContent.released, true)
     assert.equal((await readFile(activePath)).length, 0)
@@ -381,14 +420,14 @@ test('M8 does not persist a Runtime registration cancelled while waiting for its
       arguments: { projectId: 'linked-game' },
     })
     const previousRunId = '66666666-7777-4888-8999-aaaaaaaaaaaa'
-    await client.callTool({
-      name: 'register_runtime_run',
-      arguments: {
-        projectId: 'linked-game',
-        revision: opened.structuredContent.revision,
-        runId: previousRunId,
-      },
-    })
+    const ownerMeta = runtimeMeta('cancelled-registration')
+    const previous = await activateRuntime(
+      client,
+      'linked-game',
+      opened.structuredContent.revision,
+      previousRunId,
+      ownerMeta,
+    )
     const runId = '77777777-8888-4999-8aaa-bbbbbbbbbbbb'
     let releaseLock
     let notifyLock
@@ -407,12 +446,15 @@ test('M8 does not persist a Runtime registration cancelled while waiting for its
     await lockHeld
     const controller = new AbortController()
     const registration = client.callTool({
-      name: 'register_runtime_run',
+      name: 'prepare_runtime_run',
       arguments: {
         projectId: 'linked-game',
         revision: opened.structuredContent.revision,
+        buildId: previous.projection.loadedBuild.buildId,
         runId,
+        nonce: randomUUID(),
       },
+      _meta: ownerMeta,
     }, undefined, { signal: controller.signal })
     await new Promise(resolve => setTimeout(resolve, 50))
     controller.abort()
@@ -423,20 +465,11 @@ test('M8 does not persist a Runtime registration cancelled while waiting for its
       name: 'release_runtime_run',
       arguments: {
         projectId: 'linked-game',
-        revision: opened.structuredContent.revision,
-        runId,
+        runtimeRef: previous.runtimeRef,
       },
+      _meta: ownerMeta,
     })
-    assert.equal(released.structuredContent.released, false)
-    const previousReleased = await client.callTool({
-      name: 'release_runtime_run',
-      arguments: {
-        projectId: 'linked-game',
-        revision: opened.structuredContent.revision,
-        runId: previousRunId,
-      },
-    })
-    assert.equal(previousReleased.structuredContent.released, true)
+    assert.equal(released.structuredContent.released, true)
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
@@ -772,6 +805,21 @@ test('M6 workspaces preserve local files and commit revisioned atomic changes', 
       },
     })
     assert.equal(managed.structuredContent.kind, 'managed-workspace')
+    const managedEntry = await readFile(
+      join(root, '.managed-workspaces', 'managed-pong', 'src', 'main.js'),
+      'utf8',
+    )
+    assert.match(managedEntry, /export default/)
+    assert.match(managedEntry, /setup\s*\(/)
+    const managedBuild = await client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: 'managed-pong',
+        revision: managed.structuredContent.revision,
+      },
+    })
+    assert.equal(managedBuild.structuredContent.status, 'ready')
+    assert.deepEqual(managedBuild.structuredContent.diagnostics, [])
 
     const binaryTransactionEntries = await Promise.all(
       (await readdir(transactionsDirectory)).map(async name => ({

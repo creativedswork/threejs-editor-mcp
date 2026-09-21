@@ -3,9 +3,10 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   installOwnedAssetFetch,
-  m7BootstrapHtml,
+  installOwnedAssetImageSource,
+  workspaceRuntimeHtml,
   shouldPickAfterPointerGesture,
-} from '../src/m7-runtime.ts'
+} from '../src/workspace-runtime.ts'
 
 const click = {
   pointerId: 1,
@@ -34,9 +35,40 @@ test('does not select through gizmo or camera gestures', () => {
 })
 
 test('emits a syntactically valid Runtime bootstrap script', () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   assert.doesNotThrow(() => new Function(script))
+})
+
+test('degrades incompatible persisted editor operations without aborting startup', async () => {
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  const replay = script.slice(
+    script.indexOf('const replayOperations ='),
+    script.indexOf('current.transform ='),
+  )
+  assert.match(replay, /try \{\s*applyOperation\(current, operation, false\)/)
+  assert.match(replay, /restorationWarnings\.push\(warning\)/)
+  assert.match(replay, /appendLog\('warn', \[warning\]\)/)
+  assert.match(script, /editState: current\.editState,\s*restorationWarnings,/)
+  const view = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  assert.match(
+    view,
+    /for \(const warning of restorationWarnings\) recordRuntimeWarning\(\[warning\]\)/,
+  )
+  assert.match(view, /' · Restore warnings'/)
+})
+
+test('validation frame pumping yields without throttled timers', () => {
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  assert.notEqual(script, undefined)
+  const waitFrames = script.slice(
+    script.indexOf('const waitFrames = async'),
+    script.indexOf('const pointerOptions ='),
+  )
+  assert.match(waitFrames, /await yieldTask\(\)/)
+  assert.doesNotMatch(waitFrames, /setTimeout\(resolve, 0\)/)
+  assert.match(script, /const channel = new MessageChannel\(\)/)
 })
 
 test('fetches only owned Runtime asset URLs and restores fetch on teardown', async () => {
@@ -60,7 +92,7 @@ test('fetches only owned Runtime asset URLs and restores fetch on teardown', asy
   assert.equal(target.fetch, originalFetch)
   assert.equal(ownedAssets.size, 0)
 
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   assert.ok(script.indexOf('restoreAssetFetch?.()') < script.indexOf('URL.revokeObjectURL(url)'))
   assert.match(script, /__THREEJS_EDITOR_REGISTER_INLINE_ASSET__/)
@@ -68,9 +100,36 @@ test('fetches only owned Runtime asset URLs and restores fetch on teardown', asy
   assert.ok(script.includes('delete globalThis.__THREEJS_EDITOR_REGISTER_INLINE_ASSET__'))
 })
 
+test('resolves native image source aliases and restores the original setter', () => {
+  class RuntimeImage {}
+  Object.defineProperty(RuntimeImage.prototype, 'src', {
+    configurable: true,
+    get() {
+      return this.source
+    },
+    set(value) {
+      this.source = value
+    },
+  })
+  const original = Object.getOwnPropertyDescriptor(RuntimeImage.prototype, 'src')
+  const restore = installOwnedAssetImageSource(
+    { HTMLImageElement: RuntimeImage },
+    value => value === '~owned' ? 'blob:owned' : value,
+  )
+  const image = new RuntimeImage()
+  image.src = '~owned'
+  assert.equal(image.src, 'blob:owned')
+
+  restore()
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(RuntimeImage.prototype, 'src'),
+    original,
+  )
+})
+
 
 test('waits for a laid out canvas before publishing Runtime ready', () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   const layoutGuard = script.indexOf('canvas.clientWidth === 0 || canvas.clientHeight === 0')
   assert.ok(layoutGuard >= 0)
@@ -79,7 +138,7 @@ test('waits for a laid out canvas before publishing Runtime ready', () => {
 })
 
 test('retries the first Runtime frame when its canvas becomes laid out', () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   const observer = script.indexOf('current.layoutObserver = new ResizeObserver')
   assert.ok(observer >= 0)
@@ -90,7 +149,7 @@ test('retries the first Runtime frame when its canvas becomes laid out', () => {
 })
 
 test('waits for canvas layout before creating the WebGL renderer', () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   const wait = script.indexOf('await new Promise(resolve => {')
   const renderer = script.indexOf('new THREE.WebGLRenderer(options)')
@@ -118,6 +177,19 @@ test('promotes a hidden candidate before disposing the active Runtime', async ()
   assert.doesNotMatch(start, /stopM7Runtime\(false, false\)/)
 })
 
+test('binds Runtime harness targets and settles failures by stage', async () => {
+  const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
+  const execute = source.slice(
+    source.indexOf('async function executeRuntimeHarnessCommand('),
+    source.indexOf('async function pullRuntimeHarnessCommand('),
+  )
+  assert.match(execute, /targetRuntime: targetIdentity/)
+  assert.match(execute, /evidenceToken: command\.evidenceToken/)
+  assert.match(execute, /stage: 'prepare',\s*code: 'TARGET_PREPARATION_FAILED'/)
+  assert.match(execute, /stage: 'execute',\s*code: 'TARGET_EXECUTION_FAILED'/)
+  assert.match(execute, /stage: 'settle',\s*code: 'EVIDENCE_REJECTED'/)
+})
+
 test('reuses one validated Runtime artifact for an unchanged revision', async () => {
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
   const bundleFor = source.slice(
@@ -128,17 +200,19 @@ test('reuses one validated Runtime artifact for an unchanged revision', async ()
     source.indexOf('async function startM7Runtime('),
     source.indexOf('function startM7RuntimePort('),
   )
-  const cacheHit = bundleFor.indexOf('m7Bundle?.projectId === run.projectId')
+  const cacheHit = bundleFor.indexOf('const artifact = activeRuntime()?.artifact')
   const build = bundleFor.indexOf("name: 'build_project'")
   assert.ok(cacheHit >= 0)
   assert.ok(build > cacheHit)
+  assert.match(bundleFor, /artifact\?\.projectId === run\.projectId/)
+  assert.match(bundleFor, /artifact\.revision === run\.revision/)
   assert.match(bundleFor, /buildId: build\.buildId/)
   assert.match(bundleFor, /validated: false/)
   assert.match(start, /artifact = await runtimeBundleFor\(run, signal\)/)
   assert.doesNotMatch(start, /name: 'build_project'/)
   assert.doesNotMatch(start, /runtimeAssets\(/)
   assert.match(start, /const validatesArtifact = !artifact\.validated/)
-  assert.match(start, /artifact\.validated = true/)
+  assert.match(start, /artifact = \{ \.\.\.artifact, validated: true \}/)
   assert.match(source, /buildRequests: m7BuildRequests/)
   assert.match(source, /assetFetches: m7AssetFetches/)
   assert.match(source, /validationStarts: m7ValidationStarts/)
@@ -147,12 +221,12 @@ test('reuses one validated Runtime artifact for an unchanged revision', async ()
 test('projects readiness from the Runtime transition controller', async () => {
   const source = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
   assert.doesNotMatch(source, /m7StartQueue|m7PendingStartController/)
-  assert.match(source, /new RuntimeTransitionController<CommittedRuntime>/)
+  assert.match(source, /new RuntimeCoordinator</)
   assert.match(source, /function projectRuntimeUi\(/)
   assert.match(source, /runtimeEffects\.run\('model-context'/)
   assert.match(
     source,
-    /lifecyclePending: runtimeTransitions\.snapshot\(\)\.operation !== undefined/,
+    /lifecyclePending: runtimeCoordinator\.snapshot\(\)\.operation !== undefined/,
   )
 })
 
@@ -164,7 +238,7 @@ test('keeps external snapshot adoption on the lifecycle deadline', async () => {
   )
   assert.match(
     pullLatest,
-    /runtimeTransitions\.enqueue\('adopt-snapshot', M7_TRANSITION_TIMEOUT/,
+    /runtimeCoordinator\.enqueue\('adopt-snapshot', M7_TRANSITION_TIMEOUT/,
   )
 })
 
@@ -176,11 +250,11 @@ test('releases every Save path through one finally block', async () => {
   )
   assert.match(save, /finally \{/)
   assert.match(save, /root\.dataset\.sync === 'saving'/)
-  assert.match(save, /projectRuntimeUi\(runtimeTransitions\.snapshot\(\)\)/)
+  assert.match(save, /projectRuntimeUi\(runtimeCoordinator\.snapshot\(\)\)/)
 })
 
 test('does not rely on preserveSurface during Runtime replacement', async () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   assert.match(script, /!preserveSurface/)
   assert.match(
@@ -192,19 +266,21 @@ test('does not rely on preserveSurface during Runtime replacement', async () => 
 })
 
 test('keeps example cleanup failures non-fatal to Runtime teardown', () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   const exampleDispose = script.indexOf('await current.example?.dispose?.()')
-  const frameworkCleanup = script.indexOf('cleanup(() => current.renderer.dispose())', exampleDispose)
+  const cleanupFinally = script.indexOf('} finally {', exampleDispose)
+  const frameworkCleanup = script.indexOf('cleanup(() => current.renderer?.dispose())', exampleDispose)
   assert.ok(exampleDispose >= 0)
-  assert.ok(frameworkCleanup > exampleDispose)
-  assert.ok(script.slice(exampleDispose, frameworkCleanup).includes('exampleDisposeError = message(error)'))
-  assert.doesNotMatch(script.slice(exampleDispose, frameworkCleanup), /failures.push/)
+  assert.ok(cleanupFinally > exampleDispose)
+  assert.ok(frameworkCleanup > cleanupFinally)
+  assert.ok(script.slice(exampleDispose, cleanupFinally).includes('exampleDisposeError = message(error)'))
+  assert.doesNotMatch(script.slice(exampleDispose, cleanupFinally), /failures.push/)
   assert.ok(script.includes('exampleDisposeError === undefined ? {} : { exampleDisposeError }'))
 })
 
 test('keeps an async Runtime setup owned until disposal completes', () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   assert.ok(script.indexOf('active = current') < script.indexOf('current.setupPromise ='))
   assert.equal(script.match(/await current\.setupPromise/g)?.length, 2)
@@ -212,7 +288,7 @@ test('keeps an async Runtime setup owned until disposal completes', () => {
 })
 
 test('binds Runtime commands to exact identity and cancels input before stopping', () => {
-  const script = m7BootstrapHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
+  const script = workspaceRuntimeHtml().match(/<script>([\s\S]*)<\/script>/)?.[1]
   assert.notEqual(script, undefined)
   assert.match(script, /requestEpoch < eventEpoch/)
   assert.match(script, /epoch: eventEpoch/)

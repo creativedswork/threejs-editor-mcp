@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { chromium } from 'playwright'
-import { m7BootstrapHtml } from '../src/m7-runtime.ts'
+import { workspaceRuntimeHtml } from '../src/workspace-runtime.ts'
 
 const corpusRoot = resolve(process.env.THREEJS_EDITOR_MCP_WORKSPACE ?? '')
 if (corpusRoot === resolve('')) throw new Error('THREEJS_EDITOR_MCP_WORKSPACE is required')
@@ -116,7 +116,7 @@ async function loadRuntime(candidate, debugMode = 'final') {
   const iframe = page.locator('iframe')
   await iframe.evaluate((frame, html) => {
     frame.srcdoc = html
-  }, m7BootstrapHtml())
+  }, workspaceRuntimeHtml())
   const frame = await (await iframe.elementHandle()).contentFrame()
   assert.notEqual(frame, null)
   await frame.waitForSelector('canvas')

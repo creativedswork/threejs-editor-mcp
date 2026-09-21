@@ -18,12 +18,12 @@ import {
   type Plugin,
 } from 'esbuild'
 import ts from 'typescript'
-import { WORKSPACE_EDITOR_STATE_PATH } from './m7-runtime.js'
+import { WORKSPACE_EDITOR_STATE_PATH } from './workspace-runtime.js'
 
-export const BUILDER_VERSION = 'm10-loader-profile-v1'
+export const BUILDER_VERSION = 'workspace-loader-profile-v1'
 export const PINNED_RUNTIME_DEPENDENCIES = {
   three: '0.185.1',
-  postprocessing: '6.37.4',
+  postprocessing: '6.39.5',
   'three-stdlib': '2.36.0',
   'astronomy-engine': '2.1.19',
   '@petamoriken/float16': '3.9.2',
@@ -219,6 +219,8 @@ interface ModuleSpecifier {
 
 const ASSET_REQUEST =
   /^(?:(?:\/(?:dev|skills)\/|\.\.?\/|assets\/)[^"'`$?#]+\.(?:avif|basis|bin|exr|gif|glb|gltf|hdr|jpe?g|ktx2|png|webp)|\/(?:dev|skills)\/[^"'`$?#]+\/assets\/[^"'`$?#]+)(?:[?#][^"'`\s]*)?$/i
+const ASSET_DIRECTORY_REQUEST =
+  /^(?:\/(?:dev|skills)\/|\.\.?\/|assets\/)[^"'`$?#]*\/$/i
 const PINNED_THREE_RUNTIME_ASSET_DIRECTORIES = new Map<string, readonly string[]>([
   [
     '/node_modules/three/examples/jsm/libs/draco/',
@@ -327,6 +329,30 @@ export function assetStringLiterals(
   }
   visit(file)
   return literals
+}
+
+export function assetTemplateDirectories(
+  source: string,
+  path = 'workspace.js',
+): string[] {
+  const directories = new Set<string>()
+  const file = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind(path),
+  )
+  const visit = (node: ts.Node): void => {
+    if (ts.isTemplateExpression(node)
+      && !ts.isTaggedTemplateExpression(node.parent)
+      && ASSET_DIRECTORY_REQUEST.test(node.head.text)) {
+      directories.add(node.head.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return [...directories]
 }
 
 export function assetCssUrls(source: string): AssetCssUrl[] {
@@ -552,6 +578,19 @@ function runtimeAssets(files: Map<string, BuildFile>): RuntimeAssets {
       || extname(file.path).toLowerCase() === '.css') continue
     const source = new TextDecoder().decode(file.bytes)
     const ranges = moduleSpecifierRanges(source, file.path)
+    for (const directory of assetTemplateDirectories(source, file.path)) {
+      const root = (directory.startsWith('/')
+        ? posix.normalize(directory.slice(1))
+        : posix.normalize(posix.join(posix.dirname(file.path), directory)))
+        .replace(/\/$/, '')
+      if (root === '' || root === '..' || root.startsWith('../')) continue
+      const prefix = `${root}/`
+      for (const asset of files.values()) {
+        if (!asset.text && asset.path.startsWith(prefix)) {
+          aliases.set(`${directory}${asset.path.slice(prefix.length)}`, asset.sha256)
+        }
+      }
+    }
     for (const literal of assetStringLiterals(source, file.path)) {
       if (ranges.some(([start, end]) => literal.start >= start && literal.start < end)) continue
       const request = literal.request
@@ -726,7 +765,7 @@ function vfsPlugin(input: BuildWorkspaceInput, files: Map<string, BuildFile>): P
         if (!args.path.startsWith('.') && !args.path.startsWith('/')) {
           return {
             errors: [{
-              text: `dependency ${JSON.stringify(args.path)} is not in the pinned M9 profile`,
+              text: `dependency ${JSON.stringify(args.path)} is not in the pinned runtime profile`,
             }],
           }
         }
@@ -884,6 +923,9 @@ export async function buildWorkspace(input: BuildWorkspaceInput): Promise<Worksp
       format: 'esm',
       platform: 'browser',
       target: 'es2022',
+      define: {
+        'import.meta.url': JSON.stringify('https://threejs-editor.invalid/runtime/entry.js'),
+      },
       tsconfigRaw: {
         compilerOptions: {
           experimentalDecorators: true,

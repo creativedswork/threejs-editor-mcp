@@ -1,6 +1,6 @@
 {
   "name": "threejs-editor-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A lightweight Three.js editor delivered as an MCP App",
   "license": "MIT",
   "keywords": [
@@ -28,9 +28,20 @@
   },
   "files": [
     "dist",
-    "docs",
+    "docs/COMMUNITY-CASES.md",
+    "docs/DEPENDENCY-PROFILE.md",
+    "docs/MIGRATION.md",
+    "docs/USER-OPERATIONS.md",
+    "examples/runtime-contract",
+    "reports/assets/m11-six-runtime-cover.png",
+    "reports/m11-community-case-report.json",
+    "scripts/capture-case.mjs",
+    "scripts/validate-cases.mjs",
     "README.md",
     "README.zh-CN.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
@@ -59,6 +70,8 @@
     "prepare:m10:g1": "node scripts/prepare-m10-g1.mjs",
     "test:corpus:m10": "node tests/m10-corpus-build.mjs",
     "test:fixture:m10": "node tests/m10-g1-build.mjs",
+    "validate:cases": "node scripts/validate-cases.mjs",
+    "capture:case": "node scripts/capture-case.mjs",
     "check:upstream": "node scripts/sync-three-editor.mjs",
     "test:pack": "pnpm run build && node tests/packed-install.mjs",
     "check": "pnpm run check:upstream && pnpm run typecheck && pnpm run test",
@@ -71,12 +84,12 @@
     "provenance": true
   },
   "dependencies": {
-    "@petamoriken/float16": "3.9.2",
     "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "@petamoriken/float16": "3.9.2",
     "astronomy-engine": "2.1.19",
     "esbuild": "0.25.3",
-    "postprocessing": "6.37.4",
+    "postprocessing": "6.39.5",
     "three": "0.185.1",
     "three-stdlib": "2.36.0",
     "typescript": "6.0.3",

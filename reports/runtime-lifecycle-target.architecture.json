@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Three.js Editor Runtime Lifecycle",
+    "subtitle": "Target architecture: one transition owner, explicit commit boundaries, non-blocking post-commit effects",
+    "output": "reports/runtime-lifecycle-target.architecture.html",
+    "animation": "trace",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "viewBox": [1500, 850],
+    "views": [
+      {
+        "id": "critical-path",
+        "label": "Critical transition path",
+        "focus": ["editor_ui", "transition_owner", "artifact_cache", "candidate_runtime", "runtime_registry", "active_runtime"],
+        "note": "A command becomes visible only after the candidate Runtime and server identity commit together."
+      },
+      {
+        "id": "save-path",
+        "label": "Save transaction",
+        "focus": ["active_runtime", "transition_owner", "workspace_store", "runtime_registry"],
+        "note": "Save has one revision commit boundary and one UI cleanup path."
+      },
+      {
+        "id": "post-commit",
+        "label": "Post-commit effects",
+        "focus": ["transition_owner", "effect_outbox", "host_context", "telemetry"],
+        "note": "Context and diagnostics may degrade without rolling back a committed Runtime."
+      }
+    ],
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "frontend": { "label": "User surface" },
+        "backend": { "label": "Runtime control" },
+        "database": { "label": "Authority / state" },
+        "messagebus": { "label": "Post-commit effects" },
+        "external": { "label": "Host integration" }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "editor_ui",
+      "type": "frontend",
+      "label": "Editor UI",
+      "sublabel": "Play / Stop / Save / Reload",
+      "tag": "committed projection",
+      "pos": [45, 345],
+      "size": [175, 78]
+    },
+    {
+      "id": "transition_owner",
+      "type": "backend",
+      "label": "RuntimeTransitionController",
+      "sublabel": "phase + epoch + cancellation",
+      "tag": "single owner",
+      "pos": [315, 325],
+      "size": [230, 112]
+    },
+    {
+      "id": "artifact_cache",
+      "type": "cloud",
+      "label": "Build & Asset Cache",
+      "sublabel": "revision-addressed artifacts",
+      "tag": "buildId",
+      "pos": [635, 90],
+      "size": [220, 84]
+    },
+    {
+      "id": "candidate_runtime",
+      "type": "backend",
+      "label": "Candidate Runtime",
+      "sublabel": "ready + editor scene",
+      "tag": "pre-commit",
+      "pos": [635, 310],
+      "size": [220, 92]
+    },
+    {
+      "id": "active_runtime",
+      "type": "backend",
+      "label": "Active Runtime",
+      "sublabel": "visible WebGL + selection",
+      "tag": "committed",
+      "pos": [635, 530],
+      "size": [220, 92]
+    },
+    {
+      "id": "workspace_store",
+      "type": "database",
+      "label": "Workspace Store",
+      "sublabel": "source revision authority",
+      "tag": "atomic commit",
+      "pos": [995, 90],
+      "size": [220, 84]
+    },
+    {
+      "id": "runtime_registry",
+      "type": "database",
+      "label": "Runtime Registry",
+      "sublabel": "run + revision + owner",
+      "tag": "evidence authority",
+      "pos": [995, 310],
+      "size": [220, 92]
+    },
+    {
+      "id": "effect_outbox",
+      "type": "messagebus",
+      "label": "Post-Commit Outbox",
+      "sublabel": "bounded, retryable effects",
+      "tag": "no rollback",
+      "pos": [995, 565],
+      "size": [220, 92]
+    },
+    {
+      "id": "host_context",
+      "type": "external",
+      "label": "Host Model Context",
+      "sublabel": "Agent-facing projection",
+      "tag": "best effort",
+      "pos": [1285, 555],
+      "size": [175, 78]
+    },
+    {
+      "id": "telemetry",
+      "type": "external",
+      "label": "Lifecycle Telemetry",
+      "sublabel": "phase + epoch evidence",
+      "tag": "diagnostics",
+      "pos": [1285, 700],
+      "size": [175, 78]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Three.js MCP App",
+      "wraps": ["transition_owner", "artifact_cache", "candidate_runtime", "active_runtime"]
+    },
+    {
+      "kind": "region",
+      "label": "MCP Server",
+      "wraps": ["workspace_store", "runtime_registry", "effect_outbox"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "ui-command",
+      "from": "editor_ui",
+      "to": "transition_owner",
+      "label": "command",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ui-projection",
+      "from": "transition_owner",
+      "to": "editor_ui",
+      "label": "committed phase",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[430, 480], [132.5, 480]]
+    },
+    {
+      "id": "prepare-artifact",
+      "from": "transition_owner",
+      "to": "artifact_cache",
+      "label": "prepare revision",
+      "variant": "default",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [[430, 235], [590, 235], [590, 132]]
+    },
+    {
+      "id": "artifact-to-candidate",
+      "from": "artifact_cache",
+      "to": "candidate_runtime",
+      "label": "bundle + assets",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [745, 215]
+    },
+    {
+      "id": "candidate-ready",
+      "from": "candidate_runtime",
+      "to": "transition_owner",
+      "label": "ready + scene",
+      "variant": "emphasis"
+    },
+    {
+      "id": "commit-registry",
+      "from": "transition_owner",
+      "to": "runtime_registry",
+      "label": "commit run identity",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[430, 680], [930, 680], [930, 356]],
+      "labelAt": [700, 670]
+    },
+    {
+      "id": "promote-candidate",
+      "from": "candidate_runtime",
+      "to": "active_runtime",
+      "label": "atomic promote",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [745, 468]
+    },
+    {
+      "id": "commit-workspace",
+      "from": "transition_owner",
+      "to": "workspace_store",
+      "label": "commit snapshot",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [[430, 48], [930, 48], [930, 132]],
+      "labelAt": [900, 38]
+    },
+    {
+      "id": "enqueue-effects",
+      "from": "transition_owner",
+      "to": "effect_outbox",
+      "label": "after commit",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[430, 770], [950, 770], [950, 611]],
+      "labelAt": [900, 760]
+    },
+    {
+      "id": "publish-context",
+      "from": "effect_outbox",
+      "to": "host_context",
+      "label": "model context",
+      "variant": "dashed"
+    },
+    {
+      "id": "record-effects",
+      "from": "effect_outbox",
+      "to": "telemetry",
+      "label": "outcome",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[1105, 739], [1240, 739]]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Critical Boundary",
+      "items": [
+        "Only RuntimeTransitionController may change lifecycle phase",
+        "The previous Active Runtime stays visible until candidate commit",
+        "UI readiness is published after Runtime and registry agree"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Save Contract",
+      "items": [
+        "Workspace revision advances once",
+        "Runtime identity advances at the same commit boundary",
+        "Every outcome restores controls through one finally path"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Failure Isolation",
+      "items": [
+        "Context, diagnostics and telemetry run after commit",
+        "Auxiliary timeout never tears down a healthy Runtime",
+        "Every transition carries an epoch for stale-event rejection"
+      ]
+    }
+  ]
+}

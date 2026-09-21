@@ -44,6 +44,7 @@ const revisionCount = Number(process.env.M81_REVISION_COUNT ?? 20)
 const revisionTimeout = Number(process.env.M81_REVISION_TIMEOUT ?? 120_000)
 const layeringFocus = process.env.M81_LAYERING_FOCUS === '1'
 const isolationFocus = process.env.M81_ISOLATION_FOCUS === '1'
+const rolloverFocus = process.env.M81_ROLLOVER_FOCUS === '1'
 page.on('framenavigated', frame => {
   if (frame === page.mainFrame()) mainFrameNavigations += 1
 })
@@ -624,6 +625,18 @@ async function run() {
   const identityAdvanced = await appFrame.evaluate(() => globalThis.__THREE_M7__.metrics())
   assert.equal(identityAdvanced.m7.runId, initial.m7.runId)
   assert.equal(identityAdvanced.m7.nonce, initial.m7.nonce)
+  const rolloverCapture = imageEvidence(await callRuntimeTool(
+    'capture_runtime_frame',
+    {
+      projectId,
+      revision: identityAdvanced.revision,
+      runId: identityAdvanced.m7.runId,
+      nonce: identityAdvanced.m7.nonce,
+      target: 'validation',
+    },
+    ownerSessionId,
+  ))
+  writeFileSync(resolve(framesPath, 'rollover-validation.png'), rolloverCapture.bytes)
   const materialInspection = await callRuntimeTool(
     'inspect_editor',
     { projectId },
@@ -643,6 +656,22 @@ async function run() {
     await appFrame.evaluate(() => globalThis.__M81_RUNTIME_IDENTITY_MARKER__),
     runtimeMarker,
   )
+  if (rolloverFocus) {
+    process.stdout.write(`${JSON.stringify({
+      rolloverCapture: {
+        digest: rolloverCapture.digest,
+        runtime: rolloverCapture.runtime,
+        frame: rolloverCapture.frame,
+        width: rolloverCapture.width,
+        height: rolloverCapture.height,
+      },
+      initialRevision: initial.revision,
+      advancedRevision: identityAdvanced.revision,
+      runIdPreserved: identityAdvanced.m7.runId === initial.m7.runId,
+      noncePreserved: identityAdvanced.m7.nonce === initial.m7.nonce,
+    }, null, 2)}\n`)
+    return
+  }
   assert.equal(await page.locator('[data-mcp-app-view]').count(), 1)
   const identityUpdate = page.locator(
     `[data-mcp-app-update="threejs:project:${projectId}"]`,

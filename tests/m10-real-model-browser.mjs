@@ -83,7 +83,9 @@ const isolatedEnv = {
   DSH_TELEMETRY_DISABLED: '1',
   PNPM_HOME: resolve(runRoot, 'pnpm-home'),
   XDG_CACHE_HOME: resolve(runRoot, 'cache'),
-  THREEJS_EDITOR_MCP_SERVER: resolve(projectRoot, 'dist/server.js'),
+  THREEJS_EDITOR_MCP_SERVER: resolve(
+    process.env.THREEJS_EDITOR_MCP_SERVER ?? resolve(projectRoot, 'dist/server.js'),
+  ),
   THREEJS_EDITOR_MCP_ROOT: projectRoot,
   THREEJS_EDITOR_MCP_PROJECTS: projectsPath,
   THREEJS_EDITOR_MCP_WORKSPACE: workspacePath,

@@ -493,11 +493,18 @@ export class ProjectStore {
     validateProjectId(projectId)
     const snapshot = await this.load(projectId)
     const file = join(await this.root, snapshot.projectId, 'diagnostics.json')
+    let source: string
     try {
-      return diagnosticsSchema.parse(JSON.parse(await readFile(file, 'utf8')))
+      source = await readFile(file, 'utf8')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
+    }
+    try {
+      const parsed = diagnosticsSchema.safeParse(JSON.parse(source))
+      return parsed.success ? parsed.data : undefined
+    } catch {
+      return undefined
     }
   }
 

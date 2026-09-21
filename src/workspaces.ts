@@ -30,6 +30,7 @@ import { z } from 'zod'
 import {
   assetCssUrls,
   assetStringLiterals,
+  assetTemplateDirectories,
   buildIdFor,
   buildWorkspace,
   pinnedThreeRuntimeAsset,
@@ -59,7 +60,7 @@ import {
   WORKSPACE_EDITOR_STATE_PATH,
   runtimeCommandSettlementDeadline,
   type WorkspaceEditorState,
-} from './m7-runtime.js'
+} from './workspace-runtime.js'
 import {
   runtimeLockPathForWorkspace,
   withRuntimeLock as withCrossProcessRuntimeLock,
@@ -232,6 +233,18 @@ const activeRuntimeSchema = runtimeIdentitySchema.extend({
   ownerPid: z.number().int().positive(),
 })
 type ActiveRuntime = z.infer<typeof activeRuntimeSchema>
+
+function parseDisposableMetadata<T>(
+  bytes: Buffer,
+  parse: (value: unknown) => T,
+): T | undefined {
+  try {
+    return parse(JSON.parse(bytes.toString('utf8')))
+  } catch {
+    return undefined
+  }
+}
+
 export interface RegisteredRuntime extends RuntimeIdentity {
   runtimeRef: string
   evidenceToken: string
@@ -471,6 +484,7 @@ interface ActiveRuntimeGrant {
 interface RuntimeRegistry {
   active?: ActiveRuntime
   prepared?: PreparedRuntimeRun
+  preparedActiveRef?: string
   pendingProjection?: PendingRuntimeProjection
   activeGrant?: ActiveRuntimeGrant
 }
@@ -565,11 +579,23 @@ function assetSpecifiers(filePath: string, source: string): string[] {
     return [...specifiers]
   }
   for (const literal of assetStringLiterals(source, filePath)) add(literal.request)
+  for (const directory of assetTemplateDirectories(source, filePath)) add(directory)
   return [...specifiers]
 }
 
 async function dependencySource(path: string, source: string): Promise<string | undefined> {
-  const loader = new Map<string, Loader>([
+  const loader = sourceLoader(path)
+  if (loader === undefined) return undefined
+  if (loader === 'css') return source.replace(/\/\*[\s\S]*?\*\//g, '')
+  try {
+    return (await transform(source, { loader, legalComments: 'none' })).code
+  } catch {
+    return undefined
+  }
+}
+
+function sourceLoader(path: string): Loader | undefined {
+  return new Map<string, Loader>([
     ['.cjs', 'js'],
     ['.css', 'css'],
     ['.js', 'js'],
@@ -579,12 +605,23 @@ async function dependencySource(path: string, source: string): Promise<string | 
     ['.ts', 'ts'],
     ['.tsx', 'tsx'],
   ]).get(extname(path).toLowerCase())
-  if (loader === undefined) return undefined
-  if (loader === 'css') return source.replace(/\/\*[\s\S]*?\*\//g, '')
+}
+
+async function validateSourceSyntax(path: string, bytes: Buffer): Promise<void> {
+  const loader = sourceLoader(path)
+  if (loader === undefined || loader === 'css') return
+  if (!isUtf8(bytes)) throw new Error(`file ${path} must contain UTF-8 source text`)
   try {
-    return (await transform(source, { loader, legalComments: 'none' })).code
-  } catch {
-    return undefined
+    await transform(bytes.toString('utf8'), {
+      loader,
+      legalComments: 'none',
+      sourcefile: path,
+      target: 'es2022',
+    })
+  } catch (error) {
+    throw new Error(`file ${path} has invalid source syntax: ${
+      error instanceof Error ? error.message : String(error)
+    }`)
   }
 }
 
@@ -699,6 +736,75 @@ function defaultWorkspaceConfig(
       },
     },
   }
+}
+
+function managedTemplateSource(project: Project): string {
+  const lifecycleBody = project.script.source
+    .split('\n')
+    .map(line => `    ${line}`)
+    .join('\n')
+  return [
+    "import * as THREE from 'three'",
+    "import project from './scene.json'",
+    '',
+    'function createLifecycle(THREE) {',
+    lifecycleBody,
+    '}',
+    '',
+    'export default {',
+    "  backend: 'webgl',",
+    `  renderer: { options: { antialias: ${String(project.renderer.antialias)} } },`,
+    '  setup({ scene, camera, renderer, canvas }) {',
+    '    const importedScene = new THREE.ObjectLoader().parse(project.scene)',
+    '    scene.background = importedScene.background',
+    '    scene.environment = importedScene.environment',
+    '    scene.fog = importedScene.fog',
+    '    scene.add(...importedScene.children)',
+    '    const importedCamera = new THREE.ObjectLoader().parse(project.camera)',
+    '    if (importedCamera.isCamera) camera.copy(importedCamera)',
+    `    renderer.shadowMap.enabled = ${String(project.renderer.shadows)}`,
+    '    const keys = new Set()',
+    '    const pointer = { x: 0, y: 0, buttons: new Set() }',
+    '    const updatePointer = event => {',
+    '      const bounds = canvas.getBoundingClientRect()',
+    '      pointer.x = (event.clientX - bounds.left) / bounds.width * 2 - 1',
+    '      pointer.y = -((event.clientY - bounds.top) / bounds.height * 2 - 1)',
+    '    }',
+    '    const keyDown = event => keys.add(event.key.toLowerCase())',
+    '    const keyUp = event => keys.delete(event.key.toLowerCase())',
+    '    const pointerDown = event => { updatePointer(event); pointer.buttons.add(event.button) }',
+    '    const pointerUp = event => { updatePointer(event); pointer.buttons.delete(event.button) }',
+    "    canvas.addEventListener('keydown', keyDown)",
+    "    canvas.addEventListener('keyup', keyUp)",
+    "    canvas.addEventListener('pointermove', updatePointer)",
+    "    canvas.addEventListener('pointerdown', pointerDown)",
+    "    canvas.addEventListener('pointerup', pointerUp)",
+    '    const input = { keys, pointer }',
+    '    const context = { THREE, scene, camera, renderer, input }',
+    '    const lifecycle = createLifecycle(THREE)',
+    '    lifecycle.start?.(context)',
+    '    return {',
+    '      update({ delta }) { lifecycle.update?.(context, delta) },',
+    '      dispose() {',
+    '        lifecycle.dispose?.(context)',
+    "        canvas.removeEventListener('keydown', keyDown)",
+    "        canvas.removeEventListener('keyup', keyUp)",
+    "        canvas.removeEventListener('pointermove', updatePointer)",
+    "        canvas.removeEventListener('pointerdown', pointerDown)",
+    "        canvas.removeEventListener('pointerup', pointerUp)",
+    '        scene.traverse(object => {',
+    '          object.geometry?.dispose()',
+    '          const materials = Array.isArray(object.material)',
+    '            ? object.material',
+    '            : [object.material]',
+    '          for (const material of materials) material?.dispose()',
+    '        })',
+    '      },',
+    '    }',
+    '  },',
+    '}',
+    '',
+  ].join('\n')
 }
 
 export class WorkspaceStore {
@@ -999,7 +1105,7 @@ export class WorkspaceStore {
         dependencies: { three: '0.185.1' },
         devDependencies: { vite: '^7.0.0' },
       }), { flag: 'wx', mode: 0o600 })
-      await writeFile(join(path, 'src', 'main.js'), `${project.script.source}\n`, {
+      await writeFile(join(path, 'src', 'main.js'), managedTemplateSource(project), {
         flag: 'wx',
         mode: 0o600,
       })
@@ -1092,7 +1198,12 @@ export class WorkspaceStore {
       throw new Error('managed import source update exceeds 100 changed files')
     }
     if (changes.length > 0) {
-      await this.apply(projectId, current.revision, changes)
+      await this.commitChanges(
+        projectId,
+        current.revision,
+        changes,
+        this.quota.maxFileBytes,
+      )
     }
     await this.writeAtomic(
       registration.path,
@@ -1271,7 +1382,9 @@ export class WorkspaceStore {
           )).toString('utf8'),
         }
       }
-      if (cached?.status === 'failed') return cached
+      if (cached?.status === 'failed') {
+        return cached
+      }
 
       input.files = await Promise.all(Object.entries(snapshot.manifest.files).map(
         async ([path, file]) => ({
@@ -1475,7 +1588,11 @@ export class WorkspaceStore {
         expiresAt: Date.now() + ttlMs,
       }
       const registry = this.runtimeRegistries.get(key) ?? {}
-      this.runtimeRegistries.set(key, { ...registry, prepared })
+      this.runtimeRegistries.set(key, {
+        ...registry,
+        prepared,
+        preparedActiveRef: registry.active?.runtimeRef,
+      })
       return prepared
     })
   }
@@ -1498,10 +1615,11 @@ export class WorkspaceStore {
       }
       const prepared = registry.prepared
       const active = registry.active
-      const activeMatches = expectedActiveRef === undefined
-        ? active === undefined
-        : active?.runtimeRef === expectedActiveRef
-      if (!activeMatches) {
+      const expectedMatches = expectedActiveRef === undefined
+        || expectedActiveRef === registry.preparedActiveRef
+      const activeMatches = active === undefined
+        || active.runtimeRef === registry.preparedActiveRef
+      if (!expectedMatches || !activeMatches) {
         throw new Error('active Runtime changed before candidate commit')
       }
       const { snapshot, activePath } = await this.validateRuntimeBuild(
@@ -1643,7 +1761,12 @@ export class WorkspaceStore {
       if (workspace === undefined) throw new Error(`unknown workspace ${projectId}`)
       const active = this.resolveRuntimeReference(projectId, runtimeRef, owner)
       const key = this.runtimeKey(projectId, owner)
-      const released = this.runtimeRegistries.delete(key)
+      const registry = this.runtimeRegistries.get(key)!
+      const released = registry.active !== undefined
+      delete registry.active
+      delete registry.pendingProjection
+      delete registry.activeGrant
+      if (registry.prepared === undefined) this.runtimeRegistries.delete(key)
       await this.clearActiveRuntime(
         workspace.path,
         active.projection.workspaceRevision,
@@ -1760,16 +1883,18 @@ export class WorkspaceStore {
       }
       this.runtimeCommands.set(command.commandId, pending)
       if (signal !== undefined) {
-        const activePending = pending
-        activePending.abort = () => {
-          if (this.runtimeCommands.get(command.commandId) !== activePending) return
+        pending.abort = () => {
+          const current = this.runtimeCommands.get(command.commandId)
+          if (current === undefined
+            || current.phase === 'settled'
+            || current.registryKey !== key) return
           this.rejectRuntimeCommand(key, {
             status: 'cancelled',
             reason: 'Runtime Harness command cancelled',
           })
         }
-        signal.addEventListener('abort', activePending.abort, { once: true })
-        if (signal.aborted) activePending.abort()
+        signal.addEventListener('abort', pending.abort, { once: true })
+        if (signal.aborted) pending.abort()
       }
     })
     return promise.finally(() => {
@@ -1996,10 +2121,12 @@ export class WorkspaceStore {
       const snapshot = await this.loadUnlocked(projectId)
       if (snapshot.revision !== revision) throw new RevisionConflictError(snapshot.revision)
       try {
-        const document = JSON.parse((await this.readMetadataFile(
+        const bytes = await this.readMetadataFile(
           snapshot.path,
           this.metadataPath(snapshot.path, 'editor-scenes', `${revision}.json`),
-        )).toString('utf8'))
+        )
+        const document = parseDisposableMetadata(bytes, value => value)
+        if (document === undefined) return undefined
         const runId = typeof document === 'object' && document !== null
           && 'runId' in document && typeof document.runId === 'string'
           ? document.runId
@@ -2070,10 +2197,12 @@ export class WorkspaceStore {
     return this.withLock(projectId, async () => {
       const snapshot = await this.loadUnlocked(projectId)
       try {
-        const diagnostics = diagnosticsSchema.parse(JSON.parse((await this.readMetadataFile(
+        const bytes = await this.readMetadataFile(
           snapshot.path,
           this.metadataPath(snapshot.path, 'diagnostics', 'runtime.json'),
-        )).toString('utf8')))
+        )
+        const diagnostics = parseDisposableMetadata(bytes, value => diagnosticsSchema.parse(value))
+        if (diagnostics === undefined) return undefined
         const activeRuntime = owner === undefined
           ? await this.readActiveRuntime(snapshot.path)
           : this.runtimeRegistries.get(this.runtimeKey(projectId, owner))?.active
@@ -2103,12 +2232,40 @@ export class WorkspaceStore {
     if (changes.length === 0 || changes.length > 100) {
       throw new Error('workspace change batch must contain 1 to 100 operations')
     }
+    if (projectionTtlMs !== undefined
+      && (!Number.isSafeInteger(projectionTtlMs) || projectionTtlMs < 1)) {
+      throw new Error('pending Runtime projection TTL must be a positive integer')
+    }
+    const committed = await this.commitChanges(
+      projectId,
+      baseRevision,
+      changes,
+      MAX_MUTATION_BYTES,
+      expectedRunId,
+      signal,
+      owner,
+      projectionTtlMs,
+    )
+    return committed.pendingProjection === undefined
+      ? committed.snapshot
+      : { ...committed.snapshot, pendingProjection: committed.pendingProjection }
+  }
+
+  private async commitChanges(
+    projectId: string,
+    baseRevision: string,
+    changes: WorkspaceChange[],
+    maxWriteBytes: number,
+    expectedRunId?: string,
+    signal?: AbortSignal,
+    owner?: RuntimeOwner,
+    projectionTtlMs?: number,
+  ): Promise<WorkspaceCommitResult> {
     return this.withLock(projectId, async () => {
       signal?.throwIfAborted()
       const registration = this.workspaces.get(projectId)
       if (registration === undefined) throw new Error(`unknown workspace ${projectId}`)
       let activeRuntime: ActiveRuntime | undefined
-      const commit = async (): Promise<WorkspaceSnapshot> => {
       const current = await this.loadUnlocked(projectId)
       if (current.revision !== baseRevision) {
         throw new RevisionConflictError(current.revision)
@@ -2129,13 +2286,13 @@ export class WorkspaceStore {
           throw new Error('runtime run changed before editor commands were applied')
         }
       }
-      const normalized = await this.normalizeChanges(current, changes)
       if (projectionTtlMs !== undefined && activeRuntime === undefined) {
         throw new RuntimeProtocolError(
           'RUNTIME_PROJECTION_STALE',
           'Runtime projection cannot be prepared without an owned active execution',
         )
       }
+      const normalized = await this.normalizeChanges(current, changes, maxWriteBytes)
       if (normalized.length === 0) throw new Error('workspace change batch has no effect')
       const editorState = expectedRunId === undefined
         ? normalized.find(change => change.path === WORKSPACE_EDITOR_STATE_PATH)
@@ -2236,10 +2393,8 @@ export class WorkspaceStore {
         )
         throw error
       }
-      return this.loadUnlocked(projectId)
-      }
-      const snapshot = await commit()
-      if (projectionTtlMs === undefined) return snapshot
+      const snapshot = await this.loadUnlocked(projectId)
+      if (projectionTtlMs === undefined) return { snapshot }
       const pendingProjection: PendingRuntimeProjection = {
         transitionId: randomUUID(),
         execution: activeRuntime!.execution,
@@ -2257,7 +2412,7 @@ export class WorkspaceStore {
         )
       }
       registry.pendingProjection = pendingProjection
-      return { ...snapshot, pendingProjection }
+      return { snapshot, pendingProjection }
     })
   }
 
@@ -2287,6 +2442,7 @@ export class WorkspaceStore {
   private async normalizeChanges(
     snapshot: WorkspaceSnapshot,
     changes: WorkspaceChange[],
+    maxWriteBytes = MAX_MUTATION_BYTES,
   ): Promise<TransactionChange[]> {
     const state = new Map(Object.entries(snapshot.manifest.files)
       .map(([path, file]) => [path, file.sha256]))
@@ -2304,9 +2460,10 @@ export class WorkspaceStore {
         if (candidate.base64 !== undefined && bytes.toString('base64') !== candidate.base64) {
           throw new Error(`file ${path} is not canonical base64`)
         }
-        if (bytes.length > MAX_MUTATION_BYTES) {
+        if (bytes.length > maxWriteBytes) {
           throw new Error(`file ${path} exceeds the 1 MiB tool mutation limit`)
         }
+        await validateSourceSyntax(path, bytes)
         const hash = await this.writeObject(snapshot.path, bytes)
         state.set(path, hash)
       } else if (candidate.type === 'delete') {
@@ -2425,6 +2582,7 @@ export class WorkspaceStore {
       if (registry.prepared?.expiresAt !== undefined
         && registry.prepared.expiresAt <= now) {
         delete registry.prepared
+        delete registry.preparedActiveRef
       }
       if (registry.active === undefined
         && registry.prepared === undefined
@@ -2574,7 +2732,7 @@ export class WorkspaceStore {
         allowHardlinks,
       )
       if (bytes.length === 0) return undefined
-      return activeRuntimeSchema.parse(JSON.parse(bytes.toString('utf8')))
+      return parseDisposableMetadata(bytes, value => activeRuntimeSchema.parse(value))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
@@ -2680,7 +2838,24 @@ export class WorkspaceStore {
       source.root,
       projectFilePath(source.projectPath, 'example.json'),
     )
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    let manifest: Record<string, unknown>
+    try {
+      const parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('example.json must contain an object')
+      }
+      manifest = parsed as Record<string, unknown>
+    } catch (error) {
+      return {
+        projectPath: projectPath === '' ? '.' : projectPath,
+        title: projectPath.split('/').at(-1) ?? 'Three.js example',
+        format: 'example-gallery',
+        entry: projectFilePath(source.projectPath, 'scene.js'),
+        backend: 'webgl',
+        available: false,
+        issue: `Invalid example.json: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
     const title = typeof manifest.title === 'string' && manifest.title.trim() !== ''
       ? manifest.title.slice(0, 120)
       : projectPath.split('/').at(-1) ?? 'Three.js example'
@@ -2831,7 +3006,9 @@ export class WorkspaceStore {
       for (const specifier of moduleSpecifiers(sourceText, filePath)) {
         if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
           if (!isProfileSpecifier(specifier)) {
-            throw new Error(`dependency ${JSON.stringify(specifier)} is not in the pinned M9 profile`)
+            throw new Error(
+              `dependency ${JSON.stringify(specifier)} is not in the pinned runtime profile`,
+            )
           }
           continue
         }
@@ -2892,9 +3069,10 @@ export class WorkspaceStore {
     importer: string,
   ): Promise<string[]> {
     const clean = request.split('?')[0]!
-    const candidate = clean.startsWith('/')
+    const candidate = (clean.startsWith('/')
       ? posix.normalize(clean.slice(1))
-      : posix.normalize(posix.join(posix.dirname(importer), clean))
+      : posix.normalize(posix.join(posix.dirname(importer), clean)))
+      .replace(/\/$/, '')
     if (candidate === '' || candidate === '..' || candidate.startsWith('../')) return []
     if (source.galleryCorpus
       && !candidate.startsWith('dev/')
@@ -3050,15 +3228,17 @@ export class WorkspaceStore {
   }
 
   private async readStoredBuild(path: string, buildId: string): Promise<StoredBuild | undefined> {
+    let bytes: Buffer
     try {
-      return storedBuild(JSON.parse((await this.readMetadataFile(
+      bytes = await this.readMetadataFile(
         path,
         this.metadataPath(path, 'builds', buildId, 'build.json'),
-      )).toString('utf8')))
+      )
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
       throw error
     }
+    return parseDisposableMetadata(bytes, storedBuild)
   }
 
   private async readHead(path: string): Promise<string | undefined> {
@@ -3274,8 +3454,12 @@ export class WorkspaceStore {
     try {
       const bytes = await file.readFile()
       if (bytes.length === 0) return false
-      const activeRuntime = activeRuntimeSchema.parse(JSON.parse(bytes.toString('utf8')))
-      if (!this.ownsActiveRuntime(activeRuntime)
+      const activeRuntime = parseDisposableMetadata(
+        bytes,
+        value => activeRuntimeSchema.parse(value),
+      )
+      if (activeRuntime === undefined
+        || !this.ownsActiveRuntime(activeRuntime)
         || activeRuntime.projection.workspaceRevision !== revision
         || activeRuntime.execution.runId !== runId) return false
     } finally {

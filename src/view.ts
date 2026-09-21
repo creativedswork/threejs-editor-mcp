@@ -23,19 +23,19 @@ import {
   type OfficialCommandProof,
 } from './official-editor.js'
 import {
-  M5_COMMAND_PROOF_RESOURCE_URI,
-  M5_RUNTIME_RESOURCE_URI,
-  type M5RuntimeManifest,
-} from './m5-runtime.js'
+  RUNTIME_ISOLATION_COMMAND_PROOF_URI,
+  RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI,
+  type RuntimeIsolationFixtureManifest,
+} from './runtime-isolation-fixture.js'
 import {
-  M7_RUNTIME_CHANNEL,
+  WORKSPACE_RUNTIME_CHANNEL,
   RUNTIME_COMMAND_SETTLEMENT_GRACE_MS,
   WORKSPACE_EDITOR_STATE_PATH,
-  m7BootstrapHtml,
-  type M7RuntimeEvent,
+  workspaceRuntimeHtml,
+  type WorkspaceRuntimeEvent,
   type PointerPickGesture,
   shouldPickAfterPointerGesture,
-} from './m7-runtime.js'
+} from './workspace-runtime.js'
 import { RuntimeAssetCache } from './runtime-asset-cache.js'
 import { RuntimeEffects } from './runtime-effects.js'
 import {
@@ -338,7 +338,7 @@ interface M7EditorSceneReport {
 
 function required<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector)
-  if (element === null) throw new Error(`threejs editor M4 view is missing ${selector}`)
+  if (element === null) throw new Error(`Three.js Editor view is missing ${selector}`)
   return element
 }
 
@@ -522,6 +522,21 @@ function runtimeMessage(error: unknown): string {
   return (error instanceof Error ? error.stack ?? error.message : String(error)).slice(0, 2_000)
 }
 
+function runtimeSummary(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : String(error)
+  let summary = message
+  try {
+    const parsed = JSON.parse(message)
+    const issue = Array.isArray(parsed) ? record(parsed[0]) : undefined
+    if (typeof issue?.message === 'string') {
+      const path = Array.isArray(issue.path) ? issue.path.join('.') : ''
+      summary = `${path === '' ? '' : `${path}: `}${issue.message}`
+    }
+  } catch {}
+  summary = summary.replace(/\s+/g, ' ').trim()
+  return summary === '' ? undefined : summary.slice(0, 500)
+}
+
 function assetMediaType(file: File): AssetMediaType {
   const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0]
   if (extension === '.glb') return 'model/gltf-binary'
@@ -678,7 +693,7 @@ let restoreConsoleWarn: (() => void) | undefined
 let editorDisabled = true
 let importedAssets: string[] = []
 let m5ActiveRun: { runId: string; nonce: string } | undefined
-let m5Manifest: M5RuntimeManifest | undefined
+let m5Manifest: RuntimeIsolationFixtureManifest | undefined
 let m5ResourceReads = 0
 let m5Events: M5RuntimeEvent[] = []
 let m5Errors: string[] = []
@@ -686,7 +701,7 @@ let m5Ready: Record<string, unknown> | undefined
 let m5ServerCommandProof: OfficialCommandProof | undefined
 let m5MessagesAfterStop = 0
 let m5FrameAtStop: number | undefined
-let m7Events: M7RuntimeEvent[] = []
+let m7Events: WorkspaceRuntimeEvent[] = []
 let m7Errors: string[] = []
 let m7Ready: Record<string, unknown> | undefined
 let m7Metrics: Record<string, unknown> | undefined
@@ -719,7 +734,7 @@ const M7_REQUEST_TIMEOUT = 120_000
 const M7_LIFECYCLE_TIMEOUT = 10_000
 const M7_TRANSITION_TIMEOUT = 300_000
 const runtimeEffects = new RuntimeEffects(M7_LIFECYCLE_TIMEOUT, ({ name, error }) => {
-  recordRuntimeWarning([`${name} unavailable: ${runtimeMessage(error).split('\n')[0]}`])
+  recordRuntimeWarning([`${name} unavailable: ${runtimeSummary(error) ?? 'unknown error'}`])
 })
 let publishedRuntimeIdentity: string | undefined
 const runtimeCoordinator = new RuntimeCoordinator<
@@ -2315,7 +2330,7 @@ async function publishOpenFailure(
   signal: AbortSignal,
 ): Promise<void> {
   const capabilities = app.getHostCapabilities()
-  const failure = runtimeMessage(error).split('\n')[0]?.slice(0, 500)
+  const failure = runtimeSummary(error)
   if (capabilities?.updateModelContext !== undefined) {
     await app.updateModelContext({
       content: [{
@@ -2393,7 +2408,7 @@ function m5BootstrapHtml(): string {
   </style>
 </head>
 <body>
-  <canvas width="720" height="420" aria-label="M5 isolated runtime canvas"></canvas>
+  <canvas width="720" height="420" aria-label="Runtime isolation fixture canvas"></canvas>
   <script>
   (() => {
     const channel = 'threejs-editor-m5-runtime'
@@ -2422,7 +2437,7 @@ function m5BootstrapHtml(): string {
     }
     const link = manifest => {
       if (!manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.modules)) {
-        throw new Error('invalid M5 module manifest')
+        throw new Error('Invalid Runtime isolation fixture module manifest')
       }
       const byPath = new Map()
       for (const module of manifest.modules) {
@@ -2437,7 +2452,7 @@ function m5BootstrapHtml(): string {
         byPath.set(module.path, url)
       }
       const entry = byPath.get(manifest.entry)
-      if (!entry) throw new Error('missing M5 entry module')
+      if (!entry) throw new Error('Runtime isolation fixture entry module is missing')
       return entry
     }
 
@@ -2463,7 +2478,9 @@ function m5BootstrapHtml(): string {
           await stop(runId, nonce)
           const entry = link(request.manifest)
           const module = await import(entry)
-          if (typeof module.start !== 'function') throw new Error('M5 entry must export start')
+          if (typeof module.start !== 'function') {
+            throw new Error('Runtime isolation fixture entry must export start')
+          }
           active = { runId, nonce }
           const api = await module.start(canvas, (type, data) => emit(runId, nonce, type, data))
           active = { ...active, ...api }
@@ -2561,7 +2578,7 @@ function waitForM5Event(type: string, runId: string, timeout = 8_000): Promise<M
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       window.removeEventListener('message', listener)
-      reject(new Error(`timed out waiting for M5 ${type}`))
+      reject(new Error(`Timed out waiting for Runtime isolation fixture ${type}`))
     }, timeout)
     const listener = (event: MessageEvent<unknown>) => {
       if (event.source !== runtimeFrame().contentWindow) return
@@ -2580,7 +2597,7 @@ function waitForM5Event(type: string, runId: string, timeout = 8_000): Promise<M
 function postM5(action: string, payload: Record<string, unknown> = {}): void {
   const frameElement = runtimeFrame()
   if (m5ActiveRun === undefined || frameElement.contentWindow === null) {
-    throw new Error('M5 runtime is not active')
+    throw new Error('Runtime isolation fixture is not active')
   }
   frameElement.contentWindow.postMessage({
     channel: 'threejs-editor-m5-runtime',
@@ -2593,7 +2610,10 @@ function postM5(action: string, payload: Record<string, unknown> = {}): void {
 function loadM5Frame(): Promise<void> {
   return new Promise((resolve, reject) => {
     const frameElement = runtimeFrame()
-    const timer = window.setTimeout(() => reject(new Error('M5 runtime frame load timed out')), 5_000)
+    const timer = window.setTimeout(
+      () => reject(new Error('Runtime isolation fixture frame load timed out')),
+      5_000,
+    )
     frameElement.addEventListener('load', () => {
       window.clearTimeout(timer)
       resolve()
@@ -2603,27 +2623,27 @@ function loadM5Frame(): Promise<void> {
   })
 }
 
-async function readM5Resources(): Promise<M5RuntimeManifest> {
+async function readM5Resources(): Promise<RuntimeIsolationFixtureManifest> {
   const [runtimeResource, proofResource] = await Promise.all([
-    app.readServerResource({ uri: M5_RUNTIME_RESOURCE_URI }),
-    app.readServerResource({ uri: M5_COMMAND_PROOF_RESOURCE_URI }),
+    app.readServerResource({ uri: RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI }),
+    app.readServerResource({ uri: RUNTIME_ISOLATION_COMMAND_PROOF_URI }),
   ])
   m5ResourceReads += 2
-  const manifest = JSON.parse(resourceText(runtimeResource, M5_RUNTIME_RESOURCE_URI)) as unknown
+  const manifest = JSON.parse(resourceText(runtimeResource, RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI)) as unknown
   const candidate = record(manifest)
   if (candidate?.schemaVersion !== 1
     || typeof candidate.entry !== 'string'
     || !Array.isArray(candidate.modules)) {
-    throw new Error('M5 runtime resource returned an invalid manifest')
+    throw new Error('Runtime isolation fixture resource returned an invalid manifest')
   }
   m5ServerCommandProof = JSON.parse(
-    resourceText(proofResource, M5_COMMAND_PROOF_RESOURCE_URI),
+    resourceText(proofResource, RUNTIME_ISOLATION_COMMAND_PROOF_URI),
   ) as OfficialCommandProof
   const localProof = officialCommandProof()
   if (JSON.stringify(m5ServerCommandProof) !== JSON.stringify(localProof)) {
     throw new Error('Node and App official Command proofs differ')
   }
-  return manifest as M5RuntimeManifest
+  return manifest as RuntimeIsolationFixtureManifest
 }
 
 async function stopIsolatedRuntime(): Promise<Record<string, unknown> | undefined> {
@@ -2640,12 +2660,12 @@ async function stopIsolatedRuntime(): Promise<Record<string, unknown> | undefine
   m5ActiveRun = undefined
   runtimeFrame().hidden = true
   runtimeFrame().srcdoc = '<!doctype html><title>Stopped</title>'
-  status.textContent = 'M5 Runtime stopped'
+  status.textContent = 'Runtime isolation fixture stopped'
   return event.data
 }
 
 async function startIsolatedRuntime(
-  transform?: (manifest: M5RuntimeManifest) => M5RuntimeManifest,
+  transform?: (manifest: RuntimeIsolationFixtureManifest) => RuntimeIsolationFixtureManifest,
 ): Promise<Record<string, unknown>> {
   if (m5ActiveRun !== undefined) await stopIsolatedRuntime()
   m5Events = []
@@ -2664,10 +2684,10 @@ async function startIsolatedRuntime(
   if (event.type === 'build-error') {
     const error = typeof event.data?.message === 'string' ? event.data.message : 'build error'
     m5Errors.push(error)
-    status.textContent = 'M5 build error observed'
+    status.textContent = 'Runtime isolation fixture build error observed'
   } else {
     m5Ready = event.data ?? {}
-    status.textContent = 'M5 isolated WebGL2 Runtime'
+    status.textContent = 'Isolated WebGL2 Runtime'
   }
   return event.data ?? {}
 }
@@ -2703,9 +2723,9 @@ function waitForM7Event(
   run: M7Run,
   timeout = 120_000,
   signal?: AbortSignal,
-  accept?: (event: M7RuntimeEvent) => boolean,
+  accept?: (event: WorkspaceRuntimeEvent) => boolean,
   frameElement: HTMLIFrameElement = runtimeFrame(),
-): Promise<M7RuntimeEvent> {
+): Promise<WorkspaceRuntimeEvent> {
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {
       window.clearTimeout(timer)
@@ -2714,16 +2734,16 @@ function waitForM7Event(
     }
     const abort = (): void => {
       cleanup()
-      reject(new Error('M7 Runtime start cancelled'))
+      reject(new Error('Workspace Runtime start cancelled'))
     }
     const timer = window.setTimeout(() => {
       cleanup()
-      reject(new Error(`timed out waiting for M7 ${types.join(' or ')}`))
+      reject(new Error(`Timed out waiting for Workspace Runtime ${types.join(' or ')}`))
     }, timeout)
     const listener = (event: MessageEvent<unknown>) => {
       const candidate = record(event.data)
       if (event.source !== frameElement.contentWindow) return
-      if (candidate?.channel !== M7_RUNTIME_CHANNEL
+      if (candidate?.channel !== WORKSPACE_RUNTIME_CHANNEL
         || candidate.epoch !== runtimeCoordinator.snapshot().epoch
         || candidate.projectId !== run.projectId
         || candidate.runId !== run.runId
@@ -2731,7 +2751,7 @@ function waitForM7Event(
         || candidate.revision !== run.revision
         || typeof candidate.type !== 'string'
         || !types.includes(candidate.type)) return
-      const runtimeEvent = event.data as M7RuntimeEvent
+      const runtimeEvent = event.data as WorkspaceRuntimeEvent
       if (accept !== undefined && !accept(runtimeEvent)) return
       cleanup()
       resolve(runtimeEvent)
@@ -2759,7 +2779,7 @@ async function setM7Mode(
   run: M7Run,
   mode: 'edit' | 'run',
   signal?: AbortSignal,
-): Promise<M7RuntimeEvent> {
+): Promise<WorkspaceRuntimeEvent> {
   const changed = waitForM7Event(
     ['mode', 'runtime-error'],
     run,
@@ -2784,10 +2804,10 @@ function postM7Run(
   frameElement: HTMLIFrameElement = runtimeFrame(),
 ): void {
   if (frameElement.contentWindow === null) {
-    throw new Error('M7 runtime is not active')
+    throw new Error('Workspace Runtime is not active')
   }
   frameElement.contentWindow.postMessage({
-    channel: M7_RUNTIME_CHANNEL,
+    channel: WORKSPACE_RUNTIME_CHANNEL,
     epoch: runtimeCoordinator.snapshot().epoch,
     action,
     ...run,
@@ -2797,7 +2817,7 @@ function postM7Run(
 
 function postM7(action: string, payload: Record<string, unknown> = {}): void {
   const run = activeRun()
-  if (run === undefined) throw new Error('M7 runtime is not active')
+  if (run === undefined) throw new Error('Workspace Runtime is not active')
   postM7Run(run, action, payload)
 }
 
@@ -2817,16 +2837,16 @@ function loadM7Frame(
     }
     const aborted = (): void => {
       cleanup()
-      reject(new Error('M7 Runtime start cancelled'))
+      reject(new Error('Workspace Runtime start cancelled'))
     }
     const timer = window.setTimeout(() => {
       cleanup()
-      reject(new Error('M7 runtime frame load timed out'))
+      reject(new Error('Workspace Runtime frame load timed out'))
     }, 30_000)
     frameElement.addEventListener('load', loaded, { once: true })
     signal.addEventListener('abort', aborted, { once: true })
     frameElement.hidden = false
-    frameElement.srcdoc = m7BootstrapHtml()
+    frameElement.srcdoc = workspaceRuntimeHtml()
   })
 }
 
@@ -3131,7 +3151,7 @@ async function executeRuntimeHarnessCommand(command: RuntimeHarnessCommand): Pro
     event => event.data?.commandId === command.commandId,
     frameElement,
   )
-  let event: M7RuntimeEvent
+  let event: WorkspaceRuntimeEvent
   try {
     postM7Run(targetRun, 'harness-command', {
       commandId: command.commandId,
@@ -3283,7 +3303,7 @@ async function disposeM7Runtime(
     recordRuntimeWarning([`Example cleanup warning: ${event.data.exampleDisposeError}`])
   }
   if (typeof event.data?.disposeError === 'string') {
-    throw new Error(`M7 Runtime teardown failed: ${event.data.disposeError}`)
+    throw new Error(`Workspace Runtime teardown failed: ${event.data.disposeError}`)
   }
   return event.data
 }
@@ -3408,7 +3428,7 @@ async function startM7Runtime(
     if (!runtimeCoordinator.isCurrent(token)
       || starting.signal.aborted
       || runtimeCoordinator.snapshot().candidate !== starting) {
-      throw new Error('M7 Runtime start cancelled')
+      throw new Error('Workspace Runtime start cancelled')
     }
     await loadM7Frame(starting.signal, candidateFrame)
     const ready = waitForM7Event(
@@ -3444,7 +3464,7 @@ async function startM7Runtime(
     if (!runtimeCoordinator.isCurrent(token)
       || starting.signal.aborted
       || runtimeCoordinator.snapshot().candidate !== starting) {
-      throw new Error('M7 Runtime start cancelled')
+      throw new Error('Workspace Runtime start cancelled')
     }
     if (readyEvent.type === 'runtime-error' || initialSceneEvent.type === 'runtime-error') {
       const failed = readyEvent.type === 'runtime-error' ? readyEvent : initialSceneEvent
@@ -3452,6 +3472,11 @@ async function startM7Runtime(
         ? failed.data.message
         : 'Workspace Runtime failed')
     }
+    const restorationWarnings = Array.isArray(readyEvent.data?.restorationWarnings)
+      ? readyEvent.data.restorationWarnings.filter(
+          (warning): warning is string => typeof warning === 'string',
+        )
+      : []
     let sceneEvent = initialSceneEvent
     if (restoredDraftOperations.length > 0) {
       editorScene = waitForM7Event(
@@ -3537,6 +3562,7 @@ async function startM7Runtime(
     m7MessagesAfterStop = 0
     m7EditorSceneAccepted = true
     acceptRuntimeEditorScene(objects as EditorObjectSnapshot[], committedRun, projected)
+    for (const warning of restorationWarnings) recordRuntimeWarning([warning])
     if (mode === 'run') {
       playingProject = serializeProject()
       playingRevision = startRevision
@@ -3546,9 +3572,10 @@ async function startM7Runtime(
       playingRevision = undefined
       playingRuntimeState = undefined
     }
-    status.textContent = mode === 'run'
+    status.textContent = (mode === 'run'
       ? `${String(build.backend).toUpperCase()} Runtime`
-      : `${String(build.backend).toUpperCase()} Edit`
+      : `${String(build.backend).toUpperCase()} Edit`)
+      + (restorationWarnings.length === 0 ? '' : ' · Restore warnings')
     if (previousRun === undefined) {
       previousFrame.remove()
     } else {
@@ -3582,7 +3609,7 @@ async function startM7Runtime(
     if (cleanupErrors.length > 0) {
       throw new AggregateError(
         [error, ...cleanupErrors],
-        'M7 Runtime start cleanup failed',
+        'Workspace Runtime start cleanup failed',
       )
     }
     if (!cancelled) throw error
@@ -3623,21 +3650,22 @@ async function failM7Runtime(run: M7Run, message: string): Promise<void> {
   } catch (error) {
     if (error !== failure) recordRuntimeError(error)
   }
-  status.textContent = `Runtime error: ${message.split('\n')[0]}`
+  status.textContent = `Runtime error: ${runtimeSummary(message) ?? 'unknown error'}`
 }
+
 
 window.addEventListener('message', event => {
   if (event.source !== runtimeFrame().contentWindow) return
   if (tearingDown) return
   const candidate = record(event.data)
-  if (candidate?.channel !== M7_RUNTIME_CHANNEL
+  if (candidate?.channel !== WORKSPACE_RUNTIME_CHANNEL
     || candidate.epoch !== runtimeCoordinator.snapshot().epoch
     || typeof candidate.projectId !== 'string'
     || typeof candidate.runId !== 'string'
     || typeof candidate.nonce !== 'string'
     || typeof candidate.revision !== 'string'
     || typeof candidate.type !== 'string') return
-  const runtimeEvent = event.data as M7RuntimeEvent
+  const runtimeEvent = event.data as WorkspaceRuntimeEvent
   if (m7DisposedRuns.has(runtimeEvent.runId)) {
     m7MessagesAfterStop += 1
     return
@@ -3888,18 +3916,20 @@ async function stopGamePort(
 
   let finalStatus = runtimeErrors.length === 0
     ? stopWorkspace === undefined ? reason : `${stopWorkspace.backend.toUpperCase()} Edit`
-    : `Runtime error: ${runtimeErrors[0]?.split('\n')[0] ?? 'unknown error'}`
+    : `Runtime error: ${runtimeSummary(runtimeErrors[0]) ?? 'unknown error'}`
   if (stopWorkspace !== undefined
     && activeRun() !== undefined
     && m7RunIsCurrent(activeRun()!)) {
     status.textContent = 'Restoring editor'
     try {
       const token = context.epoch
+      const run = activeRun()
+      if (run === undefined) throw new Error('Workspace Runtime is not active')
       await startM7RuntimePort(context, 'edit', restoreRuntimeState)
     } catch (error) {
       if (!stopIsCurrent()) throw new Error('Stop transition became stale')
       recordRuntimeError(error)
-      finalStatus = `Editor restore failed: ${runtimeMessage(error).split('\n')[0]}`
+      finalStatus = `Editor restore failed: ${runtimeSummary(error) ?? 'unknown error'}`
       throw error
     }
   }
@@ -3942,7 +3972,7 @@ function stopGame(reason = 'Stopped', report = true): Promise<void> {
 
 function handleTransitionFailure(error: unknown): void {
   if (tearingDown) return
-  status.textContent = `Runtime cleanup failed: ${runtimeMessage(error).split('\n')[0]}`
+  status.textContent = `Runtime cleanup failed: ${runtimeSummary(error) ?? 'unknown error'}`
 }
 
 function canApplyEditorRevision(snapshot: RemoteSnapshot): boolean {
@@ -4882,7 +4912,7 @@ async function saveProjectPort(
 
 save.addEventListener('click', () => {
   void runSave(saveProjectPort).catch(error => {
-    if (!tearingDown) status.textContent = runtimeMessage(error).split('\n')[0]
+    if (!tearingDown) status.textContent = runtimeSummary(error) ?? 'Save failed'
   })
 })
 
@@ -5281,7 +5311,7 @@ const diagnostics = {
     return manifest
   }),
   triggerM5Unhandled: async () => {
-    if (m5ActiveRun === undefined) throw new Error('M5 runtime is not active')
+    if (m5ActiveRun === undefined) throw new Error('Runtime isolation fixture is not active')
     const event = waitForM5Event('unhandled-rejection', m5ActiveRun.runId)
     postM5('trigger-unhandled')
     return (await event).data
@@ -5289,14 +5319,14 @@ const diagnostics = {
   stopM5Fixture: () => stopIsolatedRuntime(),
   requestM7Metrics: async () => {
     const run = activeRun()
-    if (run === undefined) throw new Error('M7 runtime is not active')
+    if (run === undefined) throw new Error('Workspace Runtime is not active')
     const result = waitForM7Event(['metrics'], run)
     postM7('metrics')
     return (await result).data
   },
   setM7DebugMode: async (mode: string) => {
     const run = activeRun()
-    if (run === undefined) throw new Error('M7 runtime is not active')
+    if (run === undefined) throw new Error('Workspace Runtime is not active')
     if (!workspace?.debugModes.includes(mode)) throw new Error(`unknown debug mode ${mode}`)
     const result = waitForM7Event(['debug-mode'], run)
     runtimeDebug.value = mode
@@ -5305,7 +5335,7 @@ const diagnostics = {
   },
   setM7TimeScale: async (timeScale: number) => {
     const run = activeRun()
-    if (run === undefined) throw new Error('M7 runtime is not active')
+    if (run === undefined) throw new Error('Workspace Runtime is not active')
     const result = waitForM7Event(['time-scale'], run)
     postM7('set-time-scale', { timeScale })
     return (await result).data

@@ -41,6 +41,11 @@ const startupTimeout = Number(process.env.M9_START_TIMEOUT ?? 120_000)
 if (workspacePath === projectRoot) throw new Error('THREEJS_EDITOR_MCP_WORKSPACE is required')
 const startedAt = Date.now()
 
+// #region debug-point A:collector-config
+const debugServerUrl = readFileSync(resolve(projectRoot, '.dbg/m9-app-view-loading.env'), 'utf8').match(/DEBUG_SERVER_URL=(.+)/)?.[1] ?? 'http://127.0.0.1:7778/event'
+const debugRunId = process.env.M9_DEBUG_RUN_ID ?? 'pre-fix'
+// #endregion
+
 function stage(message) {
   process.stderr.write(`[m9-ui +${String(Date.now() - startedAt)}ms] ${message}\n`)
 }
@@ -288,7 +293,52 @@ async function readyComposer() {
 async function appFrame() {
   stage('waiting for editor app frame')
   const outer = page.locator('iframe[title="MCP App: mcp__threejs__open_editor"]').last()
-  await outer.waitFor({ state: 'visible', timeout: startupTimeout })
+  // #region debug-point A:E:view-selection
+  const [catalog, frames] = await Promise.all([
+    fetch(`${webUrl}/api/mcp-apps/catalog`).then(response => response.json()),
+    page.locator('iframe[title="MCP App: mcp__threejs__open_editor"]').evaluateAll(elements => elements.map((element, index) => ({
+      index,
+      src: element.getAttribute('src'),
+      status: element.parentElement?.querySelector('[data-mcp-app-status]')?.getAttribute('data-mcp-app-status'),
+    }))),
+  ])
+  await fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'A,E', location: 'tests/m9-ui-browser.mjs:appFrame', msg: '[DEBUG] view selection snapshot', data: { catalog, frames }, ts: Date.now() }) }).catch(() => {})
+  // #endregion
+  // #region debug-point B:D:direct-view-probe
+  const currentView = catalog.items.find(item => item.publicToolName === 'mcp__threejs__open_editor')
+  try {
+    const response = await fetch(`${webUrl}/api/mcp-apps/view`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ viewId: currentView?.viewId }), signal: AbortSignal.timeout(5_000) })
+    const body = await response.text()
+    await fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'B,D', location: 'tests/m9-ui-browser.mjs:direct-view-probe', msg: '[DEBUG] direct view probe completed', data: { status: response.status, bodyBytes: Buffer.byteLength(body) }, ts: Date.now() }) }).catch(() => {})
+  } catch (error) {
+    await fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'B,D', location: 'tests/m9-ui-browser.mjs:direct-view-probe', msg: '[DEBUG] direct view probe failed', data: { error: String(error) }, ts: Date.now() }) }).catch(() => {})
+  }
+  // #endregion
+  // #region debug-point A:E:attached-view
+  await outer.waitFor({ state: 'attached', timeout: 10_000 }).catch(() => {})
+  const attachedFrames = await page.locator('iframe[title="MCP App: mcp__threejs__open_editor"]').evaluateAll(elements => elements.map((element, index) => ({
+    index,
+    src: element.getAttribute('src'),
+    visible: Boolean(element.getClientRects().length),
+    hostStatus: element.parentElement?.querySelector('[data-mcp-app-status]')?.getAttribute('data-mcp-app-status'),
+    hostText: element.parentElement?.textContent?.slice(0, 200),
+  })))
+  await fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'A,E', location: 'tests/m9-ui-browser.mjs:attached-view', msg: '[DEBUG] attached view snapshot', data: { attachedFrames }, ts: Date.now() }) }).catch(() => {})
+  // #endregion
+  try {
+    await outer.waitFor({ state: 'visible', timeout: startupTimeout })
+  } catch (error) {
+    // #region debug-point A:E:timeout-dom
+    const appNodes = await page.locator('[data-mcp-app-status], [data-mcp-app-update], [data-mcp-app-error], iframe[title^="MCP App:"]').evaluateAll(elements => elements.map(element => ({
+      tag: element.tagName,
+      text: element.textContent?.slice(0, 300),
+      attributes: Object.fromEntries([...element.attributes].map(attribute => [attribute.name, attribute.value])),
+      visible: Boolean(element.getClientRects().length),
+    })))
+    await fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'A,E', location: 'tests/m9-ui-browser.mjs:timeout-dom', msg: '[DEBUG] view timeout DOM snapshot', data: { appNodes }, ts: Date.now() }) }).catch(() => {})
+    // #endregion
+    throw error
+  }
   const shell = await (await outer.elementHandle()).contentFrame()
   assert.notEqual(shell, null)
   const inner = shell.locator('iframe')
@@ -382,6 +432,21 @@ try {
     }
   })
   page.on('pageerror', error => browserProblem('pageerror', error.message))
+  // #region debug-point A:C:view-request
+  page.on('request', request => {
+    if (request.url().endsWith('/api/mcp-apps/view')) void fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'A,C', location: 'tests/m9-ui-browser.mjs:request', msg: '[DEBUG] view request started', data: { body: request.postDataJSON(), frames: page.frames().map(frame => ({ name: frame.name(), url: frame.url() })) }, ts: Date.now() }) }).catch(() => {})
+  })
+  // #endregion
+  // #region debug-point B:D:view-response
+  page.on('response', response => {
+    if (response.url().endsWith('/api/mcp-apps/view')) void fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'B,D', location: 'tests/m9-ui-browser.mjs:response', msg: '[DEBUG] view response completed', data: { status: response.status() }, ts: Date.now() }) }).catch(() => {})
+  })
+  // #endregion
+  // #region debug-point B:C:view-failure
+  page.on('requestfailed', request => {
+    if (request.url().endsWith('/api/mcp-apps/view')) void fetch(debugServerUrl, { method: 'POST', body: JSON.stringify({ sessionId: 'm9-app-view-loading', runId: debugRunId, hypothesisId: 'B,C', location: 'tests/m9-ui-browser.mjs:requestfailed', msg: '[DEBUG] view request failed', data: { failure: request.failure() }, ts: Date.now() }) }).catch(() => {})
+  })
+  // #endregion
 
   stage(`navigating to ${webUrl}`)
   await page.goto(webUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })

@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
-const serverPath = fileURLToPath(new URL('../dist/server.js', import.meta.url))
+const serverPath = resolve(
+  process.env.THREEJS_EDITOR_MCP_SERVER
+    ?? fileURLToPath(new URL('../dist/server.js', import.meta.url)),
+)
 
 test('normalized Runtime registry and broker preserve identity invariants', async () => {
   const root = await mkdtemp(join(tmpdir(), 'threejs-editor-r5-projects-'))
@@ -55,13 +58,37 @@ test('normalized Runtime registry and broker preserve identity invariants', asyn
       name: 'build_project',
       arguments: { projectId: 'game', revision },
     })
-    const candidate = {
+    const metadata = join(workspace, '.threejs-editor')
+    await writeFile(
+      join(metadata, 'builds', built.structuredContent.buildId, 'build.json'),
+      '{"schemaVersion":0}\n',
+    )
+    const rebuilt = await client.callTool({
+      name: 'build_project',
+      arguments: { projectId: 'game', revision },
+    })
+    assert.equal(rebuilt.isError, undefined)
+    assert.equal(rebuilt.structuredContent.status, 'ready')
+    assert.equal(rebuilt.structuredContent.buildId, built.structuredContent.buildId)
+    let candidate = {
       projectId: 'game',
       revision,
-      buildId: built.structuredContent.buildId,
+      buildId: rebuilt.structuredContent.buildId,
       runId: '22222222-2222-4222-8222-222222222222',
       nonce: '33333333-3333-4333-8333-333333333333',
     }
+    const diagnostics = join(metadata, 'diagnostics')
+    await mkdir(diagnostics, { recursive: true })
+    await writeFile(join(diagnostics, 'active-run.json'), JSON.stringify({
+      sessionId: 'legacy-runtime',
+      connectionGeneration: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      revision,
+      runId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      nonce: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      evidenceToken: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      ownerId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      ownerPid: process.pid,
+    }))
 
     const prepared = await client.callTool({
       name: 'prepare_runtime_run',
@@ -84,7 +111,7 @@ test('normalized Runtime registry and broker preserve identity invariants', asyn
       },
     })
 
-    const committed = await client.callTool({
+    let committed = await client.callTool({
       name: 'commit_runtime_run',
       arguments: {
         projectId: candidate.projectId,
@@ -93,14 +120,86 @@ test('normalized Runtime registry and broker preserve identity invariants', asyn
       _meta: ownerMeta,
     })
     assert.equal(committed.isError, undefined)
+
+    candidate = {
+      ...candidate,
+      runId: '66666666-6666-4666-8666-666666666666',
+      nonce: '77777777-7777-4777-8777-777777777777',
+    }
+    const remountPrepared = await client.callTool({
+      name: 'prepare_runtime_run',
+      arguments: candidate,
+      _meta: ownerMeta,
+    })
+    const wrongBaseline = await client.callTool({
+      name: 'commit_runtime_run',
+      arguments: {
+        projectId: candidate.projectId,
+        runtimeRef: remountPrepared.structuredContent.runtimeRef,
+        expectedActiveRef: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(wrongBaseline.isError, true)
+    assert.match(wrongBaseline.content[0].text, /active Runtime changed/)
+    committed = await client.callTool({
+      name: 'commit_runtime_run',
+      arguments: {
+        projectId: candidate.projectId,
+        runtimeRef: remountPrepared.structuredContent.runtimeRef,
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(committed.isError, undefined)
+
+    candidate = {
+      ...candidate,
+      runId: '88888888-8888-4888-8888-888888888888',
+      nonce: '99999999-9999-4999-8999-999999999999',
+    }
+    const teardownPrepared = await client.callTool({
+      name: 'prepare_runtime_run',
+      arguments: candidate,
+      _meta: ownerMeta,
+    })
+    const released = await client.callTool({
+      name: 'release_runtime_run',
+      arguments: {
+        projectId: candidate.projectId,
+        runtimeRef: committed.structuredContent.runtimeRef,
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(released.structuredContent.released, true)
+    committed = await client.callTool({
+      name: 'commit_runtime_run',
+      arguments: {
+        projectId: candidate.projectId,
+        runtimeRef: teardownPrepared.structuredContent.runtimeRef,
+      },
+      _meta: ownerMeta,
+    })
+    assert.equal(committed.isError, undefined)
+
     const runtimeRef = committed.structuredContent.runtimeRef
     const address = { projectId: candidate.projectId, runtimeRef }
+    await writeFile(join(diagnostics, 'runtime.json'), '{"schemaVersion":0}\n')
+    const editorScenes = join(metadata, 'editor-scenes')
+    await mkdir(editorScenes, { recursive: true })
+    await writeFile(join(editorScenes, `${revision}.json`), JSON.stringify({
+      schemaVersion: 0,
+      runId: candidate.runId,
+      objects: 'legacy',
+    }))
+    const inspected = await client.callTool({
+      name: 'inspect_project',
+      arguments: { projectId: candidate.projectId },
+      _meta: ownerMeta,
+    })
+    assert.equal(inspected.isError, undefined)
+    assert.equal(inspected.structuredContent.diagnostics, undefined)
     assert.deepEqual(
-      (await client.callTool({
-        name: 'inspect_project',
-        arguments: { projectId: candidate.projectId },
-        _meta: ownerMeta,
-      })).structuredContent.runtime,
+      inspected.structuredContent.runtime,
       address,
     )
 

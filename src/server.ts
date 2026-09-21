@@ -43,15 +43,15 @@ import {
   type EditorObjectSnapshot,
 } from './official-editor.js'
 import {
-  M5_COMMAND_PROOF_RESOURCE_URI,
-  M5_RUNTIME_MANIFEST,
-  M5_RUNTIME_RESOURCE_URI,
-} from './m5-runtime.js'
+  RUNTIME_ISOLATION_COMMAND_PROOF_URI,
+  RUNTIME_ISOLATION_FIXTURE_MANIFEST,
+  RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI,
+} from './runtime-isolation-fixture.js'
 import {
   RUNTIME_COMMAND_MIN_TIMEOUT_MS,
   WORKSPACE_EDITOR_STATE_PATH,
   type WorkspaceEditorState,
-} from './m7-runtime.js'
+} from './workspace-runtime.js'
 import {
   WorkspaceStore,
   RESOURCE_CHUNK_BYTES,
@@ -172,6 +172,7 @@ const runtimeHarnessTargetSchema = runtimeTargetSchema.default('validation').des
 const activeIntentSchema = z.literal('user-requested').optional().describe(
   'Deprecated compatibility hint. Editor-issued authorization is the sole authority.',
 )
+const normalizedPointSchema = z.array(z.number().min(0).max(1)).length(2) as unknown as z.ZodType<[number, number]>
 const playerActionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.enum(['pointerMove', 'pointerDown', 'pointerUp', 'click']),
@@ -181,8 +182,8 @@ const playerActionSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('drag'),
-    from: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)]),
-    to: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)]),
+    from: normalizedPointSchema,
+    to: normalizedPointSchema,
     button: z.number().int().min(0).max(4).default(0),
     steps: z.number().int().min(1).max(60).default(8),
   }),
@@ -422,7 +423,7 @@ const editorObjectSchema = z.object({
   material: editorMaterialSchema.optional(),
   commands: z.array(z.string()),
 })
-const vector3Schema = z.tuple([z.number(), z.number(), z.number()])
+const vector3Schema = z.array(z.number()).length(3) as unknown as z.ZodType<[number, number, number]>
 const sceneOperationSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('update_object'),
@@ -512,6 +513,12 @@ const runtimeEditorSceneSchema = z.object({
   runId: z.string().uuid(),
   objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
 })
+
+function runtimeEditorScene(value: unknown): z.infer<typeof runtimeEditorSceneSchema> | undefined {
+  const parsed = runtimeEditorSceneSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
 const editorChangeSchema = z.object({
   source: z.enum(['human', 'ai', 'unknown']),
   type: z.enum([
@@ -1347,7 +1354,7 @@ function viewHtml(script: string): string {
   </style>
 </head>
 <body>
-  <main data-three-editor data-phase="M7" data-ui-mode="scene-only" data-ui-direction="ethereal-glass" data-visual-style="taste-ethereal-glass" data-sync="loading" data-play-state="stopped" data-webgl="pending">
+  <main data-three-editor data-phase="workspace" data-ui-mode="scene-only" data-ui-direction="ethereal-glass" data-visual-style="taste-ethereal-glass" data-sync="loading" data-play-state="stopped" data-webgl="pending">
     <header class="topbar">
       <input class="title" data-title aria-label="Project title" maxlength="120" disabled>
       <span class="spacer"></span>
@@ -1684,9 +1691,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         undefined,
         owner,
       )
-      const reported = reportedDocument === undefined
-        ? undefined
-        : runtimeEditorSceneSchema.parse(reportedDocument)
+      const reported = runtimeEditorScene(reportedDocument)
       if (reported !== undefined) {
         objects = reported.objects.map(object => ({
           name: object.name,
@@ -2146,19 +2151,18 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
           undefined,
           runtimeOwner(_meta, false),
         )
-    const objects = reported === undefined
-      ? inspectEditor(snapshot.project)
-      : runtimeEditorSceneSchema.parse(reported).objects
+    const parsedReported = runtimeEditorScene(reported)
+    const objects = parsedReported?.objects ?? inspectEditor(snapshot.project)
     let changes: Array<z.infer<typeof editorChangeSchema>> = []
     if (workspace !== undefined
-      && reported !== undefined
+      && parsedReported !== undefined
       && workspace.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
       const [file] = await workspaces.readFiles(projectId, [{
         path: WORKSPACE_EDITOR_STATE_PATH,
       }])
       changes = editorChanges(
         workspaceEditorStateSchema.parse(JSON.parse(file!.text!)),
-        runtimeEditorSceneSchema.parse(reported).objects as EditorObjectSnapshot[],
+        parsedReported.objects as EditorObjectSnapshot[],
       )
     }
     const detail = {
@@ -2236,13 +2240,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
           throw new Error('Human Workspace editor commands require a Runtime runId')
         }
         const owner = runtimeOwner(_meta, false)
-        const reportedDocument = await workspaces.readEditorScene(
+        const reported = runtimeEditorScene(await workspaces.readEditorScene(
           projectId,
           baseRevision,
           undefined,
           owner,
-        )
-        if (reportedDocument === undefined) {
+        ))
+        if (reported === undefined) {
           if (runId !== undefined) {
             throw new Error('Runtime editor scene is unavailable for this run')
           }
@@ -2267,7 +2271,6 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             },
           )
         }
-        const reported = runtimeEditorSceneSchema.parse(reportedDocument)
         if (runId !== undefined && runId !== reported.runId) {
           throw new Error('Runtime editor scene is unavailable for this run')
         }
@@ -2504,7 +2507,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'check_project', {
     title: 'Check Three.js project',
-    description: 'Checks scene projects or builds the exact current Workspace revision.',
+    description: 'Checks project sources/build and reports Runtime verification separately.',
     inputSchema: { projectId: projectIdSchema },
     outputSchema: z.object({
       projectId: projectIdSchema,
@@ -2512,6 +2515,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       revision: revisionSchema,
       errors: z.array(z.string()),
       warnings: z.array(z.string()),
+      runtimeStatus: z.enum(['not-reported', 'stale', 'current']),
       testedRevision: revisionSchema.optional(),
       testedAt: z.string().optional(),
       runId: z.string().uuid().optional(),
@@ -2553,15 +2557,25 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     const playDiagnostics = workspace === undefined
       ? await store.readDiagnostics(projectId)
       : await workspaces.readDiagnostics(projectId, runtimeOwner(_meta, false))
+    let runtimeStatus: 'not-reported' | 'stale' | 'current'
+    let diagnosticsProvenance: string
     if (playDiagnostics === undefined) {
+      runtimeStatus = 'not-reported'
       warnings.push('Play diagnostics have not been reported')
+      diagnosticsProvenance =
+        ' Runtime verification is inconclusive because Play diagnostics have not been reported.'
+    } else if (playDiagnostics.testedRevision !== snapshot.revision) {
+      runtimeStatus = 'stale'
+      warnings.push(`Play diagnostics apply to older revision ${playDiagnostics.testedRevision}`)
+      diagnosticsProvenance =
+        ` Runtime verification is inconclusive because Play diagnostics apply to older revision ${playDiagnostics.testedRevision}.`
     } else {
-      if (playDiagnostics.testedRevision !== snapshot.revision) {
-        warnings.push(`Play diagnostics apply to older revision ${playDiagnostics.testedRevision}`)
-      } else {
-        errors.push(...playDiagnostics.errors)
-        warnings.push(...playDiagnostics.warnings)
-      }
+      runtimeStatus = 'current'
+      errors.push(...playDiagnostics.errors)
+      warnings.push(...playDiagnostics.warnings)
+      diagnosticsProvenance =
+        ` Diagnostics tested revision ${playDiagnostics.testedRevision}`
+        + `${playDiagnostics.runId === undefined ? '' : ` with run ${playDiagnostics.runId}`}.`
     }
     if (workspace === undefined) {
       try {
@@ -2570,12 +2584,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         errors.push(`asset validation error: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    const diagnosticsProvenance = playDiagnostics === undefined
-      ? ''
-      : ` Diagnostics tested revision ${playDiagnostics.testedRevision}`
-        + `${playDiagnostics.runId === undefined ? '' : ` with run ${playDiagnostics.runId}`}.`
     return textResult(
-      `Checked ${projectId} at revision ${snapshot.revision}: `
+      `Checked project sources/build for ${projectId} at revision ${snapshot.revision}: `
       + `${String(errors.length)} errors, ${String(warnings.length)} warnings.`
       + diagnosticsProvenance,
       {
@@ -2584,6 +2594,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         revision: snapshot.revision,
         errors,
         warnings,
+        runtimeStatus,
         ...playDiagnostics === undefined ? {} : {
           testedRevision: playDiagnostics.testedRevision,
           testedAt: playDiagnostics.updatedAt,
@@ -2863,25 +2874,25 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     },
   )
 
-  server.registerResource('m5-runtime-module-graph', M5_RUNTIME_RESOURCE_URI, {
-    title: 'M5 isolated runtime module graph',
+  server.registerResource('runtime-isolation-module-graph', RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI, {
+    title: 'Runtime isolation module graph',
     description: 'A deterministic two-module WebGL2 and WebGPU capability fixture.',
     mimeType: 'application/json',
   }, async (): Promise<ReadResourceResult> => ({
     contents: [{
-      uri: M5_RUNTIME_RESOURCE_URI,
+      uri: RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI,
       mimeType: 'application/json',
-      text: JSON.stringify(M5_RUNTIME_MANIFEST),
+      text: JSON.stringify(RUNTIME_ISOLATION_FIXTURE_MANIFEST),
     }],
   }))
 
-  server.registerResource('m5-official-editor-command-proof', M5_COMMAND_PROOF_RESOURCE_URI, {
-    title: 'M5 Three.js Editor command proof',
+  server.registerResource('runtime-isolation-command-proof', RUNTIME_ISOLATION_COMMAND_PROOF_URI, {
+    title: 'Runtime isolation Three.js Editor command proof',
     description: 'Round-trip evidence from the pinned Three.js r185 Command and History sources.',
     mimeType: 'application/json',
   }, async (): Promise<ReadResourceResult> => ({
     contents: [{
-      uri: M5_COMMAND_PROOF_RESOURCE_URI,
+      uri: RUNTIME_ISOLATION_COMMAND_PROOF_URI,
       mimeType: 'application/json',
       text: JSON.stringify(officialCommandProof()),
     }],
@@ -2937,6 +2948,25 @@ const positiveInteger = (name: string, value: string | undefined): number | unde
   return parsed
 }
 
+class SerializedStdioServerTransport extends StdioServerTransport {
+  private sendTail = Promise.resolve()
+
+  override send(
+    message: Parameters<StdioServerTransport['send']>[0],
+  ): Promise<void> {
+    const send = this.sendTail.then(() => this.sendOne(message))
+    this.sendTail = send.catch(() => {})
+    return send
+  }
+
+  private async sendOne(
+    message: Parameters<StdioServerTransport['send']>[0],
+  ): Promise<void> {
+    const before = process.stdout.listenerCount('drain')
+    await super.send(message)
+  }
+}
+
 await createServer(
   new ProjectStore(root),
   new WorkspaceStore(
@@ -2955,4 +2985,4 @@ await createServer(
       ),
     },
   ),
-).connect(new StdioServerTransport())
+).connect(new SerializedStdioServerTransport())

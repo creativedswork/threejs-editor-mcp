@@ -1,6 +1,6 @@
 import type { EditorCommandOperation } from './official-editor.js'
 
-export const M7_RUNTIME_CHANNEL = 'threejs-editor-m7-runtime'
+export const WORKSPACE_RUNTIME_CHANNEL = 'threejs-editor-m7-runtime'
 export const WORKSPACE_EDITOR_STATE_PATH = 'threejs.editor.json'
 export const RUNTIME_COMMAND_MIN_TIMEOUT_MS = 2_000
 export const RUNTIME_COMMAND_SETTLEMENT_GRACE_MS = 2_000
@@ -101,8 +101,8 @@ export interface WorkspaceEditorState {
   }>
 }
 
-export interface M7RuntimeEvent {
-  channel: typeof M7_RUNTIME_CHANNEL
+export interface WorkspaceRuntimeEvent {
+  channel: typeof WORKSPACE_RUNTIME_CHANNEL
   epoch: number
   projectId: string
   runId: string
@@ -170,6 +170,24 @@ export function installOwnedAssetFetch(
   }
 }
 
+export function installOwnedAssetImageSource(
+  target: { HTMLImageElement: { prototype: object } },
+  resolveAsset: (url: string) => string,
+): () => void {
+  const prototype = target.HTMLImageElement.prototype
+  const source = Object.getOwnPropertyDescriptor(prototype, 'src')
+  if (source?.set === undefined) return () => {}
+  Object.defineProperty(prototype, 'src', {
+    ...source,
+    set(value: string) {
+      source.set!.call(this, resolveAsset(value))
+    },
+  })
+  return () => {
+    Object.defineProperty(prototype, 'src', source)
+  }
+}
+
 export function stableEditorUuid(value: string): string {
   const hash = (seed: number): number => {
     let result = seed >>> 0
@@ -199,7 +217,7 @@ export function stableEditorUuid(value: string): string {
   ].join('-')
 }
 
-export function m7BootstrapHtml(): string {
+export function workspaceRuntimeHtml(): string {
   return `<!doctype html>
 <html>
 <head>
@@ -213,10 +231,11 @@ export function m7BootstrapHtml(): string {
   <canvas aria-label="Three.js Workspace editor canvas"></canvas>
   <script>
   (() => {
-    const channel = ${JSON.stringify(M7_RUNTIME_CHANNEL)}
+    const channel = ${JSON.stringify(WORKSPACE_RUNTIME_CHANNEL)}
     const stableEditorUuid = ${stableEditorUuid.toString()}
     const shouldPickAfterPointerGesture = ${shouldPickAfterPointerGesture.toString()}
     const installOwnedAssetFetch = ${installOwnedAssetFetch.toString()}
+    const installOwnedAssetImageSource = ${installOwnedAssetImageSource.toString()}
     const disposeOwnedRuntimeResources = ${disposeOwnedRuntimeResources.toString()}
     const runtimeGpuCapability = ${runtimeGpuCapability.toString()}
     const runtimeGpuCapabilityError = ${runtimeGpuCapabilityError.toString()}
@@ -228,6 +247,7 @@ export function m7BootstrapHtml(): string {
     let assetUrls = new Map()
     let assetBlobs = new Map()
     let restoreAssetFetch
+    let restoreAssetImageSource
     let eventProjectId
     let eventRevision
     let eventEpoch = 0
@@ -681,15 +701,24 @@ export function m7BootstrapHtml(): string {
         const widthScale = maxWidth / Math.max(1, canvas.width)
         const heightScale = maxHeight / Math.max(1, canvas.height)
         const scale = Math.min(1, widthScale, heightScale)
-        const width = Math.max(1, Math.round(canvas.width * scale))
-        const height = Math.max(1, Math.round(canvas.height * scale))
+        let width = Math.max(1, Math.round(canvas.width * scale))
+        let height = Math.max(1, Math.round(canvas.height * scale))
         const output = document.createElement('canvas')
-        output.width = width
-        output.height = height
-        output.getContext('2d').drawImage(canvas, 0, 0, width, height)
         const mimeType = request.format === 'jpeg' ? 'image/jpeg' : 'image/png'
-        const url = output.toDataURL(mimeType, 0.9)
-        const data = url.slice(url.indexOf(',') + 1)
+        const encode = () => {
+          output.width = width
+          output.height = height
+          output.getContext('2d').drawImage(canvas, 0, 0, width, height)
+          const url = output.toDataURL(mimeType, 0.9)
+          return url.slice(url.indexOf(',') + 1)
+        }
+        let data = encode()
+        while (data.length > 512 * 1024 && (width > 64 || height > 64)) {
+          const shrink = Math.min(0.9, Math.sqrt((512 * 1024) / data.length) * 0.95)
+          width = Math.max(64, Math.floor(width * shrink))
+          height = Math.max(64, Math.floor(height * shrink))
+          data = encode()
+        }
         const bytes = Uint8Array.from(atob(data), character => character.charCodeAt(0))
         if (data.length > 512 * 1024) throw new Error('Runtime frame exceeds the evidence limit')
         return {
@@ -739,6 +768,15 @@ export function m7BootstrapHtml(): string {
         truncated: cursor < oldest || matching.length > limit,
       }
     }
+    const yieldTask = () => new Promise(resolve => {
+      const channel = new MessageChannel()
+      channel.port1.onmessage = () => {
+        channel.port1.close()
+        channel.port2.close()
+        resolve()
+      }
+      channel.port2.postMessage(undefined)
+    })
     const waitFrames = async (
       current,
       frames,
@@ -776,7 +814,7 @@ export function m7BootstrapHtml(): string {
               )),
             ])
           }
-          await new Promise(resolve => setTimeout(resolve, 0))
+          await yieldTask()
         } else {
           await new Promise(resolve => setTimeout(
             resolve,
@@ -1266,6 +1304,8 @@ export function m7BootstrapHtml(): string {
       bundleUrl = undefined
       cleanup(() => restoreAssetFetch?.())
       restoreAssetFetch = undefined
+      cleanup(() => restoreAssetImageSource?.())
+      restoreAssetImageSource = undefined
       for (const url of assetUrls.values()) cleanup(() => URL.revokeObjectURL(url))
       assetUrls = new Map()
       assetBlobs = new Map()
@@ -1364,6 +1404,7 @@ export function m7BootstrapHtml(): string {
           resolveAsset,
         } = module
         restoreAssetFetch = installOwnedAssetFetch(window, assetBlobs, resolveAsset)
+        restoreAssetImageSource = installOwnedAssetImageSource(window, resolveAsset)
         if (!adapter || typeof adapter.setup !== 'function') {
           throw new Error('Workspace entry must default-export an adapter with setup(context)')
         }
@@ -1606,8 +1647,19 @@ export function m7BootstrapHtml(): string {
           camera.updateMatrixWorld(true)
         }
         indexScene(current)
-        for (const operation of editorState?.operations ?? []) {
-          applyOperation(current, operation, false)
+        const replayOperations = editorState?.operations ?? []
+        const restorationWarnings = []
+        for (const operation of replayOperations) {
+          try {
+            applyOperation(current, operation, false)
+          } catch (error) {
+            const warning = 'Skipped incompatible persisted editor operation '
+              + String(operation?.type ?? 'unknown')
+              + ' for ' + String(operation?.objectUuid ?? 'unknown')
+              + ': ' + (error instanceof Error ? error.message : message(error))
+            restorationWarnings.push(warning)
+            appendLog('warn', [warning])
+          }
         }
 
         current.transform = new TransformControls(camera, canvas)
@@ -1710,6 +1762,7 @@ export function m7BootstrapHtml(): string {
                   backend,
                   ...evidence,
                   editState: current.editState,
+                  restorationWarnings,
                 })
               } else if (current.frame % 30 === 0) {
                 emit(runId, nonce, 'frame', evidence)

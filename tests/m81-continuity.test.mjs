@@ -12,7 +12,7 @@ import {
   RUNTIME_COMMAND_SETTLEMENT_GRACE_MS,
   rolloverCleanupRevisions,
   runtimeCommandSettlementDeadline,
-} from '../src/m7-runtime.ts'
+} from '../src/workspace-runtime.ts'
 
 const serverPath = fileURLToPath(new URL('../dist/server.js', import.meta.url))
 
@@ -48,18 +48,80 @@ async function connectWorkspace(root, allowlistedRoot, workspace) {
   return client
 }
 
-async function startRuntimeCommand(client, runtime, meta, command) {
+async function startRuntimeCommand(client, runtime, meta, command, targetRuntime) {
+  const resolvedTarget = targetRuntime ?? {
+    execution: command.target === 'active'
+      ? command.runtime.execution
+      : {
+          ...command.runtime.execution,
+          runId: crypto.randomUUID(),
+          nonce: crypto.randomUUID(),
+        },
+    projection: command.runtime.projection,
+    target: command.target,
+  }
   const started = await client.callTool({
     name: 'start_runtime_command',
     arguments: {
       ...runtime,
       commandId: command.commandId,
+      targetRuntime: resolvedTarget,
     },
     _meta: meta,
   })
   assert.equal(started.isError, undefined)
   assert.ok(Number.isFinite(Date.parse(started.structuredContent.expiresAt)))
-  return started.structuredContent.expiresAt
+  Object.assign(runtime, {
+    execution: resolvedTarget.execution,
+    projection: resolvedTarget.projection,
+  })
+  return resolvedTarget
+}
+
+async function activateRuntime(client, runtime, meta) {
+  const prepared = await client.callTool({
+    name: 'prepare_runtime_run',
+    arguments: runtime,
+    _meta: meta,
+  })
+  assert.equal(prepared.isError, undefined)
+  const committed = await client.callTool({
+    name: 'commit_runtime_run',
+    arguments: {
+      projectId: runtime.projectId,
+      runtimeRef: prepared.structuredContent.runtimeRef,
+    },
+    _meta: meta,
+  })
+  assert.equal(committed.isError, undefined)
+  Object.assign(runtime, committed.structuredContent)
+  return committed
+}
+
+async function reportRuntimeEvidence(client, arguments_, meta) {
+  const { commandId, result, ...runtime } = arguments_
+  return client.callTool({
+    name: 'settle_runtime_command',
+    arguments: {
+      ...runtime,
+      commandId,
+      outcome: { status: 'succeeded', evidence: result },
+    },
+    _meta: meta,
+  })
+}
+
+async function failRuntimeCommand(client, arguments_, meta) {
+  const { commandId, stage, code, message, ...runtime } = arguments_
+  return client.callTool({
+    name: 'settle_runtime_command',
+    arguments: {
+      ...runtime,
+      commandId,
+      outcome: { status: 'failed', stage, code, message },
+    },
+    _meta: meta,
+  })
 }
 
 async function fixture() {
@@ -515,6 +577,17 @@ test('M8.1 exposes the Runtime Harness tools and exact server-owned prompt', asy
       const tool = tools.tools.find(candidate => candidate.name === name)
       assert.ok(tool, `${name} should be listed`)
       assert.ok(tool._meta.ui.visibility.includes('model'))
+      assert.match(tool.description, /runtimeRef from the latest Editor context/)
+      assert.match(tool.description, /Omit target for ordinary/)
+      assert.match(
+        tool.inputSchema.properties.target.description,
+        /requires no Editor grant/,
+      )
+      assert.match(
+        tool.inputSchema.properties.activeIntent.description,
+        /Editor-issued authorization is the sole authority/,
+      )
+      assert.match(tool.inputSchema.properties.runtimeRef.description, /opaque reference/)
     }
     const prompts = await client.listPrompts()
     assert.ok(prompts.prompts.some(prompt => prompt.name === 'threejs-runtime-validation'))
@@ -545,7 +618,7 @@ test('M8.1 marks a claimed Runtime command before execution can fail', async () 
   const viewSource = await readFile(new URL('../src/view.ts', import.meta.url), 'utf8')
   const remember = viewSource.indexOf('runtimeHarnessCommands.add(parsed.commandId)')
   const execute = viewSource.indexOf('await executeRuntimeHarnessCommand(parsed)', remember)
-  const prepare = viewSource.indexOf('await ensureValidationRuntime(command.runtime)')
+  const prepare = viewSource.indexOf('await ensureValidationRuntime(')
   const start = viewSource.indexOf("name: 'start_runtime_command'", prepare)
   const dispatch = viewSource.indexOf("postM7Run(targetRun, 'harness-command'", start)
   assert.ok(remember >= 0 && execute > remember)
@@ -657,7 +730,9 @@ test('M8.1 rejects invalid capability references, extension paths, and permissio
       },
     })
     assert.equal(built.structuredContent.status, 'failed')
-    assert.ok(built.structuredContent.diagnostics.some(item => /pinned M9 profile/.test(item.message)))
+    assert.ok(built.structuredContent.diagnostics.some(item => (
+      /pinned runtime profile/.test(item.message)
+    )))
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
@@ -709,23 +784,15 @@ test('M8.1 isolates Runtime identities and control leases by Harness Session', a
       runId: '44444444-4444-4444-8444-444444444444',
       nonce: '55555555-5555-4555-8555-555555555555',
     }
-    const registrationA = await client.callTool({
-      name: 'register_runtime_run',
-      arguments: runtimeA,
-      _meta: metaA,
-    })
-    const registrationB = await client.callTool({
-      name: 'register_runtime_run',
-      arguments: runtimeB,
-      _meta: metaB,
-    })
+    const registrationA = await activateRuntime(client, runtimeA, metaA)
+    await activateRuntime(client, runtimeB, metaB)
     for (const [meta, runtime] of [[metaA, runtimeA], [metaB, runtimeB]]) {
       const inspected = await client.callTool({
         name: 'inspect_project',
         arguments: { projectId: 'game' },
         _meta: meta,
       })
-      assert.equal(inspected.structuredContent.runtime.runId, runtime.runId)
+      assert.equal(inspected.structuredContent.runtime.runtimeRef, runtime.runtimeRef)
     }
 
     const pendingA = client.callTool({
@@ -751,24 +818,27 @@ test('M8.1 isolates Runtime identities and control leases by Harness Session', a
     })).structuredContent.command
     assert.notEqual(commandA.commandId, commandB.commandId)
     for (const item of [
-      [runtimeA, metaA, commandA, registrationA.structuredContent.evidenceToken],
-      [runtimeB, metaB, commandB, registrationB.structuredContent.evidenceToken],
+      [runtimeA, metaA, commandA],
+      [runtimeB, metaB, commandB],
     ]) {
-      const [runtime, meta, command, evidenceToken] = item
+      const [runtime, meta, command] = item
       await startRuntimeCommand(client, runtime, meta, command)
       const reported = await client.callTool({
-        name: 'report_runtime_evidence',
+        name: 'settle_runtime_command',
         arguments: {
           ...runtime,
           commandId: command.commandId,
-          result: {
-            kind: 'runtime-logs',
-            runtime: { ...runtime, target: 'validation' },
-            evidenceId: crypto.randomUUID(),
-            evidenceToken,
-            entries: [],
-            nextCursor: 0,
-            truncated: false,
+          outcome: {
+            status: 'succeeded',
+            evidence: {
+              kind: 'runtime-logs',
+              runtime: { ...runtime, target: 'validation' },
+              evidenceId: crypto.randomUUID(),
+              evidenceToken: command.evidenceToken,
+              entries: [],
+              nextCursor: 0,
+              truncated: false,
+            },
           },
         },
         _meta: meta,
@@ -789,7 +859,10 @@ test('M8.1 isolates Runtime identities and control leases by Harness Session', a
       arguments: { projectId: 'game' },
       _meta: metaA,
     })
-    assert.equal(stillActiveA.structuredContent.runtime.runId, runtimeA.runId)
+    assert.equal(
+      stillActiveA.structuredContent.runtime.runtimeRef,
+      registrationA.structuredContent.runtimeRef,
+    )
   } finally {
     await client.close()
     await rm(root, { recursive: true, force: true })
@@ -836,14 +909,19 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       runId: '22222222-2222-4222-8222-222222222222',
       nonce: '33333333-3333-4333-8333-333333333333',
     }
-    const registered = await client.callTool({
-      name: 'register_runtime_run',
-      arguments: runtime,
+    await activateRuntime(client, runtime, ownerMeta)
+    assert.equal(typeof runtime.evidenceToken, 'string')
+    const staleCapture = await client.callTool({
+      name: 'capture_runtime_frame',
+      arguments: {
+        projectId: runtime.projectId,
+        runtimeRef: crypto.randomUUID(),
+        target: 'validation',
+      },
       _meta: ownerMeta,
     })
-    assert.equal(registered.isError, undefined)
-    const evidenceToken = registered.structuredContent.evidenceToken
-    assert.equal(typeof evidenceToken, 'string')
+    assert.equal(staleCapture.isError, true)
+    assert.match(staleCapture.content[0].text, /latest Runtime context/)
     const undersizedTimeout = await client.callTool({
       name: 'read_runtime_logs',
       arguments: {
@@ -860,26 +938,25 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       name: 'release_runtime_run',
       arguments: {
         projectId: runtime.projectId,
-        revision: runtime.revision,
-        runId: runtime.runId,
+        runtimeRef: runtime.runtimeRef,
       },
     })
     assert.equal(ownerlessRelease.isError, true)
-    assert.match(ownerlessRelease.content[0].text, /owner identity is required/)
+    assert.match(ownerlessRelease.content[0].text, /Harness Session.*required/)
     const foreignPull = await client.callTool({
       name: 'pull_runtime_command',
       arguments: runtime,
       _meta: foreignMeta,
     })
     assert.equal(foreignPull.isError, true)
-    assert.match(foreignPull.content[0].text, /another Harness Session/)
+    assert.match(foreignPull.content[0].text, /Runtime reference is stale/)
     const stalePull = await client.callTool({
       name: 'pull_runtime_command',
-      arguments: { ...runtime, nonce: crypto.randomUUID() },
+      arguments: { projectId: runtime.projectId, runtimeRef: crypto.randomUUID() },
       _meta: ownerMeta,
     })
     assert.equal(stalePull.isError, true)
-    assert.match(stalePull.content[0].text, /stale or incomplete/)
+    assert.match(stalePull.content[0].text, /Runtime reference is stale/)
 
     const pending = client.callTool({
       name: 'read_runtime_logs',
@@ -901,169 +978,155 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
     })
     assert.equal(busy.isError, true)
     assert.match(busy.content[0].text, /lease is busy/)
-    const foreignReport = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken,
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
-        },
+    const foreignReport = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: command.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: foreignMeta,
-    })
+    }, foreignMeta)
     assert.equal(foreignReport.isError, true)
-    assert.match(foreignReport.content[0].text, /another Harness Session/)
+    assert.match(foreignReport.content[0].text, /Runtime reference is stale/)
     await startRuntimeCommand(client, runtime, ownerMeta, command)
-    const staleEvidence = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: {
-            ...runtime,
+    const staleEvidence = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: {
+          ...runtime,
+          execution: {
+            ...runtime.execution,
             nonce: crypto.randomUUID(),
-            target: 'validation',
           },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken,
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
+          target: 'validation',
         },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: command.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(staleEvidence.isError, true)
     assert.match(staleEvidence.content[0].text, /evidence identity is stale or foreign/)
-    const forgedEvidence = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken: crypto.randomUUID(),
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
-        },
+    const forgedEvidence = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: crypto.randomUUID(),
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(forgedEvidence.isError, true)
     assert.match(forgedEvidence.content[0].text, /evidence identity is stale or foreign/)
-    const forgedBuild = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: { ...runtime, buildId: '0'.repeat(64), target: 'validation' },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken,
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
+    const forgedBuild = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: {
+          ...runtime,
+          projection: {
+            ...runtime.projection,
+            loadedBuild: {
+              ...runtime.projection.loadedBuild,
+              buildId: '0'.repeat(64),
+            },
+          },
+          target: 'validation',
         },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: command.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(forgedBuild.isError, true)
     assert.match(forgedBuild.content[0].text, /evidence identity is stale or foreign/)
-    const { buildId: _buildId, ...runtimeWithoutBuild } = runtime
-    const missingBuild = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: { ...runtimeWithoutBuild, target: 'validation' },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken,
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
+    const missingBuild = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: {
+          execution: runtime.execution,
+          projection: {
+            workspaceRevision: runtime.projection.workspaceRevision,
+            generation: runtime.projection.generation,
+          },
+          target: 'validation',
         },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: command.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(missingBuild.isError, true)
-    const mismatchedEvidence = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'capture-frame',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken,
-          digest: '0'.repeat(64),
-          mimeType: 'image/png',
-          data: 'AA==',
-          width: 1,
-          height: 1,
-          frame: 0,
-          capturedAt: new Date().toISOString(),
-        },
+    const mismatchedEvidence = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'capture-frame',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: command.evidenceToken,
+        digest: '0'.repeat(64),
+        mimeType: 'image/png',
+        data: 'AA==',
+        width: 1,
+        height: 1,
+        frame: 0,
+        capturedAt: new Date().toISOString(),
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(mismatchedEvidence.isError, true)
     assert.match(mismatchedEvidence.content[0].text, /kind does not match/)
-    const accepted = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken,
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
-        },
+    const accepted = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: command.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(accepted.isError, undefined)
     const completed = await pending
     assert.equal(completed.isError, undefined)
     assert.equal(completed.structuredContent.evidenceToken, undefined)
-    const duplicate = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: command.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: '44444444-4444-4444-8444-444444444444',
-          evidenceToken,
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
-        },
+    const duplicate = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: command.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: '44444444-4444-4444-8444-444444444444',
+        evidenceToken: command.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: ownerMeta,
-    })
-    assert.equal(duplicate.isError, true)
-    assert.match(duplicate.content[0].text, /stale or foreign/)
+    }, ownerMeta)
+    assert.equal(duplicate.isError, undefined)
 
     const abortController = new AbortController()
     const cancelled = client.callTool({
@@ -1110,23 +1173,19 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
     })).structuredContent.command
     assert.equal(stillPreparing.commandId, afterCancelCommand.commandId)
     await startRuntimeCommand(client, runtime, ownerMeta, afterCancelCommand)
-    const afterCancelReported = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: afterCancelCommand.commandId,
-        result: {
-          kind: 'runtime-logs',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
-          entries: [],
-          nextCursor: 0,
-          truncated: false,
-        },
+    const afterCancelReported = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: afterCancelCommand.commandId,
+      result: {
+        kind: 'runtime-logs',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: afterCancelCommand.evidenceToken,
+        entries: [],
+        nextCursor: 0,
+        truncated: false,
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(afterCancelReported.isError, undefined)
     assert.equal((await afterCancelPending).isError, undefined)
 
@@ -1141,19 +1200,20 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       arguments: runtime,
       _meta: ownerMeta,
     })).structuredContent.command
-    const preparationFailure = await client.callTool({
-      name: 'fail_runtime_command',
-      arguments: {
-        ...runtime,
-        commandId: preparationFailureCommand.commandId,
-        message: 'Validation Runtime failed',
-      },
-      _meta: ownerMeta,
-    })
+    const preparationFailure = await failRuntimeCommand(client, {
+      ...runtime,
+      commandId: preparationFailureCommand.commandId,
+      stage: 'prepare',
+      code: 'TARGET_PREPARATION_FAILED',
+      message: 'Validation Runtime failed',
+    }, ownerMeta)
     assert.equal(preparationFailure.isError, undefined)
     const preparationFailureResult = await preparationFailurePending
     assert.equal(preparationFailureResult.isError, true)
-    assert.match(preparationFailureResult.content[0].text, /preparation failed/)
+    assert.match(
+      preparationFailureResult.content[0].text,
+      /\[TARGET_PREPARATION_FAILED\] Runtime Harness prepare failed/,
+    )
 
     const activeWithoutIntent = await client.callTool({
       name: 'capture_runtime_frame',
@@ -1165,7 +1225,10 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       _meta: ownerMeta,
     })
     assert.equal(activeWithoutIntent.isError, true)
-    assert.match(activeWithoutIntent.content[0].text, /explicit user-requested intent/)
+    assert.match(
+      activeWithoutIntent.content[0].text,
+      /Ask the user to authorize one live Runtime check in the Editor/,
+    )
     const activeWithoutGrant = await client.callTool({
       name: 'capture_runtime_frame',
       arguments: {
@@ -1177,7 +1240,10 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       _meta: ownerMeta,
     })
     assert.equal(activeWithoutGrant.isError, true)
-    assert.match(activeWithoutGrant.content[0].text, /current user grant/)
+    assert.match(
+      activeWithoutGrant.content[0].text,
+      /Ask the user to authorize one live Runtime check in the Editor/,
+    )
     const grant = await client.callTool({
       name: 'grant_active_runtime_control',
       arguments: runtime,
@@ -1202,49 +1268,41 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
     })).structuredContent.command
     assert.equal(activeCommand.target, 'active')
     await startRuntimeCommand(client, runtime, ownerMeta, activeCommand)
-    const oversizedEvidence = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: activeCommand.commandId,
-        result: {
-          kind: 'capture-frame',
-          runtime: { ...runtime, target: 'active' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
-          digest: '0'.repeat(64),
-          mimeType: 'image/png',
-          data: 'A'.repeat(512 * 1024 + 1),
-          width: 1,
-          height: 1,
-          frame: 0,
-          capturedAt: new Date().toISOString(),
-        },
+    const oversizedEvidence = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: activeCommand.commandId,
+      result: {
+        kind: 'capture-frame',
+        runtime: { ...runtime, target: 'active' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: activeCommand.evidenceToken,
+        digest: '0'.repeat(64),
+        mimeType: 'image/png',
+        data: 'A'.repeat(512 * 1024 + 1),
+        width: 1,
+        height: 1,
+        frame: 0,
+        capturedAt: new Date().toISOString(),
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(oversizedEvidence.isError, true)
-    const activeEvidence = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: activeCommand.commandId,
-        result: {
-          kind: 'capture-frame',
-          runtime: { ...runtime, target: 'active' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
-          digest: '0'.repeat(64),
-          mimeType: 'image/png',
-          data: 'AA==',
-          width: 1,
-          height: 1,
-          frame: 0,
-          capturedAt: new Date().toISOString(),
-        },
+    const activeEvidence = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: activeCommand.commandId,
+      result: {
+        kind: 'capture-frame',
+        runtime: { ...runtime, target: 'active' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: activeCommand.evidenceToken,
+        digest: '0'.repeat(64),
+        mimeType: 'image/png',
+        data: 'AA==',
+        width: 1,
+        height: 1,
+        frame: 0,
+        capturedAt: new Date().toISOString(),
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(activeEvidence.isError, undefined)
     assert.equal((await activeCapture).isError, undefined)
     const consumedGrant = await client.callTool({
@@ -1258,7 +1316,7 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       _meta: ownerMeta,
     })
     assert.equal(consumedGrant.isError, true)
-    assert.match(consumedGrant.content[0].text, /current user grant/)
+    assert.match(consumedGrant.content[0].text, /authorize one live Runtime check/)
 
     const deadlineTracePending = client.callTool({
       name: 'simulate_player_actions',
@@ -1281,30 +1339,26 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
     ))
-    const deadlineTraceReport = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: deadlineTraceCommand.commandId,
-        result: {
-          kind: 'action-trace',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
+    const deadlineTraceReport = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: deadlineTraceCommand.commandId,
+      result: {
+        kind: 'action-trace',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: deadlineTraceCommand.evidenceToken,
+        status: 'failed',
+        startFrame: 10,
+        endFrame: 12,
+        trace: [{
+          index: 0,
+          type: 'waitFrames',
+          frame: 12,
           status: 'failed',
-          startFrame: 10,
-          endFrame: 12,
-          trace: [{
-            index: 0,
-            type: 'waitFrames',
-            frame: 12,
-            status: 'failed',
-            message: 'Runtime Harness command timed out',
-          }],
-        },
+          message: 'Runtime Harness command timed out',
+        }],
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(deadlineTraceReport.isError, undefined)
     const deadlineTrace = await deadlineTracePending
     assert.equal(deadlineTrace.isError, undefined)
@@ -1330,27 +1384,23 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
     ))
-    const lateSuccessReport = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: lateSuccessCommand.commandId,
-        result: {
-          kind: 'capture-frame',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
-          digest: '0'.repeat(64),
-          mimeType: 'image/png',
-          data: 'AA==',
-          width: 1,
-          height: 1,
-          frame: 0,
-          capturedAt: new Date(Date.now() - 50).toISOString(),
-        },
+    const lateSuccessReport = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: lateSuccessCommand.commandId,
+      result: {
+        kind: 'capture-frame',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: lateSuccessCommand.evidenceToken,
+        digest: '0'.repeat(64),
+        mimeType: 'image/png',
+        data: 'AA==',
+        width: 1,
+        height: 1,
+        frame: 0,
+        capturedAt: new Date(Date.now() - 50).toISOString(),
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(lateSuccessReport.isError, true)
     assert.match(lateSuccessReport.content[0].text, /missed its execution deadline/)
     const lateSuccess = await lateSuccessPending
@@ -1378,30 +1428,26 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
     ))
-    const lateCancelledReport = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: lateCancelledCommand.commandId,
-        result: {
-          kind: 'action-trace',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
-          status: 'cancelled',
-          startFrame: 10,
-          endFrame: 12,
-          trace: [{
-            index: 0,
-            type: 'waitFrames',
-            frame: 12,
-            status: 'failed',
-            message: 'Runtime Harness command cancelled',
-          }],
-        },
+    const lateCancelledReport = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: lateCancelledCommand.commandId,
+      result: {
+        kind: 'action-trace',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: lateCancelledCommand.evidenceToken,
+        status: 'cancelled',
+        startFrame: 10,
+        endFrame: 12,
+        trace: [{
+          index: 0,
+          type: 'waitFrames',
+          frame: 12,
+          status: 'failed',
+          message: 'Runtime Harness command cancelled',
+        }],
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(lateCancelledReport.isError, undefined)
     const lateCancelled = await lateCancelledPending
     assert.equal(lateCancelled.isError, undefined)
@@ -1429,22 +1475,18 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       resolve,
       RUNTIME_COMMAND_MIN_TIMEOUT_MS + 25,
     ))
-    const lateHarnessErrorReport = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: lateHarnessErrorCommand.commandId,
-        result: {
-          kind: 'runtime-harness-error',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
-          status: 'failed',
-          message: 'Runtime Harness command timed out',
-        },
+    const lateHarnessErrorReport = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: lateHarnessErrorCommand.commandId,
+      result: {
+        kind: 'runtime-harness-error',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: lateHarnessErrorCommand.evidenceToken,
+        status: 'failed',
+        message: 'Runtime Harness command timed out',
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(lateHarnessErrorReport.isError, undefined)
     assert.equal((await lateHarnessErrorPending).isError, true)
 
@@ -1506,29 +1548,25 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
       _meta: ownerMeta,
     })
     assert.equal(afterTimeout.structuredContent.command, undefined)
-    const lateReport = await client.callTool({
-      name: 'report_runtime_evidence',
-      arguments: {
-        ...runtime,
-        commandId: timedOutCommand.commandId,
-        result: {
-          kind: 'capture-frame',
-          runtime: { ...runtime, target: 'validation' },
-          evidenceId: crypto.randomUUID(),
-          evidenceToken,
-          digest: '0'.repeat(64),
-          mimeType: 'image/png',
-          data: 'AA==',
-          width: 1,
-          height: 1,
-          frame: 0,
-          capturedAt: new Date().toISOString(),
-        },
+    const lateReport = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: timedOutCommand.commandId,
+      result: {
+        kind: 'capture-frame',
+        runtime: { ...runtime, target: 'validation' },
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: timedOutCommand.evidenceToken,
+        digest: '0'.repeat(64),
+        mimeType: 'image/png',
+        data: 'AA==',
+        width: 1,
+        height: 1,
+        frame: 0,
+        capturedAt: new Date().toISOString(),
       },
-      _meta: ownerMeta,
-    })
+    }, ownerMeta)
     assert.equal(lateReport.isError, true)
-    assert.match(lateReport.content[0].text, /stale or foreign/)
+    assert.match(lateReport.content[0].text, /\[RUNTIME_COMMAND_EXPIRED\]/)
     assert.equal(RUNTIME_COMMAND_MIN_TIMEOUT_MS, 2_000)
     assert.equal(RUNTIME_COMMAND_SETTLEMENT_GRACE_MS, 2_000)
 
@@ -1550,18 +1588,109 @@ test('M8.1 Runtime broker rejects foreign and stale callers and releases its lea
         }],
       },
     })
-    const previousRevision = runtime.revision
-    runtime = { ...runtime, revision: changed.structuredContent.revision, buildId: undefined }
-    const advanced = await client.callTool({
-      name: 'register_runtime_run',
-      arguments: { ...runtime, previousRevision },
-      _meta: ownerMeta,
+    const rebuilt = await client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: runtime.projectId,
+        revision: changed.structuredContent.revision,
+      },
     })
-    assert.equal(advanced.isError, undefined)
-    assert.equal(advanced.structuredContent.evidenceToken, evidenceToken)
+    assert.equal(rebuilt.isError, undefined)
+    runtime = {
+      projectId: runtime.projectId,
+      revision: changed.structuredContent.revision,
+      buildId: rebuilt.structuredContent.buildId,
+      runId: crypto.randomUUID(),
+      nonce: crypto.randomUUID(),
+    }
+    await activateRuntime(client, runtime, ownerMeta)
     const rolloverResult = await rollover
     assert.equal(rolloverResult.isError, true)
-    assert.match(rolloverResult.content[0].text, /revision changed/)
+    assert.match(rolloverResult.content[0].text, /replaced/)
+
+    const captureAfterRollover = client.callTool({
+      name: 'capture_runtime_frame',
+      arguments: { ...runtime, target: 'validation' },
+      _meta: ownerMeta,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const rolloverCommand = (await client.callTool({
+      name: 'pull_runtime_command',
+      arguments: runtime,
+      _meta: ownerMeta,
+    })).structuredContent.command
+    const rolloverTarget = await startRuntimeCommand(
+      client,
+      runtime,
+      ownerMeta,
+      rolloverCommand,
+    )
+    const rolloverEvidence = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: rolloverCommand.commandId,
+      result: {
+        kind: 'capture-frame',
+        runtime: rolloverTarget,
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: rolloverCommand.evidenceToken,
+        digest: '0'.repeat(64),
+        mimeType: 'image/png',
+        data: 'AA==',
+        width: 1,
+        height: 1,
+        frame: 0,
+        capturedAt: new Date().toISOString(),
+      },
+    }, ownerMeta)
+    const captureAfterRolloverResult = await captureAfterRollover
+    assert.equal(rolloverEvidence.isError, undefined)
+    assert.equal(captureAfterRolloverResult.isError, undefined)
+
+    await client.callTool({
+      name: 'grant_active_runtime_control',
+      arguments: runtime,
+      _meta: ownerMeta,
+    })
+    const activeAfterRollover = client.callTool({
+      name: 'capture_runtime_frame',
+      arguments: {
+        ...runtime,
+        target: 'active',
+        activeIntent: 'user-requested',
+      },
+      _meta: ownerMeta,
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    const activeRolloverCommand = (await client.callTool({
+      name: 'pull_runtime_command',
+      arguments: runtime,
+      _meta: ownerMeta,
+    })).structuredContent.command
+    const activeRolloverTarget = await startRuntimeCommand(
+      client,
+      runtime,
+      ownerMeta,
+      activeRolloverCommand,
+    )
+    const activeRolloverEvidence = await reportRuntimeEvidence(client, {
+      ...runtime,
+      commandId: activeRolloverCommand.commandId,
+      result: {
+        kind: 'capture-frame',
+        runtime: activeRolloverTarget,
+        evidenceId: crypto.randomUUID(),
+        evidenceToken: activeRolloverCommand.evidenceToken,
+        digest: '0'.repeat(64),
+        mimeType: 'image/png',
+        data: 'AA==',
+        width: 1,
+        height: 1,
+        frame: 0,
+        capturedAt: new Date().toISOString(),
+      },
+    }, ownerMeta)
+    assert.equal(activeRolloverEvidence.isError, undefined)
+    assert.equal((await activeAfterRollover).isError, undefined)
 
     const disposed = client.callTool({
       name: 'capture_runtime_frame',

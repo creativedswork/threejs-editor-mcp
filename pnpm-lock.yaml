@@ -24,8 +24,8 @@ importers:
         specifier: 0.25.3
         version: 0.25.3
       postprocessing:
-        specifier: 6.37.4
-        version: 6.37.4(three@0.185.1)
+        specifier: 6.39.5
+        version: 6.39.5(three@0.185.1)
       three:
         specifier: 0.185.1
         version: 0.185.1
@@ -841,10 +841,10 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
-  postprocessing@6.37.4:
-    resolution: {integrity: sha512-O4dv29MDRSjXgMF1Luz3YHlT7NawKIliCfO2OgUCtIMTLNMCg+v0RLuT9/LQSDtVNXxUHGyy3mucbF3UePcElA==}
+  postprocessing@6.39.5:
+    resolution: {integrity: sha512-YmH+t74J2X1lwYjKzK/tgs9C9kqWWPB9JwZiDF5mEf4BdCEAmEFbO8lXBA7NM0/j4g+x6FgD/Tt5/kT7ogbEDA==}
     peerDependencies:
-      three: '>= 0.157.0 < 0.178.0'
+      three: '>= 0.168.0 < 0.187.0'
 
   potpack@1.0.2:
     resolution: {integrity: sha512-choctRBIV9EMT9WGAZHn3V7t0Z2pMQyl0EZE6pFc/6ml3ssw7Dlf/oAOvFwjm1HVsqfQN8GfeFyJ+d8tRzqueQ==}
@@ -1643,7 +1643,7 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.2
 
-  postprocessing@6.37.4(three@0.185.1):
+  postprocessing@6.39.5(three@0.185.1):
     dependencies:
       three: 0.185.1
 

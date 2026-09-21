@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { chromium } from 'playwright'
-import { M7_RUNTIME_CHANNEL, m7BootstrapHtml } from '../src/m7-runtime.ts'
+import { WORKSPACE_RUNTIME_CHANNEL, workspaceRuntimeHtml } from '../src/workspace-runtime.ts'
 
 const workspace = resolve(process.env.THREEJS_EDITOR_MCP_WORKSPACE ?? '')
 if (workspace === resolve('')) throw new Error('THREEJS_EDITOR_MCP_WORKSPACE is required')
@@ -105,7 +105,7 @@ try {
     })
   })
   const iframe = page.locator('iframe')
-  await iframe.evaluate((frame, html) => { frame.srcdoc = html }, m7BootstrapHtml())
+  await iframe.evaluate((frame, html) => { frame.srcdoc = html }, workspaceRuntimeHtml())
   await iframe.contentFrame().locator('canvas').waitFor()
 
   const identity = {
@@ -136,7 +136,7 @@ try {
       mode: 'run',
     }, '*')
   }, {
-    channel: M7_RUNTIME_CHANNEL,
+    channel: WORKSPACE_RUNTIME_CHANNEL,
     identity,
     bundle,
     assets,
@@ -200,7 +200,7 @@ try {
       action: 'stop',
       ...value.identity,
     }, '*')
-  }, { channel: M7_RUNTIME_CHANNEL, identity })
+  }, { channel: WORKSPACE_RUNTIME_CHANNEL, identity })
   await page.waitForFunction(start => globalThis.__p7Events.slice(start).some(
     event => event.type === 'disposed',
   ), offset)

@@ -6,11 +6,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { chromium } from 'playwright'
 import { build as esbuild } from 'esbuild'
-import { M7_RUNTIME_CHANNEL, m7BootstrapHtml } from '../src/m7-runtime.ts'
+import { WORKSPACE_RUNTIME_CHANNEL, workspaceRuntimeHtml } from '../src/workspace-runtime.ts'
 
 const workspace = resolve(process.env.THREEJS_EDITOR_MCP_WORKSPACE ?? '')
 if (workspace === resolve('')) throw new Error('THREEJS_EDITOR_MCP_WORKSPACE is required')
 const server = resolve(process.env.THREEJS_EDITOR_MCP_SERVER ?? 'dist/server.js')
+const projectPath = process.env.THREEJS_EDITOR_MCP_CASE
+  ?? 'threejs-procedural-vegetation/structured-ash-growth'
 const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m10-ash-'))
 const client = new Client({ name: 'm10-ash-growth-build', version: '0.0.0' })
 let browser
@@ -23,7 +25,7 @@ try {
   const opened = await client.callTool({
     name: 'open_editor',
     arguments: {
-      projectPath: 'threejs-procedural-vegetation/structured-ash-growth',
+      projectPath,
     },
     _meta: { 'ai.deepseek.dsh/workspace': { cwd: workspace } },
   })
@@ -40,14 +42,16 @@ try {
   assert.deepEqual(built.structuredContent.diagnostics, [])
   assert.equal(built.structuredContent.backend, 'webgl')
   const assets = built.structuredContent.assets
-  for (const name of [
-    'draco_decoder.js',
-    'draco_decoder.wasm',
-    'draco_wasm_wrapper.js',
-  ]) {
-    assert.ok(assets.some(asset => (
-      asset.path === `node_modules/three/examples/jsm/libs/draco/gltf/${name}`
-    )))
+  if (projectPath === 'threejs-procedural-vegetation/structured-ash-growth') {
+    for (const name of [
+      'draco_decoder.js',
+      'draco_decoder.wasm',
+      'draco_wasm_wrapper.js',
+    ]) {
+      assert.ok(assets.some(asset => (
+        asset.path === `node_modules/three/examples/jsm/libs/draco/gltf/${name}`
+      )))
+    }
   }
 
   const bundleResource = await client.readResource({
@@ -90,11 +94,11 @@ try {
   await page.setContent('<iframe sandbox="allow-scripts" style="width:960px;height:640px"></iframe>')
   await page.locator('iframe').evaluate(
     (frame, html) => { frame.srcdoc = html },
-    m7BootstrapHtml(),
+    workspaceRuntimeHtml(),
   )
   await page.frameLocator('iframe').locator('canvas').waitFor()
   const identity = {
-    channel: M7_RUNTIME_CHANNEL,
+    channel: WORKSPACE_RUNTIME_CHANNEL,
     projectId: opened.structuredContent.projectId,
     runId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     nonce: '11111111-2222-4333-8444-555555555555',
@@ -200,13 +204,15 @@ try {
               },
             },
           )
-          bridge.oncalltool = async params => ({
-            content: [{ type: 'text', text: 'Synthetic pull failure' }],
-            structuredContent: {
-              projectId,
-              changed: true,
-              revision,
-            },
+          bridge.oncalltool = async () => ({
+            isError: true,
+            content: [{
+              type: 'text',
+              text: JSON.stringify([{
+                path: ['execution'],
+                message: 'Invalid input: expected object, received undefined',
+              }], null, 2),
+            }],
           })
           bridge.onupdatemodelcontext = async params => {
             globalThis.__ashFailureContexts.push(params)
@@ -259,7 +265,7 @@ try {
   }))
   assert.match(
     feedback.contexts.at(-1).structuredContent.open.error,
-    /pull_project returned an invalid snapshot/,
+    /execution: Invalid input: expected object, received undefined/,
   )
   assert.match(
     feedback.messages[0].content[0].text,
@@ -267,12 +273,15 @@ try {
   )
 
   process.stdout.write(`${JSON.stringify({
+    projectPath,
     projectId: opened.structuredContent.projectId,
     revision: opened.structuredContent.revision,
     buildId: built.structuredContent.buildId,
     bundleBytes: built.structuredContent.bundleBytes,
     assets: assets.length,
-    decoderAssets: 3,
+    decoderAssets: projectPath === 'threejs-procedural-vegetation/structured-ash-growth'
+      ? 3
+      : 0,
     runtime: {
       backend: ready.data.backend,
       frame: ready.data.frame,

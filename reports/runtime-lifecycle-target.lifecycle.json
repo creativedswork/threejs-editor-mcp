@@ -1,0 +1,300 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Three.js Editor Runtime State Model",
+    "subtitle": "Serialized lifecycle with explicit readiness, bounded persistence, and recoverable failure",
+    "output": "reports/runtime-lifecycle-target.lifecycle.html",
+    "animation": "trace",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "viewBox": [980, 760],
+    "views": [
+      {
+        "id": "play-stop",
+        "label": "Play and Stop",
+        "focus": ["edit_ready", "entering_play", "playing", "restoring"],
+        "note": "Play changes mode; Stop prepares a clean editor candidate and commits it once."
+      },
+      {
+        "id": "save",
+        "label": "Save",
+        "focus": ["edit_ready", "saving", "committing"],
+        "note": "Save is allowed only from Edit Ready and always returns to a committed state."
+      },
+      {
+        "id": "failure",
+        "label": "Failure and retry",
+        "focus": ["restoring", "recoverable_failure", "bootstrapping"],
+        "note": "A failed transition retains the previous committed surface and starts a new epoch on retry."
+      },
+      {
+        "id": "effects",
+        "label": "Post-commit effects",
+        "focus": ["edit_ready", "effects_pending", "effects_degraded"],
+        "note": "Auxiliary effects degrade independently and never roll back Runtime state."
+      }
+    ],
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "start": { "label": "Entry" },
+        "active": { "label": "Transition" },
+        "waiting": { "label": "Persistence / effects" },
+        "success": { "label": "Committed state" },
+        "failure": { "label": "Recoverable failure" }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "Runtime lifecycle"
+    },
+    {
+      "id": "persistence",
+      "label": "Workspace persistence"
+    },
+    {
+      "id": "recovery",
+      "label": "Recovery"
+    },
+    {
+      "id": "effects",
+      "label": "Post-commit effects"
+    }
+  ],
+  "states": [
+    {
+      "id": "bootstrapping",
+      "type": "start",
+      "label": "Bootstrapping",
+      "sublabel": "prepare edit Runtime",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "UI blocked"
+    },
+    {
+      "id": "edit_ready",
+      "type": "success",
+      "label": "Edit Ready",
+      "sublabel": "committed + idle",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "Save enabled"
+    },
+    {
+      "id": "entering_play",
+      "type": "active",
+      "label": "Entering Play",
+      "sublabel": "await mode ACK",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "epoch bound"
+    },
+    {
+      "id": "playing",
+      "type": "success",
+      "label": "Playing",
+      "sublabel": "committed run mode",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "editor locked"
+    },
+    {
+      "id": "restoring",
+      "type": "active",
+      "label": "Restoring",
+      "sublabel": "prepare clean editor",
+      "lane": "main",
+      "col": 4,
+      "step": "05",
+      "tag": "old surface kept"
+    },
+    {
+      "id": "saving",
+      "type": "waiting",
+      "label": "Saving",
+      "sublabel": "prepare revision",
+      "lane": "persistence",
+      "col": 0,
+      "tag": "bounded"
+    },
+    {
+      "id": "committing",
+      "type": "waiting",
+      "label": "Committing",
+      "sublabel": "one revision boundary",
+      "lane": "persistence",
+      "col": 1,
+      "tag": "finally cleanup"
+    },
+    {
+      "id": "recoverable_failure",
+      "type": "failure",
+      "label": "Recoverable Failure",
+      "sublabel": "committed surface retained",
+      "lane": "recovery",
+      "col": 2,
+      "yOffset": 82,
+      "tag": "retry"
+    },
+    {
+      "id": "effects_pending",
+      "type": "waiting",
+      "label": "Effects Pending",
+      "sublabel": "context + diagnostics",
+      "lane": "effects",
+      "col": 0,
+      "yOffset": 164,
+      "tag": "non-blocking"
+    },
+    {
+      "id": "effects_degraded",
+      "type": "waiting",
+      "label": "Effects Degraded",
+      "sublabel": "record and retry",
+      "lane": "effects",
+      "col": 2,
+      "yOffset": 164,
+      "tag": "no rollback"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "bootstrap-ready",
+      "from": "bootstrapping",
+      "to": "edit_ready",
+      "variant": "emphasis"
+    },
+    {
+      "id": "play-requested",
+      "from": "edit_ready",
+      "to": "entering_play",
+      "variant": "emphasis"
+    },
+    {
+      "id": "play-committed",
+      "from": "entering_play",
+      "to": "playing",
+      "variant": "emphasis"
+    },
+    {
+      "id": "stop-requested",
+      "from": "playing",
+      "to": "restoring",
+      "variant": "emphasis"
+    },
+    {
+      "id": "restore-committed",
+      "from": "restoring",
+      "to": "edit_ready",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [[710, 58], [248, 58]]
+    },
+    {
+      "id": "save-requested",
+      "from": "edit_ready",
+      "to": "saving",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [[248, 218], [402, 218]]
+    },
+    {
+      "id": "save-prepared",
+      "from": "saving",
+      "to": "committing",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[402, 360], [556, 360]]
+    },
+    {
+      "id": "save-committed",
+      "from": "committing",
+      "to": "edit_ready",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [[556, 240], [164, 240], [164, 157]]
+    },
+    {
+      "id": "restore-failed",
+      "from": "restoring",
+      "to": "recoverable_failure",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight"
+    },
+    {
+      "id": "save-failed",
+      "from": "saving",
+      "to": "recoverable_failure",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [[402, 345], [710, 345]]
+    },
+    {
+      "id": "retry-new-epoch",
+      "from": "recoverable_failure",
+      "to": "bootstrapping",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [[865, 389], [865, 570], [24, 570], [24, 157]]
+    },
+    {
+      "id": "enqueue-effects",
+      "from": "edit_ready",
+      "to": "effects_pending",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[248, 471], [330, 471]]
+    },
+    {
+      "id": "effects-degraded",
+      "from": "effects_pending",
+      "to": "effects_degraded",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Stable States",
+      "items": [
+        "Edit Ready and Playing are the only interactive idle states",
+        "UI controls project the committed phase, never an in-flight promise",
+        "Stale events are rejected by transition epoch"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Transactional Work",
+      "items": [
+        "Play, Stop, Save and Reload enter one serialized transition owner",
+        "Stop keeps the previous surface until the clean candidate is ready",
+        "Save has one irreversible revision boundary and one cleanup path"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Failure Semantics",
+      "items": [
+        "Pre-commit failure retains the previous committed Runtime",
+        "Retry starts a new epoch from the authoritative Workspace snapshot",
+        "Model context and diagnostics cannot roll back Runtime state"
+      ]
+    }
+  ]
+}

@@ -1112,7 +1112,8 @@ identity equality、WebGL context loss recoverable diagnostic 及 distinct-run r
 
 ### M11：社区契约与 0.2.0 发布
 
-状态：**SCOPED / AWAITING_EXECUTION（2026-09-18）**。
+状态：**IMPLEMENTING_SLICES（2026-09-21）**。用户已验收兼容性和错误传播审计，
+并授权继续 M11。
 
 目标：把案例接入、诊断和发布变成社区可重复流程。
 
@@ -1123,7 +1124,10 @@ identity equality、WebGL context loss recoverable diagnostic 及 distinct-run r
 - V1/V2 migration/export 文档；
 - contributor guide、security guide、dependency profile guide；
 - packed install、public npm、GitHub Release 和完整 Harness E2E；
-- README 展示真实“AI → 人 → AI → Play”协作 GIF。
+- README 展示真实“AI → 人 → AI → Play”协作 GIF；
+- 使用公开的 `Threejs-editor-mcp-showcase` 视频
+  (`https://www.youtube.com/watch?v=pbrUQos2n9k`) 制作 6 宫格 Runtime
+  画面封面。
 
 验收：
 

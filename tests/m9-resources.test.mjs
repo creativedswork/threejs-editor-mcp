@@ -59,7 +59,7 @@ export default {
     private: true,
     type: 'module',
     dependencies: {
-      postprocessing: '6.37.4',
+      postprocessing: '6.39.5',
       three: '0.185.1',
     },
   }))
@@ -70,7 +70,7 @@ export default {
     entry: 'src/main.js',
     backend: 'webgl',
     dependencies: {
-      postprocessing: '6.37.4',
+      postprocessing: '6.39.5',
       three: '0.185.1',
     },
     runtime: {
@@ -136,7 +136,7 @@ test('M9 keeps large revision assets out of tool text and serves verified chunks
     })
     assert.equal(built.structuredContent.status, 'ready')
     assert.equal(built.structuredContent.assets.length, 1)
-    assert.match(built.structuredContent.dependencyProfile, /postprocessing@6\.37\.4/)
+    assert.match(built.structuredContent.dependencyProfile, /postprocessing@6\.39\.5/)
     const bundleResult = await client.readResource({
       uri: built.structuredContent.bundleUri,
     })

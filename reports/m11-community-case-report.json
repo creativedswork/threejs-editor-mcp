@@ -1,0 +1,246 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "case": {
+    "id": "runtime-contract",
+    "caseFile": "runtime-contract/case.json",
+    "project": {
+      "path": "runtime-contract",
+      "title": "Runtime Contract",
+      "entry": "runtime-contract/scene.js",
+      "backend": "webgl"
+    },
+    "source": {
+      "type": "repository",
+      "license": "MIT"
+    },
+    "compatibility": {
+      "level": "C1",
+      "lane": "deterministic-core",
+      "blocking": true
+    },
+    "capture": {
+      "viewport": {
+        "width": 960,
+        "height": 540,
+        "dpr": 1
+      },
+      "qualityTier": "default",
+      "warmupFrames": 2,
+      "frames": [
+        {
+          "id": "final",
+          "debugMode": "final",
+          "waitFrames": 1,
+          "file": "runtime-contract/artifacts/final.png"
+        },
+        {
+          "id": "normals",
+          "debugMode": "normals",
+          "waitFrames": 1,
+          "file": "runtime-contract/artifacts/normals.png"
+        }
+      ],
+      "contactSheet": {
+        "columns": 2,
+        "rows": 1,
+        "file": "runtime-contract/artifacts/contact-sheet.png"
+      }
+    }
+  },
+  "runtime": {
+    "projectId": "example-40b6a30a731cd402e785b201f496428c8f23c863b7df361d1da6f4b7",
+    "revision": "5772d24e7a8f125b2e5799d5f87b660ee2ca33fddf9820e41bd672b5b1282c42",
+    "buildId": "7e8f63bc37b18ca94d5efd2029a50a81e72f71b384a9dcb1274210b5b59e7d87",
+    "runId": "e203fa0a-8610-4ec8-91f8-926db6d6ebd5",
+    "backend": "webgl",
+    "browser": "153.0.8010.50",
+    "metrics": {
+      "frame": 36,
+      "mode": "run",
+      "cameraPosition": [
+        3.8,
+        2.6000000000000005,
+        4.799999999999999
+      ],
+      "cameraQuaternion": [
+        -0.17540764476362325,
+        0.3228818969143276,
+        0.06102760370623146,
+        0.9280382914456489
+      ],
+      "cameraUp": [
+        0,
+        1,
+        0
+      ],
+      "cameraZoom": 1,
+      "controlsTarget": [
+        0,
+        0.2,
+        0
+      ],
+      "editorObjectCount": 3,
+      "selectedScreenPosition": null,
+      "selectedBoundsCenter": null,
+      "gizmoWorldPosition": [
+        0,
+        0,
+        0
+      ],
+      "transformAxis": null,
+      "transformDragging": false,
+      "inputOwner": "runtime",
+      "runtimeInputListeners": 0,
+      "runtimeInputEvents": {},
+      "capturedPointers": 0,
+      "rendererCanvasFacade": true,
+      "resizeCount": 1,
+      "devicePixelRatio": 1,
+      "clientSize": [
+        960,
+        540
+      ],
+      "drawingBufferSize": [
+        960,
+        540
+      ],
+      "gpuTextures": 1,
+      "gpuGeometries": 1,
+      "gpuPrograms": 2,
+      "gpuResources": 0,
+      "gpuResourcesDisposed": 0,
+      "rendererCount": 1,
+      "secureContext": true,
+      "webgpuApi": true,
+      "capabilities": {
+        "backend": "webgl",
+        "available": true,
+        "secureContext": true,
+        "webgpuApi": true
+      },
+      "rendererBackend": "WebGLRenderer",
+      "renderPath": "default-renderer",
+      "buildId": "7e8f63bc37b18ca94d5efd2029a50a81e72f71b384a9dcb1274210b5b59e7d87",
+      "qualityTier": "default",
+      "debugMode": "normals",
+      "gpuRenderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
+      "gpuRendererUnmasked": true,
+      "draws": 1,
+      "triangles": 7680,
+      "fixture": "runtime-contract",
+      "vertices": 4025
+    },
+    "teardown": {
+      "frame": 37,
+      "mode": "run",
+      "cameraPosition": [
+        3.8,
+        2.6000000000000005,
+        4.799999999999999
+      ],
+      "cameraQuaternion": [
+        -0.17540764476362325,
+        0.3228818969143276,
+        0.06102760370623146,
+        0.9280382914456489
+      ],
+      "cameraUp": [
+        0,
+        1,
+        0
+      ],
+      "cameraZoom": 1,
+      "controlsTarget": [
+        0,
+        0.2,
+        0
+      ],
+      "editorObjectCount": 3,
+      "selectedScreenPosition": null,
+      "selectedBoundsCenter": null,
+      "gizmoWorldPosition": [
+        0,
+        0,
+        0
+      ],
+      "transformAxis": null,
+      "transformDragging": false,
+      "inputOwner": "runtime",
+      "runtimeInputListeners": 0,
+      "runtimeInputEvents": {},
+      "capturedPointers": 0,
+      "rendererCanvasFacade": true,
+      "resizeCount": 1,
+      "devicePixelRatio": 1,
+      "clientSize": [
+        960,
+        540
+      ],
+      "drawingBufferSize": [
+        960,
+        540
+      ],
+      "gpuTextures": 1,
+      "gpuGeometries": 1,
+      "gpuPrograms": 2,
+      "gpuResources": 0,
+      "gpuResourcesDisposed": 0,
+      "rendererCount": 1,
+      "secureContext": true,
+      "webgpuApi": true,
+      "capabilities": {
+        "backend": "webgl",
+        "available": true,
+        "secureContext": true,
+        "webgpuApi": true
+      },
+      "rendererBackend": "WebGLRenderer",
+      "renderPath": "default-renderer",
+      "buildId": "7e8f63bc37b18ca94d5efd2029a50a81e72f71b384a9dcb1274210b5b59e7d87",
+      "qualityTier": "default",
+      "debugMode": "normals",
+      "gpuRenderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro, Unspecified Version)",
+      "gpuRendererUnmasked": true,
+      "draws": 1,
+      "triangles": 7680,
+      "fixture": "runtime-contract",
+      "vertices": 4025,
+      "runId": "e203fa0a-8610-4ec8-91f8-926db6d6ebd5",
+      "inputListenersAfterExampleDispose": 0,
+      "runtimeInputListenersAfterDispose": 0,
+      "capturedPointersAfterDispose": 0,
+      "gpuResourcesAfterDispose": 0,
+      "rendererDisposed": true
+    }
+  },
+  "captures": [
+    {
+      "id": "final",
+      "debugMode": "final",
+      "file": "final.png",
+      "sha256": "594bffa7abb93cafe11316b4b9e70b2eef540a76da22a0ccb25eba54e41396ad",
+      "bytes": 100701,
+      "width": 960,
+      "height": 540,
+      "repeatedDigest": "594bffa7abb93cafe11316b4b9e70b2eef540a76da22a0ccb25eba54e41396ad"
+    },
+    {
+      "id": "normals",
+      "debugMode": "normals",
+      "file": "normals.png",
+      "sha256": "9e302603a8fd16315f0f95de17de7694f9b6072b94b3828d0477d9b9d2fea494",
+      "bytes": 104906,
+      "width": 960,
+      "height": 540,
+      "repeatedDigest": "9e302603a8fd16315f0f95de17de7694f9b6072b94b3828d0477d9b9d2fea494"
+    }
+  ],
+  "contactSheet": {
+    "file": "contact-sheet.png",
+    "sha256": "d90973ce52905ad1831c2b28d3241560b75a281df14dd7a2910078de1fa2ffac",
+    "bytes": 54062,
+    "columns": 2
+  },
+  "browserProblems": []
+}

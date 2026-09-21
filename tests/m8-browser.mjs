@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { chromium } from 'playwright'
-import { M7_RUNTIME_CHANNEL, m7BootstrapHtml } from '../src/m7-runtime.ts'
+import { WORKSPACE_RUNTIME_CHANNEL, workspaceRuntimeHtml } from '../src/workspace-runtime.ts'
 
 const webUrl = process.env.DSH_WEB_URL
 if (webUrl === undefined) throw new Error('DSH_WEB_URL is required')
@@ -265,11 +265,11 @@ async function verifyFailedStartDisposalHandshake() {
     await probe.setContent('<iframe sandbox="allow-scripts"></iframe>')
     await probe.locator('iframe').evaluate(
       (frame, source) => { frame.srcdoc = source },
-      m7BootstrapHtml(),
+      workspaceRuntimeHtml(),
     )
     await probe.frameLocator('iframe').locator('canvas').waitFor()
     const run = {
-      channel: M7_RUNTIME_CHANNEL,
+      channel: WORKSPACE_RUNTIME_CHANNEL,
       projectId: 'm8-startup-failure-probe',
       runId: '55555555-6666-4777-8888-999999999999',
       nonce: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',

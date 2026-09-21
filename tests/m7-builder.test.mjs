@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   mkdir,
   mkdtemp,
@@ -12,13 +12,54 @@ import {
 } from 'node:fs/promises'
 import { SourceMap } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import test from 'node:test'
 
-const serverPath = fileURLToPath(new URL('../dist/server.js', import.meta.url))
+const serverPath = resolve(
+  process.env.THREEJS_EDITOR_MCP_SERVER
+    ?? fileURLToPath(new URL('../dist/server.js', import.meta.url)),
+)
+const runtimeMeta = {
+  'ai.deepseek.dsh/session': {
+    sessionId: 'm7-builder-tests',
+    connectionGeneration: '11111111-2222-4333-8444-555555555555',
+  },
+}
+
+async function activateRuntime(client, { projectId, revision, runId, buildId }) {
+  const build = buildId === undefined
+    ? await client.callTool({
+        name: 'build_project',
+        arguments: { projectId, revision },
+      })
+    : { structuredContent: { status: 'ready', buildId } }
+  assert.equal(build.structuredContent.status, 'ready')
+  const prepared = await client.callTool({
+    name: 'prepare_runtime_run',
+    arguments: {
+      projectId,
+      revision,
+      buildId: build.structuredContent.buildId,
+      runId,
+      nonce: randomUUID(),
+    },
+    _meta: runtimeMeta,
+  })
+  assert.equal(prepared.isError, undefined)
+  const committed = await client.callTool({
+    name: 'commit_runtime_run',
+    arguments: {
+      projectId,
+      runtimeRef: prepared.structuredContent.runtimeRef,
+    },
+    _meta: runtimeMeta,
+  })
+  assert.equal(committed.isError, undefined)
+  return committed.structuredContent
+}
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'threejs-editor-m7-projects-'))
@@ -53,6 +94,7 @@ async function fixture() {
 import * as THREE from 'three/webgpu'
 import { color } from 'three/tsl'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
 import shader from './shader.glsl?raw'
 import { emittedParts } from './value'
 const shaderComment = \`// "./missing-template.png"
@@ -69,6 +111,7 @@ export default {
         templateBytes: shaderComment.length,
         tslColor: String(color(0xff0000)),
         controls: OrbitControls.name,
+        ktx2: KTX2Loader.name,
       }),
     }
   },
@@ -145,6 +188,11 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
       uri: built.structuredContent.bundleUri,
     })
     assert.match(bundle.contents[0].text, /M7 Builder Game|emittedParts|shaderBytes/)
+    assert.match(
+      bundle.contents[0].text,
+      /https:\/\/threejs-editor\.invalid\/runtime\/entry\.js/,
+    )
+    assert.doesNotMatch(bundle.contents[0].text, /import\.meta\.url/)
     assert.doesNotMatch(bundle.contents[0].text, /\/Users\//)
 
     const sourceMapResource = await game.client.readResource({
@@ -171,13 +219,11 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
     assert.equal(after.mtimeMs, before.mtimeMs)
 
     const runId = '11111111-2222-4333-8444-555555555555'
-    await game.client.callTool({
-      name: 'register_runtime_run',
-      arguments: {
-        projectId: 'm7-builder',
-        revision,
-        runId,
-      },
+    const registered = await activateRuntime(game.client, {
+      projectId: 'm7-builder',
+      revision,
+      buildId: built.structuredContent.buildId,
+      runId,
     })
     const staleObject = {
       uuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
@@ -198,6 +244,7 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         runId,
         objects: [staleObject],
       },
+      _meta: runtimeMeta,
     })
     const reported = await game.client.callTool({
       name: 'report_diagnostics',
@@ -208,12 +255,14 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         errors: [],
         warnings: [],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(reported.structuredContent.testedRevision, revision)
     assert.equal(reported.structuredContent.runId, runId)
     const checkedReady = await game.client.callTool({
       name: 'check_project',
       arguments: { projectId: 'm7-builder' },
+      _meta: runtimeMeta,
     })
     assert.equal(checkedReady.structuredContent.testedRevision, revision)
     assert.equal(checkedReady.structuredContent.runId, runId)
@@ -223,26 +272,26 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
     )
 
     const newerRunId = '22222222-3333-4444-8555-666666666666'
-    await game.client.callTool({
-      name: 'register_runtime_run',
-      arguments: {
-        projectId: 'm7-builder',
-        revision,
-        runId: newerRunId,
-      },
+    const newerRuntime = await activateRuntime(game.client, {
+      projectId: 'm7-builder',
+      revision,
+      buildId: built.structuredContent.buildId,
+      runId: newerRunId,
     })
     const staleRelease = await game.client.callTool({
       name: 'release_runtime_run',
       arguments: {
         projectId: 'm7-builder',
-        revision,
-        runId,
+        runtimeRef: registered.runtimeRef,
       },
+      _meta: runtimeMeta,
     })
-    assert.equal(staleRelease.structuredContent.released, false)
+    assert.equal(staleRelease.isError, true)
+    assert.match(staleRelease.content[0].text, /Runtime reference is stale/)
     const inspectedAfterNewRun = await game.client.callTool({
       name: 'inspect_editor',
       arguments: { projectId: 'm7-builder' },
+      _meta: runtimeMeta,
     })
     assert.equal(inspectedAfterNewRun.structuredContent.objects.some(
       object => object.uuid === staleObject.uuid,
@@ -255,6 +304,7 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         runId,
         objects: [],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(staleScene.isError, true)
     assert.match(staleScene.content[0].text, /runtime run changed/)
@@ -266,6 +316,7 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         runId: newerRunId,
         objects: [],
       },
+      _meta: runtimeMeta,
     })
     const staleSave = await game.client.callTool({
       name: 'apply_editor_commands',
@@ -280,6 +331,7 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
           value: [1, 0, 0],
         }],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(staleSave.isError, true)
     assert.match(staleSave.content[0].text, /unavailable for this run/)
@@ -291,6 +343,7 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         errors: [],
         warnings: [],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(missingRun.isError, true)
     assert.match(missingRun.content[0].text, /require a Runtime runId/)
@@ -303,6 +356,7 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         errors: ['stale run'],
         warnings: [],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(staleRun.isError, true)
     assert.match(staleRun.content[0].text, /runtime run changed/)
@@ -315,8 +369,32 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         errors: [],
         warnings: [],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(currentRun.structuredContent.runId, newerRunId)
+
+    const invalidSyntax = await game.client.callTool({
+      name: 'apply_project_files',
+      arguments: {
+        projectId: 'm7-builder',
+        baseRevision: revision,
+        changes: [{
+          type: 'write',
+          path: 'src/main.ts',
+          text: 'export default { setup() { return -00002 } }\n',
+        }],
+      },
+    })
+    assert.equal(invalidSyntax.isError, true)
+    assert.match(invalidSyntax.content[0].text, /Legacy octal literals/)
+    const afterInvalidSyntax = await game.client.callTool({
+      name: 'pull_project',
+      arguments: {
+        projectId: 'm7-builder',
+        currentRevision: revision,
+      },
+    })
+    assert.equal(afterInvalidSyntax.structuredContent.changed, false)
 
     const changed = await game.client.callTool({
       name: 'apply_project_files',
@@ -326,7 +404,7 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
         changes: [{
           type: 'write',
           path: 'src/main.ts',
-          text: 'export default {\\n  setup( {\\n}\\n',
+          text: "import './missing.js'\nexport default {}\n",
         }],
       },
     })
@@ -335,20 +413,21 @@ test('M7 builds a revision-bound Three.js VFS and reports source diagnostics', a
       name: 'release_runtime_run',
       arguments: {
         projectId: 'm7-builder',
-        revision,
-        runId: newerRunId,
+        runtimeRef: newerRuntime.runtimeRef,
       },
+      _meta: runtimeMeta,
     })
     assert.equal(released.structuredContent.released, true)
     const releasedAgain = await game.client.callTool({
       name: 'release_runtime_run',
       arguments: {
         projectId: 'm7-builder',
-        revision,
-        runId: newerRunId,
+        runtimeRef: newerRuntime.runtimeRef,
       },
+      _meta: runtimeMeta,
     })
-    assert.equal(releasedAgain.structuredContent.released, false)
+    assert.equal(releasedAgain.isError, true)
+    assert.match(releasedAgain.content[0].text, /Runtime reference is stale/)
     const failed = await game.client.callTool({
       name: 'build_project',
       arguments: {
@@ -528,11 +607,11 @@ test('M8 invalidates a Runtime run when its server process exits', async () => {
     })
     const revision = opened.structuredContent.revision
     const runId = '55555555-6666-4777-8888-999999999999'
-    const registered = await game.client.callTool({
-      name: 'register_runtime_run',
-      arguments: { projectId: 'm7-builder', revision, runId },
+    await activateRuntime(game.client, {
+      projectId: 'm7-builder',
+      revision,
+      runId,
     })
-    assert.equal(registered.isError, undefined)
     const reportedScene = await game.client.callTool({
       name: 'report_editor_scene',
       arguments: {
@@ -551,6 +630,7 @@ test('M8 invalidates a Runtime run when its server process exits', async () => {
           commands: ['set_position'],
         }],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(reportedScene.isError, undefined)
     const reportedDiagnostics = await game.client.callTool({
@@ -562,11 +642,13 @@ test('M8 invalidates a Runtime run when its server process exits', async () => {
         errors: ['dead runtime error'],
         warnings: [],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(reportedDiagnostics.isError, undefined)
     const activeScene = await game.client.callTool({
       name: 'inspect_editor',
       arguments: { projectId: 'm7-builder' },
+      _meta: runtimeMeta,
     })
     assert.equal(activeScene.structuredContent.objects.some(
       object => object.name === 'Stale Runtime object',
@@ -574,65 +656,51 @@ test('M8 invalidates a Runtime run when its server process exits', async () => {
     const activeDiagnostics = await game.client.callTool({
       name: 'check_project',
       arguments: { projectId: 'm7-builder' },
+      _meta: runtimeMeta,
     })
     assert.equal(activeDiagnostics.structuredContent.runId, runId)
     assert.equal(activeDiagnostics.structuredContent.errors.includes('dead runtime error'), true)
 
-    const replacement = await game.connect()
-    try {
-      const overlapping = await replacement.callTool({
-        name: 'inspect_editor',
-        arguments: { projectId: 'm7-builder' },
-      })
-      assert.equal(overlapping.structuredContent.objects.some(
-        object => object.name === 'Stale Runtime object',
-      ), false)
-      const overlappingCheck = await replacement.callTool({
-        name: 'check_project',
-        arguments: { projectId: 'm7-builder' },
-      })
-      assert.equal(overlappingCheck.structuredContent.runId, undefined)
-      assert.equal(overlappingCheck.structuredContent.errors.includes('dead runtime error'), false)
-      const replacementRunId = '66666666-7777-4888-8999-aaaaaaaaaaaa'
-      await replacement.callTool({
-        name: 'register_runtime_run',
-        arguments: { projectId: 'm7-builder', revision, runId: replacementRunId },
-      })
-      const staleSave = await game.client.callTool({
-        name: 'apply_editor_commands',
-        arguments: {
-          projectId: 'm7-builder',
-          baseRevision: revision,
-          runId,
-          source: 'human',
-          operations: [{
-            type: 'set_position',
-            objectUuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-            value: [1, 0, 0],
-          }],
-        },
-      })
-      assert.equal(staleSave.isError, true)
-      assert.match(staleSave.content[0].text, /unavailable for this run/)
-    } finally {
-      await replacement.close()
-    }
-
     await game.restart()
 
-    const inspected = await game.client.callTool({
+    const overlapping = await game.client.callTool({
       name: 'inspect_editor',
       arguments: { projectId: 'm7-builder' },
+      _meta: runtimeMeta,
     })
-    assert.equal(inspected.structuredContent.objects.some(
+    assert.equal(overlapping.structuredContent.objects.some(
       object => object.name === 'Stale Runtime object',
     ), false)
-    const checked = await game.client.callTool({
+    const overlappingCheck = await game.client.callTool({
       name: 'check_project',
       arguments: { projectId: 'm7-builder' },
+      _meta: runtimeMeta,
     })
-    assert.equal(checked.structuredContent.runId, undefined)
-    assert.equal(checked.structuredContent.errors.includes('dead runtime error'), false)
+    assert.equal(overlappingCheck.structuredContent.runId, undefined)
+    assert.equal(overlappingCheck.structuredContent.errors.includes('dead runtime error'), false)
+    const replacementRunId = '66666666-7777-4888-8999-aaaaaaaaaaaa'
+    await activateRuntime(game.client, {
+      projectId: 'm7-builder',
+      revision,
+      runId: replacementRunId,
+    })
+    const staleSave = await game.client.callTool({
+      name: 'apply_editor_commands',
+      arguments: {
+        projectId: 'm7-builder',
+        baseRevision: revision,
+        runId,
+        source: 'human',
+        operations: [{
+          type: 'set_position',
+          objectUuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          value: [1, 0, 0],
+        }],
+      },
+      _meta: runtimeMeta,
+    })
+    assert.equal(staleSave.isError, true)
+    assert.match(staleSave.content[0].text, /unavailable for this run/)
   } finally {
     await game.close()
   }
@@ -748,9 +816,34 @@ test('M8 rejects symlinked Runtime metadata files', async () => {
     })
     const revision = opened.structuredContent.revision
     const runId = '77777777-8888-4999-8aaa-bbbbbbbbbbbb'
+    const ownerMeta = {
+      'ai.deepseek.dsh/session': {
+        sessionId: 'm8-runtime-metadata',
+        connectionGeneration: '11111111-2222-4333-8444-555555555555',
+      },
+    }
+    const built = await game.client.callTool({
+      name: 'build_project',
+      arguments: { projectId: 'm7-builder', revision },
+    })
+    const prepared = await game.client.callTool({
+      name: 'prepare_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        revision,
+        buildId: built.structuredContent.buildId,
+        runId,
+        nonce: '66666666-7777-4888-8999-aaaaaaaaaaaa',
+      },
+      _meta: ownerMeta,
+    })
     await game.client.callTool({
-      name: 'register_runtime_run',
-      arguments: { projectId: 'm7-builder', revision, runId },
+      name: 'commit_runtime_run',
+      arguments: {
+        projectId: 'm7-builder',
+        runtimeRef: prepared.structuredContent.runtimeRef,
+      },
+      _meta: ownerMeta,
     })
     await game.client.callTool({
       name: 'report_editor_scene',
@@ -760,6 +853,7 @@ test('M8 rejects symlinked Runtime metadata files', async () => {
         runId,
         objects: [],
       },
+      _meta: ownerMeta,
     })
     await game.client.callTool({
       name: 'report_diagnostics',
@@ -770,6 +864,7 @@ test('M8 rejects symlinked Runtime metadata files', async () => {
         errors: [],
         warnings: [],
       },
+      _meta: ownerMeta,
     })
 
     const metadata = join(game.workspace, '.threejs-editor')
@@ -825,6 +920,7 @@ test('M7 discovers gallery projects and opens one through the MCP App contract',
   const project = join(examples, projectPath)
   await mkdir(project, { recursive: true })
   await mkdir(join(project, 'assets'), { recursive: true })
+  await mkdir(join(project, 'assets', 'dynamic'), { recursive: true })
   await mkdir(join(repository, 'dev', 'example-gallery', 'support'), { recursive: true })
   await mkdir(join(repository, 'skills', 'threejs-procedural-geometry'), { recursive: true })
   await mkdir(join(examples, 'unrelated-large-example'), { recursive: true })
@@ -848,6 +944,7 @@ const posterModule = import(/* runtime asset */ './assets/poster.png')
 const requiredPoster = require('./assets/poster.png')
 const requiredHelper = require('./common-helper.cjs')
 const topLevelTexture = new THREE.TextureLoader().load('./assets/poster.png')
+const dynamicAsset = name => \`assets/dynamic/\${name}\`
 const model = './assets/model.glb'
 const poster = \`/${sourceProjectPath}/assets/poster.png?v=1#hero\`
 const relativePoster = './assets/poster.png?v=2'
@@ -879,6 +976,7 @@ export default {
         importEqualsValue,
         requiredValue: requiredHelper.value,
         topLevelTextureName: topLevelTexture.name,
+        dynamicAsset: dynamicAsset('a.png'),
         model,
         relativePoster,
         slashEscapedPoster,
@@ -924,6 +1022,8 @@ export default {
   await writeFile(join(project, 'assets', 'button)pressed.png'), pixel)
   await writeFile(join(project, 'assets', 'css image.png'), pixel)
   await writeFile(join(project, 'assets', 'css.png'), pixel)
+  await writeFile(join(project, 'assets', 'dynamic', 'a.png'), pixel)
+  await writeFile(join(project, 'assets', 'dynamic', 'b.png'), pixel)
   await writeFile(join(project, 'assets', 'model.glb'), Buffer.from('glTF'))
   await writeFile(join(project, 'assets', 'poster.png'), pixel)
   await writeFile(join(project, 'assets', 'regex-a.png'), pixel)
@@ -1113,6 +1213,18 @@ export function createCar() {
         size: 70,
       },
       {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/dynamic/a.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
+        mediaType: 'image/png',
+        path: `${sourceProjectPath}/assets/dynamic/b.png`,
+        sha256: '2a0abc53b30336645d8b8093cf1b59eb83ab541b10e7936b97501fedcc08b849',
+        size: 70,
+      },
+      {
         mediaType: 'model/gltf-binary',
         path: `${sourceProjectPath}/assets/model.glb`,
         sha256: 'c74f919439792582aa4f0b188ec2a928675cdb3ba72797781ceb6dfaa86b313f',
@@ -1182,6 +1294,8 @@ export function createCar() {
     assert.doesNotMatch(galleryBundle.contents[0].text, /\.\/assets\/template-[ab]\.png/)
     assert.doesNotMatch(galleryBundle.contents[0].text, /["'](?:\.\/)?assets\/regex-[ab]\.png/)
     assert.doesNotMatch(galleryBundle.contents[0].text, /\.\/assets\/button\)pressed\.png/)
+    assert.match(galleryBundle.contents[0].text, /assets\/dynamic\/a\.png/)
+    assert.match(galleryBundle.contents[0].text, /assets\/dynamic\/b\.png/)
     assert.match(galleryBundle.contents[0].text, /String\.raw`\.\/assets\/poster\.png`/)
     assert.match(galleryBundle.contents[0].text, /assets\\\/poster\\\.png/)
     assert.match(galleryBundle.contents[0].text, /\.\/assets\/missing\.png/)
@@ -1289,13 +1403,11 @@ export function createCar() {
       ],
     })
     const galleryRunId = '33333333-4444-4555-8666-777777777777'
-    await client.callTool({
-      name: 'register_runtime_run',
-      arguments: {
-        projectId: opened.structuredContent.projectId,
-        revision: opened.structuredContent.revision,
-        runId: galleryRunId,
-      },
+    const galleryRuntime = await activateRuntime(client, {
+      projectId: opened.structuredContent.projectId,
+      revision: opened.structuredContent.revision,
+      buildId: built.structuredContent.buildId,
+      runId: galleryRunId,
     })
     const reported = await client.callTool({
       name: 'report_editor_scene',
@@ -1326,18 +1438,21 @@ export function createCar() {
           ],
         }],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(reported.structuredContent.objects, 1)
 
     const inspected = await client.callTool({
       name: 'inspect_editor',
       arguments: { projectId: opened.structuredContent.projectId },
+      _meta: runtimeMeta,
     })
     assert.equal(inspected.structuredContent.objects[0].name, 'VF-26')
     assert.equal(inspected.structuredContent.objects[0].uuid, carUuid)
     assert.deepEqual(inspected.structuredContent.source, {
       kind: 'workspace-entry',
       entry: `${sourceProjectPath}/scene.js`,
+      entryAlias: 'scene.js',
       readTool: 'read_project_files',
       editTool: 'apply_project_files',
     })
@@ -1357,12 +1472,14 @@ export function createCar() {
           value: 0.5,
         }],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(unsupportedMaterial.isError, true)
     assert.equal(
       (await client.callTool({
         name: 'inspect_editor',
         arguments: { projectId: opened.structuredContent.projectId },
+        _meta: runtimeMeta,
       })).structuredContent.revision,
       opened.structuredContent.revision,
     )
@@ -1390,6 +1507,7 @@ export function createCar() {
           value: true,
         }],
       },
+      _meta: runtimeMeta,
     })
     assert.deepEqual(edited.structuredContent.commandTypes, [
       'SetPositionCommand',
@@ -1482,21 +1600,23 @@ export function createCar() {
     assert.equal(inspectedAfterEdit.structuredContent.objects.some(
       object => object.uuid === carUuid,
     ), false)
-    const reloadedRunId = '44444444-5555-4666-8777-888888888888'
-    await client.callTool({
-      name: 'register_runtime_run',
+    const reloaded = await client.callTool({
+      name: 'commit_runtime_projection',
       arguments: {
         projectId: opened.structuredContent.projectId,
+        transitionId: edited.structuredContent.pendingProjection.transitionId,
+        runtimeRef: galleryRuntime.runtimeRef,
         revision: edited.structuredContent.revision,
-        runId: reloadedRunId,
       },
+      _meta: runtimeMeta,
     })
+    assert.equal(reloaded.isError, undefined)
     await client.callTool({
       name: 'report_editor_scene',
       arguments: {
         projectId: opened.structuredContent.projectId,
         revision: edited.structuredContent.revision,
-        runId: reloadedRunId,
+        runId: galleryRunId,
         objects: [{
           uuid: carUuid,
           path: 'scene/VF-26#0',
@@ -1520,10 +1640,12 @@ export function createCar() {
           ],
         }],
       },
+      _meta: runtimeMeta,
     })
     const inspectedAfterReload = await client.callTool({
       name: 'inspect_editor',
       arguments: { projectId: opened.structuredContent.projectId },
+      _meta: runtimeMeta,
     })
     assert.deepEqual(inspectedAfterReload.structuredContent.objects[0].position, [0.25, 0, 0])
     const oldDiagnostics = await client.callTool({
@@ -1531,10 +1653,11 @@ export function createCar() {
       arguments: {
         projectId: opened.structuredContent.projectId,
         testedRevision: edited.structuredContent.revision,
-        runId: reloadedRunId,
+        runId: galleryRunId,
         errors: ['old revision error'],
         warnings: [],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(oldDiagnostics.isError, undefined)
     const aiEdited = await client.callTool({
@@ -1549,30 +1672,34 @@ export function createCar() {
           value: [0.5, 0, 0],
         }],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(aiEdited.isError, undefined)
     const advanced = await client.callTool({
-      name: 'register_runtime_run',
+      name: 'commit_runtime_projection',
       arguments: {
         projectId: opened.structuredContent.projectId,
+        transitionId: aiEdited.structuredContent.pendingProjection.transitionId,
+        runtimeRef: reloaded.structuredContent.runtimeRef,
         revision: aiEdited.structuredContent.revision,
-        runId: reloadedRunId,
-        previousRevision: edited.structuredContent.revision,
       },
+      _meta: runtimeMeta,
     })
     assert.equal(advanced.isError, undefined)
     const staleRelease = await client.callTool({
       name: 'release_runtime_run',
       arguments: {
         projectId: opened.structuredContent.projectId,
-        revision: edited.structuredContent.revision,
-        runId: reloadedRunId,
+        runtimeRef: reloaded.structuredContent.runtimeRef,
       },
+      _meta: runtimeMeta,
     })
-    assert.equal(staleRelease.structuredContent.released, false)
+    assert.equal(staleRelease.isError, true)
+    assert.match(staleRelease.content[0].text, /Runtime reference is stale/)
     const diagnosticsAfterAdvance = await client.callTool({
       name: 'check_project',
       arguments: { projectId: opened.structuredContent.projectId },
+      _meta: runtimeMeta,
     })
     assert.equal(diagnosticsAfterAdvance.structuredContent.testedRevision, undefined)
     assert.equal(diagnosticsAfterAdvance.structuredContent.runId, undefined)
@@ -1581,22 +1708,23 @@ export function createCar() {
       false,
     )
     const staleAdvance = await client.callTool({
-      name: 'register_runtime_run',
+      name: 'commit_runtime_projection',
       arguments: {
         projectId: opened.structuredContent.projectId,
+        transitionId: aiEdited.structuredContent.pendingProjection.transitionId,
+        runtimeRef: reloaded.structuredContent.runtimeRef,
         revision: aiEdited.structuredContent.revision,
-        runId: reloadedRunId,
-        previousRevision: edited.structuredContent.revision,
       },
+      _meta: runtimeMeta,
     })
     assert.equal(staleAdvance.isError, true)
-    assert.match(staleAdvance.content[0].text, /revision was advanced/)
+    assert.match(staleAdvance.content[0].text, /missing, expired, or stale/)
     const advancedScene = await client.callTool({
       name: 'report_editor_scene',
       arguments: {
         projectId: opened.structuredContent.projectId,
         revision: aiEdited.structuredContent.revision,
-        runId: reloadedRunId,
+        runId: galleryRunId,
         objects: [{
           uuid: carUuid,
           path: 'scene/VF-26#0',
@@ -1620,11 +1748,13 @@ export function createCar() {
           ],
         }],
       },
+      _meta: runtimeMeta,
     })
     assert.equal(advancedScene.isError, undefined)
     const inspectedAfterAdvance = await client.callTool({
       name: 'inspect_editor',
       arguments: { projectId: opened.structuredContent.projectId },
+      _meta: runtimeMeta,
     })
     assert.deepEqual(inspectedAfterAdvance.structuredContent.objects[0].position, [0.5, 0, 0])
     assert.deepEqual(
@@ -1634,6 +1764,7 @@ export function createCar() {
     const projectAfterEdit = await client.callTool({
       name: 'inspect_project',
       arguments: { projectId: opened.structuredContent.projectId },
+      _meta: runtimeMeta,
     })
     assert.equal(projectAfterEdit.structuredContent.objects[0].name, 'VF-26')
     assert.deepEqual(projectAfterEdit.structuredContent.editorChanges, [
@@ -1700,6 +1831,34 @@ export function createCar() {
     assert.equal(car.available, true)
     assert.equal(car.backend, 'webgpu')
     assert.equal(car.title, 'Formula One Race Car')
+    const largeDynamicAsset = Buffer.concat([
+      pixel,
+      Buffer.alloc(1024 * 1024),
+    ])
+    await writeFile(
+      join(project, 'assets', 'dynamic', 'large.png'),
+      largeDynamicAsset,
+    )
+    const reopened = await client.callTool({
+      name: 'open_editor',
+      arguments: { projectPath: narrowCar.projectPath },
+      _meta: narrowMeta,
+    })
+    assert.equal(reopened.isError, undefined)
+    const refreshed = await client.callTool({
+      name: 'build_project',
+      arguments: {
+        projectId: reopened.structuredContent.projectId,
+        revision: reopened.structuredContent.revision,
+      },
+    })
+    assert.equal(refreshed.structuredContent.status, 'ready')
+    assert.equal(
+      refreshed.structuredContent.assets.find(
+        asset => asset.path.endsWith('/assets/dynamic/large.png'),
+      )?.size,
+      largeDynamicAsset.length,
+    )
     for (const [index, path] of sourceFiles.entries()) {
       assert.deepEqual(await readFile(path), originalSources[index])
     }

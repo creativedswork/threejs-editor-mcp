@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import {
   disposeOwnedRuntimeResources,
-  m7BootstrapHtml,
+  workspaceRuntimeHtml,
   runtimeGpuCapability,
   runtimeGpuCapabilityError,
-} from '../src/m7-runtime.ts'
+} from '../src/workspace-runtime.ts'
 
 test('reports explicit WebGPU capability failures without fallback', () => {
   assert.deepEqual(runtimeGpuCapability('webgl', false, false), {
@@ -22,7 +23,7 @@ test('reports explicit WebGPU capability failures without fallback', () => {
     'WEBGPU_INSECURE_CONTEXT',
   )
 
-  const script = m7BootstrapHtml()
+  const script = workspaceRuntimeHtml()
   const capabilityCheck = script.indexOf('if (!capabilities.available)')
   assert.ok(capabilityCheck > 0)
   assert.ok(capabilityCheck < script.indexOf('new THREE.WebGPURenderer(options)'))
@@ -53,8 +54,19 @@ test('disposes runtime-owned GPU resources once in reverse registration order', 
     failures: [],
   })
 
-  const script = m7BootstrapHtml()
+  const script = workspaceRuntimeHtml()
   assert.match(script, /ownGpuResource\(resource, dispose\)/)
   assert.match(script, /await disposeOwnedRuntimeResources\(current\.gpuResources\)/)
   assert.match(script, /gpuResourcesAfterDispose: current\.gpuResources\.length/)
+})
+
+test('production runtime sources contain no fixed debug collector', async () => {
+  const sources = await Promise.all([
+    readFile(new URL('../src/workspace-runtime.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/workspaces.ts', import.meta.url), 'utf8'),
+  ])
+  for (const source of sources) {
+    assert.doesNotMatch(source, /127\.0\.0\.1:7781\/event/)
+    assert.doesNotMatch(source, /#region debug-point/)
+  }
 })
