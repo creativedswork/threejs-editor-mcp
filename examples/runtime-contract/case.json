@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "type": "repository",
+    "license": "MIT"
+  },
+  "compatibility": {
+    "level": "C1",
+    "lane": "deterministic-core",
+    "blocking": true
+  },
+  "capture": {
+    "qualityTier": "default",
+    "warmupFrames": 2,
+    "frames": [
+      {
+        "id": "final",
+        "debugMode": "final",
+        "waitFrames": 1
+      },
+      {
+        "id": "normals",
+        "debugMode": "normals",
+        "waitFrames": 1
+      }
+    ],
+    "contactSheet": {
+      "columns": 2
+    }
+  }
+}

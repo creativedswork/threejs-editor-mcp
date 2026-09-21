@@ -1,0 +1,248 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m81_pool",
+          "name": "mcp__threejs__open_editor",
+          "arguments": "{\"projectPath\":\"threejs-water-optics/interactive-pool-volume\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已打开 Interactive Pool Volume，后续修改会在当前编辑器中原位更新。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "已打开 Interactive Pool Volume，后续修改会在当前编辑器中原位更新。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m81_apply_editor",
+          "name": "mcp__threejs__apply_editor_commands",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"baseRevision\":\"{{fromRequest:baseRevision=([0-9a-f]{64})}}\",\"operations\":[{\"type\":\"set_name\",\"objectUuid\":\"{{fromRequest:objectUuid=([0-9a-f-]{36})}}\",\"value\":\"Runtime Identity Probe\"},{\"type\":\"set_material_value\",\"objectUuid\":\"{{fromRequest:objectUuid=([0-9a-f-]{36})}}\",\"property\":\"opacity\",\"value\":0.85},{\"type\":\"set_material_boolean\",\"objectUuid\":\"{{fromRequest:objectUuid=([0-9a-f-]{36})}}\",\"property\":\"transparent\",\"value\":true}]}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m81_inspect_editor",
+          "name": "mcp__threejs__inspect_editor",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m81_capture_after_editor",
+          "name": "mcp__threejs__capture_runtime_frame",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"revision\":\"{{fromRequest:\\\"revision\\\":\\\"([0-9a-f]{64})\\\"}}\",\"runId\":\"{{fromRequest:runId=([0-9a-f-]{36})}}\",\"nonce\":\"{{fromRequest:nonce=([0-9a-f-]{36})}}\",\"target\":\"validation\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "编辑命令已应用，Runtime 身份已续接，截帧验证完成。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "编辑命令已应用，Runtime 身份已续接，截帧验证完成。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m81_frost",
+          "name": "mcp__threejs__open_editor",
+          "arguments": "{\"projectPath\":\"threejs-temporal-surfaces/touch-history-frost\"}"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已打开 Touch History Frost；两个工程保持独立编辑状态。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "已打开 Touch History Frost；两个工程保持独立编辑状态。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "当前模型不支持图像输入，因此停止自动视觉判断。请在编辑器中点击水面、拖动观察视角，并确认新球出现、水面波纹扩散且活动编辑器的选中与相机未变化；等待用户提供实际结果后继续。在收到人工观察前，不得自行推断视觉结果或声称自动视觉验证通过。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "当前模型不支持图像输入，因此停止自动视觉判断。请在编辑器中点击水面、拖动观察视角，并确认新球出现、水面波纹扩散且活动编辑器的选中与相机未变化；等待用户提供实际结果后继续。在收到人工观察前，不得自行推断视觉结果或声称自动视觉验证通过。"
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

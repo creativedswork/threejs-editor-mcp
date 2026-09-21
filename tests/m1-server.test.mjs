@@ -93,6 +93,17 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       'create_workspace',
       'open_editor',
       'inspect_project',
+      'prepare_runtime_run',
+      'commit_runtime_run',
+      'commit_runtime_projection',
+      'release_runtime_run',
+      'grant_active_runtime_control',
+      'pull_runtime_command',
+      'start_runtime_command',
+      'settle_runtime_command',
+      'capture_runtime_frame',
+      'read_runtime_logs',
+      'simulate_player_actions',
       'report_editor_scene',
       'inspect_editor',
       'apply_editor_commands',
@@ -124,8 +135,16 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       resourceUri: 'ui://threejs-editor/app',
       visibility: ['model'],
     })
+    assert.match(
+      byName.get('open_editor')?.description ?? '',
+      /project mutations update the same project-bound Editor automatically.*do not call open_editor again/,
+    )
     assert.deepEqual(byName.get('inspect_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('build_project')?._meta?.ui?.visibility, ['model', 'app'])
+    assert.deepEqual(byName.get('prepare_runtime_run')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(byName.get('commit_runtime_run')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(byName.get('commit_runtime_projection')?._meta?.ui?.visibility, ['app'])
+    assert.deepEqual(byName.get('release_runtime_run')?._meta?.ui?.visibility, ['app'])
     assert.deepEqual(byName.get('report_editor_scene')?._meta?.ui?.visibility, ['app'])
     assert.deepEqual(
       byName.get('inspect_editor')?._meta?.ui?.visibility,
@@ -138,6 +157,10 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.deepEqual(byName.get('read_project_files')?._meta?.ui?.visibility, ['model', 'app'])
     assert.deepEqual(byName.get('search_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('apply_project_files')?._meta?.ui?.visibility, ['model', 'app'])
+    assert.match(
+      byName.get('apply_project_files')?.description ?? '',
+      /project-bound Editor is created or updated automatically.*do not call open_editor again/,
+    )
     assert.deepEqual(byName.get('apply_scene_changes')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('check_project')?._meta?.ui?.visibility, ['model'])
     assert.deepEqual(byName.get('pull_project')?._meta?.ui?.visibility, ['app'])
@@ -387,6 +410,23 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     ])
     assert.match(inspected.content[0]?.text, /"layout":"wide","cameraView":"overhead"/)
     assert.match(inspected.content[0]?.text, /Changed table layout from classic to wide/)
+    const editorInspection = await client.callTool({
+      name: 'inspect_editor',
+      arguments: { projectId: 'm1-pong' },
+    })
+    assert.deepEqual(editorInspection.structuredContent.source, {
+      kind: 'scene-script',
+      readTool: 'inspect_project',
+      editTool: 'apply_scene_changes',
+      operation: 'replace_script',
+    })
+    const fieldMaterial = editorInspection.structuredContent.objects
+      .find(object => object.name === 'Field').material
+    assert.equal(fieldMaterial.type, 'MeshStandardMaterial')
+    assert.deepEqual(
+      fieldMaterial.properties.map(property => property.name),
+      ['color', 'roughness', 'metalness', 'opacity', 'transparent', 'wireframe'],
+    )
     assert.deepEqual(
       (await readdir(join(root, 'm1-pong'))).sort(),
       ['assets', 'project.json'],
@@ -677,6 +717,8 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.equal(content?.text?.includes('Properties'), true)
     assert.equal(content?.text?.includes('data-fullscreen'), true)
     assert.equal(content?.text?.includes('requestDisplayMode'), true)
+    assert.equal(content?.text?.includes('updateModelContext'), true)
+    assert.equal(content?.text?.includes('Use this opaque reference'), true)
     assert.equal(content?.text?.includes('data-runtime-sandbox'), true)
     assert.equal(content?.text?.includes('sandbox="allow-scripts"'), true)
     assert.equal(content?.text?.includes('allow-same-origin'), false)
@@ -684,7 +726,6 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
     assert.equal(content?.text?.includes('<script src='), false)
     assert.equal(content?.text?.includes('<link '), false)
     assert.deepEqual(content?._meta?.ui?.csp, {
-      connectDomains: [],
       resourceDomains: [],
       frameDomains: [],
       baseUriDomains: [],
@@ -710,7 +751,7 @@ test('server persists revisioned projects, copies conflicts, and confines its ro
       ['color.js', 'main.js'],
     )
     assert.deepEqual(runtimeManifest.modules[1].dependencies, [{
-      token: '__M5_COLOR_MODULE__',
+      token: '__ISOLATION_FIXTURE_COLOR_MODULE__',
       path: 'color.js',
     }])
 

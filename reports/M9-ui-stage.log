@@ -1,0 +1,33 @@
+
+> threejs-editor-mcp@0.1.0 test:e2e:m9-ui /Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp
+> node tests/m9-ui-browser.mjs
+
+[m9-ui +2ms] reusing isolated profile at /var/folders/s2/25w91rj147zd7j5yw736d3bc0000gq/T/threejs-m9-ui.mVoSrL/home
+[m9-ui +2ms] doctor: checking installed bundle and local MCP server
+[m9-ui +7ms] dump-config: checking mcp-apps and threejs overlays
+$ node --import tsx/esm apps/cli/src/bin.ts --profile web --patch /Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp/tests/fixtures/m9/replay.patch.yml --patch /Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp/tests/fixtures/m9/cordis.patch.yml --dump-config
+[m9-ui +6546ms] starting isolated DSH at http://127.0.0.1:55824
+[m9-host] dsh web: http://127.0.0.1:55824
+[m9-ui +10354ms] launching browser
+[m9-ui +22073ms] navigating to http://127.0.0.1:55824
+[m9-ui +64142ms] submitting open-editor replay prompt
+[m9-ui +66276ms] waiting for editor app frame
+[m9-ui +131386ms] cleaned isolated processes; run root preserved at /var/folders/s2/25w91rj147zd7j5yw736d3bc0000gq/T/threejs-m9-ui.mVoSrL
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+locator.waitFor: Timeout 60000ms exceeded.
+Call log:
+[2m  - waiting for locator('iframe[title="MCP App: mcp__threejs__open_editor"]').last() to be visible[22m
+
+    at appFrame (/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp/tests/m9-ui-browser.mjs:271:15)
+    at /Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp/tests/m9-ui-browser.mjs:359:21 {
+  log: [
+    `  - waiting for locator('iframe[title="MCP App: mcp__threejs__open_editor"]').last() to be visible`
+  ],
+  name: 'TimeoutError'
+}
+
+Node.js v24.18.0
+ ELIFECYCLE  Command failed with exit code 1.

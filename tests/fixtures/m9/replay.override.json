@@ -1,0 +1,104 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "tool-call" },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m9_clouds",
+          "name": "mcp__threejs__open_editor",
+          "arguments": "{\"projectPath\":\"threejs-volumetric-clouds/weather-volume-clouds\"}"
+        }
+      },
+      { "type": "finish", "reason": { "kind": "tool-calls" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "text" },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已打开 Weather Volume Clouds。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": { "type": "text", "text": "已打开 Weather Volume Clouds。" }
+      },
+      { "type": "finish", "reason": { "kind": "stop" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "tool-call" },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m9_read_clouds",
+          "name": "mcp__threejs__read_project_files",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"files\":[{\"path\":\"dev/example-gallery/examples/threejs-volumetric-clouds/weather-volume-clouds/scene.js\"}]}"
+        }
+      },
+      { "type": "finish", "reason": { "kind": "tool-calls" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "tool-call" },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m9_apply_clouds",
+          "name": "mcp__threejs__apply_project_files",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"baseRevision\":\"{{fromRequest:baseRevision=([0-9a-f]{64})}}\",\"changes\":[{\"type\":\"write\",\"path\":\"dev/example-gallery/examples/threejs-volumetric-clouds/weather-volume-clouds/scene.js\",\"text\":\"{{fromRequest:(import \\{[\\s\\S]*?clouds\\.coverage = )0\\.4;}}0.46;{{fromRequest:clouds\\.coverage = 0\\.4;([\\s\\S]*?function loadSTBNTexture\\(\\)[\\s\\S]*?\\\\n\\}\\\\n)\"\\}\\]}}\"}]}"
+        }
+      },
+      { "type": "finish", "reason": { "kind": "tool-calls" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "tool-call" },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m9_build_clouds",
+          "name": "mcp__threejs__build_project",
+          "arguments": "{\"projectId\":\"{{fromRequest:projectId=(example-[0-9a-f]{56})}}\",\"revision\":\"{{fromRequest:at revision ([0-9a-f]{64})}}\"}"
+        }
+      },
+      { "type": "finish", "reason": { "kind": "tool-calls" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "text" },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已将云层覆盖度调整为 0.46，并完成构建。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": { "type": "text", "text": "已将云层覆盖度调整为 0.46，并完成构建。" }
+      },
+      { "type": "finish", "reason": { "kind": "stop" } }
+    ]
+  }
+]

@@ -34,4 +34,18 @@ export default defineConfig([
       entryFileNames: 'view.js',
     },
   },
+  {
+    name: 'threejs-editor-mcp/workspace-runtime',
+    entry: { 'workspace-runtime': 'src/workspace-runtime.ts' },
+    outDir: 'dist',
+    format: 'esm',
+    platform: 'node',
+    target: 'node22',
+    dts: false,
+    clean: false,
+    fixedExtension: false,
+    outputOptions: {
+      entryFileNames: 'workspace-runtime.js',
+    },
+  },
 ])

@@ -1,0 +1,31 @@
+{
+  "title": "Runtime Contract",
+  "description": "A repository-owned scene for validating community case discovery and capture.",
+  "backend": "WebGL2",
+  "techniques": [
+    "runtime lifecycle",
+    "debug mode capture",
+    "deterministic geometry"
+  ],
+  "defaultViewport": {
+    "width": 960,
+    "height": 540
+  },
+  "defaultDpr": 1,
+  "debugModes": [
+    {
+      "value": "final",
+      "label": "Final"
+    },
+    {
+      "value": "normals",
+      "label": "Normals"
+    }
+  ],
+  "controls": [
+    "orbit",
+    "pause",
+    "debugMode",
+    "capture"
+  ]
+}

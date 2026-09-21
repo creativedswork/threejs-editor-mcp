@@ -1,6 +1,6 @@
 {
   "name": "threejs-editor-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A lightweight Three.js editor delivered as an MCP App",
   "license": "MIT",
   "keywords": [
@@ -28,9 +28,20 @@
   },
   "files": [
     "dist",
-    "docs",
+    "docs/COMMUNITY-CASES.md",
+    "docs/DEPENDENCY-PROFILE.md",
+    "docs/MIGRATION.md",
+    "docs/USER-OPERATIONS.md",
+    "examples/runtime-contract",
+    "reports/assets/m11-six-runtime-cover.png",
+    "reports/m11-community-case-report.json",
+    "scripts/capture-case.mjs",
+    "scripts/validate-cases.mjs",
     "README.md",
     "README.zh-CN.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
@@ -46,6 +57,21 @@
     "test:e2e:m6": "node tests/m6-browser.mjs",
     "test:e2e:m7": "node tests/m7-browser.mjs",
     "test:e2e:m7-gallery": "node tests/m7-gallery-browser.mjs",
+    "test:e2e:m8": "node tests/m8-browser.mjs",
+    "test:e2e:m81": "node tests/m81-browser.mjs",
+    "test:e2e:m9": "node tests/m9-browser.mjs",
+    "test:e2e:m9-ui": "node tests/m9-ui-browser.mjs",
+    "test:e2e:m10": "node tests/m10-browser.mjs",
+    "test:e2e:m10-ui": "node tests/m10-ui-browser.mjs",
+    "test:e2e:m10-real": "node tests/m10-real-model-browser.mjs",
+    "test:corpus:m8": "node tests/m8-corpus-build.mjs",
+    "test:corpus:m9": "node tests/m9-corpus-build.mjs",
+    "prepare:m10:p6": "node scripts/prepare-m10-p6.mjs",
+    "prepare:m10:g1": "node scripts/prepare-m10-g1.mjs",
+    "test:corpus:m10": "node tests/m10-corpus-build.mjs",
+    "test:fixture:m10": "node tests/m10-g1-build.mjs",
+    "validate:cases": "node scripts/validate-cases.mjs",
+    "capture:case": "node scripts/capture-case.mjs",
     "check:upstream": "node scripts/sync-three-editor.mjs",
     "test:pack": "pnpm run build && node tests/packed-install.mjs",
     "check": "pnpm run check:upstream && pnpm run typecheck && pnpm run test",
@@ -60,15 +86,21 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "1.7.5",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "@petamoriken/float16": "3.9.2",
+    "astronomy-engine": "2.1.19",
     "esbuild": "0.25.3",
+    "postprocessing": "6.39.5",
     "three": "0.185.1",
+    "three-stdlib": "2.36.0",
+    "typescript": "6.0.3",
     "zod": "4.4.3"
+  },
+  "optionalDependencies": {
+    "playwright": "1.61.1"
   },
   "devDependencies": {
     "@types/node": "22.20.1",
     "@types/three": "0.185.4",
-    "playwright": "1.61.1",
-    "tsdown": "0.22.14",
-    "typescript": "6.0.3"
+    "tsdown": "0.22.14"
   }
 }

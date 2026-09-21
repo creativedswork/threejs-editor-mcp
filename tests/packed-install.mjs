@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
+  cp,
   mkdtemp,
   mkdir,
   readFile,
@@ -42,11 +43,12 @@ try {
 
   const packageRoot = join(installed, 'node_modules', 'threejs-editor-mcp')
   const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
-  assert.equal(manifest.version, '0.1.0')
+  assert.equal(manifest.version, '0.2.0')
   assert.equal(manifest.bin['threejs-editor-mcp'], 'dist/server.js')
   await Promise.all([
     readFile(join(packageRoot, 'dist', 'server.js')),
     readFile(join(packageRoot, 'dist', 'view.js')),
+    readFile(join(packageRoot, 'dist', 'workspace-runtime.js')),
     readFile(join(packageRoot, 'README.md')),
     readFile(join(packageRoot, 'README.zh-CN.md')),
     readFile(join(packageRoot, 'LICENSE')),
@@ -55,7 +57,7 @@ try {
   const command = join(installed, 'node_modules', '.bin', 'threejs-editor-mcp')
   const client = new Client({
     name: 'threejs-editor-packed-install',
-    version: '0.1.0',
+    version: '0.2.0',
   })
   await client.connect(new StdioClientTransport({
     command,
@@ -79,6 +81,24 @@ try {
   } finally {
     await client.close()
   }
+
+  const captureRoot = join(temporary, 'capture-source')
+  await cp(join(packageRoot, 'examples'), captureRoot, { recursive: true })
+  const captureReport = join(temporary, 'capture.json')
+  execFileSync(process.execPath, [
+    join(packageRoot, 'scripts', 'capture-case.mjs'),
+    captureRoot,
+    'runtime-contract',
+    '--server',
+    join(packageRoot, 'dist', 'server.js'),
+    '--output',
+    join(temporary, 'capture'),
+    '--report',
+    captureReport,
+  ], { cwd: packageRoot, stdio: 'pipe' })
+  const captured = JSON.parse(await readFile(captureReport, 'utf8'))
+  assert.equal(captured.status, 'passed')
+  assert.notEqual(captured.runtime.runId, captured.runtime.replayRunId)
 
   process.stdout.write(`${JSON.stringify({
     archive,

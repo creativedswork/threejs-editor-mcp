@@ -1,7 +1,7 @@
-export const M5_RUNTIME_RESOURCE_URI = 'threejs-m5://runtime/module-graph'
-export const M5_COMMAND_PROOF_RESOURCE_URI = 'threejs-m5://official-editor/command-proof'
+export const RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI = 'threejs-m5://runtime/module-graph'
+export const RUNTIME_ISOLATION_COMMAND_PROOF_URI = 'threejs-m5://official-editor/command-proof'
 
-export interface M5RuntimeModule {
+export interface RuntimeIsolationFixtureModule {
   path: string
   dependencies: Array<{
     token: string
@@ -10,13 +10,13 @@ export interface M5RuntimeModule {
   source: string
 }
 
-export interface M5RuntimeManifest {
+export interface RuntimeIsolationFixtureManifest {
   schemaVersion: 1
   entry: string
-  modules: M5RuntimeModule[]
+  modules: RuntimeIsolationFixtureModule[]
 }
 
-export const M5_RUNTIME_MANIFEST: M5RuntimeManifest = {
+export const RUNTIME_ISOLATION_FIXTURE_MANIFEST: RuntimeIsolationFixtureManifest = {
   schemaVersion: 1,
   entry: 'main.js',
   modules: [
@@ -38,9 +38,9 @@ export const vertices = new Float32Array([
     },
     {
       path: 'main.js',
-      dependencies: [{ token: '__M5_COLOR_MODULE__', path: 'color.js' }],
+      dependencies: [{ token: '__ISOLATION_FIXTURE_COLOR_MODULE__', path: 'color.js' }],
       source: `
-import { palette, vertices } from '__M5_COLOR_MODULE__'
+import { palette, vertices } from '__ISOLATION_FIXTURE_COLOR_MODULE__'
 
 function compile(gl, type, source) {
   const shader = gl.createShader(type)
@@ -145,7 +145,7 @@ export async function start(canvas, emit) {
       modules: ['color.js', 'main.js'],
     },
     triggerUnhandled() {
-      Promise.reject(new Error('M5 expected unhandled rejection'))
+      Promise.reject(new Error('Expected isolation fixture rejection'))
     },
     dispose() {
       disposed = true

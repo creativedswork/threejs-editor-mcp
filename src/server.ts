@@ -2,6 +2,7 @@
 
 import { parseArgs } from 'node:util'
 import { readFile } from 'node:fs/promises'
+import { posix } from 'node:path'
 import {
   RESOURCE_MIME_TYPE,
   registerAppResource,
@@ -32,6 +33,8 @@ import {
   type ProjectSummary,
 } from './projects.js'
 import {
+  MATERIAL_BOOLEAN_PROPERTIES,
+  MATERIAL_NUMBER_PROPERTIES,
   applyOfficialEditorCommands,
   editorProjectFromSnapshots,
   inspectOfficialEditor,
@@ -40,20 +43,24 @@ import {
   type EditorObjectSnapshot,
 } from './official-editor.js'
 import {
-  M5_COMMAND_PROOF_RESOURCE_URI,
-  M5_RUNTIME_MANIFEST,
-  M5_RUNTIME_RESOURCE_URI,
-} from './m5-runtime.js'
+  RUNTIME_ISOLATION_COMMAND_PROOF_URI,
+  RUNTIME_ISOLATION_FIXTURE_MANIFEST,
+  RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI,
+} from './runtime-isolation-fixture.js'
 import {
+  RUNTIME_COMMAND_MIN_TIMEOUT_MS,
   WORKSPACE_EDITOR_STATE_PATH,
   type WorkspaceEditorState,
-} from './m7-runtime.js'
+} from './workspace-runtime.js'
 import {
   WorkspaceStore,
+  RESOURCE_CHUNK_BYTES,
+  workspaceCapabilitiesSchema,
   workspaceChangeSchema,
   workspaceFileSchema,
   workspaceParameterSchema,
   workspacePathSchema,
+  type RuntimeOwner,
   type WorkspaceRegistration,
   type WorkspaceSnapshot,
   type WorkspaceSummary,
@@ -62,10 +69,36 @@ import {
 const RESOURCE_URI = 'ui://threejs-editor/app'
 const BUILD_RESOURCE_TEMPLATE =
   'threejs-build://runtime/{projectId}/{buildId}/{artifact}'
+const ASSET_RESOURCE_TEMPLATE =
+  'threejs-asset://runtime/{projectId}/{revision}/{sha256}/{chunk}'
 const DSH_WORKSPACE_META_KEY = 'ai.deepseek.dsh/workspace'
+const DSH_SESSION_META_KEY = 'ai.deepseek.dsh/session'
 const MAX_RUNTIME_EDITOR_OBJECTS = 2_048
+const M81_PROMPT_NAME = 'threejs-runtime-validation'
+const M81_PROMPT = `分析当前任务。
+
+如果当前 Harness 提供 SubAgent 工具，并且子任务能够独立并行，先并行启动：
+1. 测试清单生成 Agent
+2. 风险与覆盖分析 Agent
+
+SubAgent 只负责分析，不修改工程。合并结果后，使用当前可用的
+Three.js Runtime Harness 工具执行测试并收集证据。
+
+测试完成后，启动未参与修改和测试执行的独立评分 Agent。
+
+按正确性、覆盖率、回归风险控制、可复现性评分。
+低于 85 分时修正并重新测试，最多两轮。
+第二轮仍低于 85 分时，报告未通过项和残余风险，不得声称验证通过。
+
+仅使用当前实际提供的取证工具。工具不可用时，明确标记未自动验证，
+不得伪造截图、日志、玩家操作或测试结论。
+
+执行视觉验证前，先判断当前模型是否支持图像输入。
+支持图像输入时，使用 capture_runtime_frame 获取并检查视觉证据。
+不支持图像输入时，停止自动视觉判断并进入意图对齐：
+向用户说明需要操作和观察的内容，等待用户提供实际结果后继续。
+不得自行推断视觉结果或声称自动验证通过。`
 const CSP = {
-  connectDomains: [] as string[],
   resourceDomains: [] as string[],
   frameDomains: [] as string[],
   baseUriDomains: [] as string[],
@@ -84,6 +117,181 @@ const sessionProjectPathSchema = z.string()
     message: 'projectPath must be a relative POSIX path',
   })
 const revisionSchema = z.string().regex(/^[a-f0-9]{64}$/)
+const runIdSchema = z.string().uuid()
+const nonceSchema = z.string().uuid()
+const runtimeRefSchema = z.string().uuid()
+const runtimeOwnerSchema = z.object({
+  sessionId: z.string().min(1).max(128),
+  connectionGeneration: z.string().uuid(),
+})
+const runtimeIdentitySchema = z.object({
+  execution: z.object({
+    projectId: projectIdSchema,
+    runId: runIdSchema,
+    nonce: nonceSchema,
+    owner: runtimeOwnerSchema,
+  }),
+  projection: z.object({
+    workspaceRevision: revisionSchema,
+    generation: z.number().int().nonnegative(),
+    loadedBuild: z.object({
+      buildId: z.string().regex(/^[a-f0-9]{64}$/),
+      sourceRevision: revisionSchema,
+    }),
+  }),
+})
+const runtimeReferenceSchema = z.object({
+  projectId: projectIdSchema,
+  runtimeRef: runtimeRefSchema,
+})
+const registeredRuntimeSchema = runtimeIdentitySchema.extend({
+  runtimeRef: runtimeRefSchema,
+  evidenceToken: nonceSchema,
+})
+const preparedRuntimeRunSchema = registeredRuntimeSchema.extend({
+  expiresAt: z.string().datetime(),
+})
+const pendingRuntimeProjectionSchema = z.object({
+  transitionId: z.string().uuid(),
+  execution: runtimeIdentitySchema.shape.execution,
+  baseRevision: revisionSchema,
+  targetRevision: revisionSchema,
+  expectedGeneration: z.number().int().nonnegative(),
+  expiresAt: z.string().datetime(),
+})
+const runtimeHarnessAddressShape = {
+  projectId: projectIdSchema,
+  runtimeRef: runtimeRefSchema.describe(
+    'Use the opaque reference from the latest Editor Runtime context.',
+  ),
+}
+const runtimeTargetSchema = z.enum(['active', 'validation'])
+const runtimeHarnessTargetSchema = runtimeTargetSchema.default('validation').describe(
+  'Omit target for ordinary checks. The default validation Runtime is isolated and requires no Editor grant. Use active only after the user explicitly asks to inspect the current live Runtime.',
+)
+const activeIntentSchema = z.literal('user-requested').optional().describe(
+  'Deprecated compatibility hint. Editor-issued authorization is the sole authority.',
+)
+const normalizedPointSchema = z.array(z.number().min(0).max(1)).length(2) as unknown as z.ZodType<[number, number]>
+const playerActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.enum(['pointerMove', 'pointerDown', 'pointerUp', 'click']),
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    button: z.number().int().min(0).max(4).default(0),
+  }),
+  z.object({
+    type: z.literal('drag'),
+    from: normalizedPointSchema,
+    to: normalizedPointSchema,
+    button: z.number().int().min(0).max(4).default(0),
+    steps: z.number().int().min(1).max(60).default(8),
+  }),
+  z.object({
+    type: z.literal('wheel'),
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    deltaX: z.number().min(-2_000).max(2_000).default(0),
+    deltaY: z.number().min(-2_000).max(2_000),
+  }),
+  z.object({
+    type: z.enum(['keyDown', 'keyUp']),
+    key: z.string().min(1).max(32),
+    code: z.string().min(1).max(32).optional(),
+  }),
+  z.object({
+    type: z.literal('waitFrames'),
+    frames: z.number().int().min(1).max(600),
+    frameDurationMs: z.number().positive().max(100).optional(),
+  }),
+])
+const runtimeEvidenceIdentitySchema = runtimeIdentitySchema.extend({
+  target: runtimeTargetSchema,
+})
+const runtimeLogEntrySchema = z.object({
+  cursor: z.number().int().nonnegative(),
+  timestamp: z.string().datetime(),
+  level: z.enum(['debug', 'info', 'warn', 'error']),
+  message: z.string().max(2_048),
+})
+const runtimeEvidenceSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('capture-frame'),
+    runtime: runtimeEvidenceIdentitySchema,
+    evidenceId: z.string().uuid(),
+    evidenceToken: nonceSchema,
+    digest: revisionSchema,
+    mimeType: z.enum(['image/png', 'image/jpeg']),
+    data: z.string().max(512 * 1024),
+    width: z.number().int().positive().max(1_024),
+    height: z.number().int().positive().max(1_024),
+    frame: z.number().int().nonnegative(),
+    deterministic: z.boolean().optional(),
+    qualityTier: z.string().min(1).max(80).optional(),
+    debugMode: z.string().min(1).max(80).optional(),
+    capturedAt: z.string().datetime(),
+  }),
+  z.object({
+    kind: z.literal('runtime-logs'),
+    runtime: runtimeEvidenceIdentitySchema,
+    evidenceId: z.string().uuid(),
+    evidenceToken: nonceSchema,
+    entries: z.array(runtimeLogEntrySchema).max(500),
+    nextCursor: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  }),
+  z.object({
+    kind: z.literal('action-trace'),
+    runtime: runtimeEvidenceIdentitySchema,
+    evidenceId: z.string().uuid(),
+    evidenceToken: nonceSchema,
+    status: z.enum(['completed', 'failed', 'cancelled']),
+    startFrame: z.number().int().nonnegative(),
+    endFrame: z.number().int().nonnegative(),
+    trace: z.array(z.object({
+      index: z.number().int().nonnegative(),
+      type: z.string(),
+      frame: z.number().int().nonnegative(),
+      status: z.enum(['completed', 'failed']),
+      handled: z.boolean().optional(),
+      message: z.string().max(1_024).optional(),
+    })).max(32),
+  }),
+  z.object({
+    kind: z.literal('runtime-harness-error'),
+    runtime: runtimeEvidenceIdentitySchema,
+    evidenceId: z.string().uuid(),
+    evidenceToken: nonceSchema,
+    status: z.literal('failed'),
+    message: z.string().min(1).max(2_048),
+  }),
+])
+const runtimeCommandFailureStageSchema = z.enum(['prepare', 'execute', 'settle'])
+const runtimeCommandFailureCodeSchema = z.enum([
+  'TARGET_PREPARATION_FAILED',
+  'TARGET_EXECUTION_FAILED',
+  'EVIDENCE_REJECTED',
+])
+const runtimeCommandOutcomeSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('succeeded'),
+    evidence: runtimeEvidenceSchema,
+  }),
+  z.object({
+    status: z.literal('failed'),
+    stage: runtimeCommandFailureStageSchema,
+    code: runtimeCommandFailureCodeSchema,
+    message: z.string().min(1).max(2_048),
+  }),
+  z.object({
+    status: z.literal('cancelled'),
+    reason: z.string().min(1).max(2_048),
+  }),
+  z.object({
+    status: z.literal('expired'),
+    stage: runtimeCommandFailureStageSchema,
+  }),
+])
 const buildIdSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const buildDiagnosticSchema = z.object({
   severity: z.enum(['error', 'warning']),
@@ -113,6 +321,9 @@ const buildOutputSchema = z.object({
     sha256: revisionSchema,
     size: z.number().int().nonnegative(),
     mediaType: z.string(),
+    external: z.literal(true).optional(),
+    resourceUri: z.string().optional(),
+    chunks: z.number().int().positive().optional(),
   })).optional(),
   bundleUri: z.string().optional(),
   sourceMapUri: z.string().optional(),
@@ -144,15 +355,60 @@ const workspaceViewSchema = z.object({
   entry: workspacePathSchema,
   backend: z.enum(['webgl', 'webgpu', 'raw-webgpu']),
   debugModes: z.array(z.string()),
+  qualityTiers: z.array(z.string()),
   parameters: z.array(workspaceParameterSchema),
+  capabilities: workspaceCapabilitiesSchema.optional(),
   files: z.array(workspaceFileSchema),
 })
+const editorSourceSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('workspace-entry'),
+    entry: workspacePathSchema,
+    entryAlias: workspacePathSchema,
+    readTool: z.literal('read_project_files'),
+    editTool: z.literal('apply_project_files'),
+  }),
+  z.object({
+    kind: z.literal('scene-script'),
+    readTool: z.literal('inspect_project'),
+    editTool: z.literal('apply_scene_changes'),
+    operation: z.literal('replace_script'),
+  }),
+])
 const sceneObjectSchema = z.object({
   name: z.string(),
   type: z.string(),
   visible: z.boolean(),
   position: z.tuple([z.number(), z.number(), z.number()]),
   color: z.string().optional(),
+})
+const editorMaterialPropertySchema = z.discriminatedUnion('kind', [
+  z.object({
+    name: z.literal('color'),
+    kind: z.literal('color'),
+    value: z.string().regex(/^#[a-fA-F0-9]{6}$/),
+    command: z.literal('set_material_color'),
+  }),
+  z.object({
+    name: z.enum(MATERIAL_NUMBER_PROPERTIES),
+    kind: z.literal('number'),
+    value: z.number(),
+    min: z.literal(0),
+    max: z.literal(1),
+    command: z.literal('set_material_value'),
+  }),
+  z.object({
+    name: z.enum(MATERIAL_BOOLEAN_PROPERTIES),
+    kind: z.literal('boolean'),
+    value: z.boolean(),
+    command: z.literal('set_material_boolean'),
+  }),
+])
+const editorMaterialSchema = z.object({
+  uuid: z.string().uuid(),
+  type: z.string().min(1),
+  name: z.string().min(1).optional(),
+  properties: z.array(editorMaterialPropertySchema),
 })
 const editorObjectSchema = z.object({
   uuid: z.string().uuid(),
@@ -165,9 +421,10 @@ const editorObjectSchema = z.object({
   rotationDegrees: z.array(z.number()).length(3),
   scale: z.array(z.number()).length(3),
   color: z.string().optional(),
+  material: editorMaterialSchema.optional(),
   commands: z.array(z.string()),
 })
-const vector3Schema = z.tuple([z.number(), z.number(), z.number()])
+const vector3Schema = z.array(z.number()).length(3) as unknown as z.ZodType<[number, number, number]>
 const sceneOperationSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('update_object'),
@@ -236,8 +493,14 @@ const editorCommandSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('set_material_value'),
     objectUuid: z.string().uuid(),
-    property: z.literal('roughness'),
+    property: z.enum(MATERIAL_NUMBER_PROPERTIES),
     value: z.number().min(0).max(1),
+  }),
+  z.object({
+    type: z.literal('set_material_boolean'),
+    objectUuid: z.string().uuid(),
+    property: z.enum(MATERIAL_BOOLEAN_PROPERTIES),
+    value: z.boolean(),
   }),
 ])
 const runtimeEditorObjectSchema = editorObjectSchema.extend({
@@ -248,8 +511,15 @@ const runtimeEditorObjectSchema = editorObjectSchema.extend({
 })
 const runtimeEditorSceneSchema = z.object({
   schemaVersion: z.literal(1),
+  runId: z.string().uuid(),
   objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
 })
+
+function runtimeEditorScene(value: unknown): z.infer<typeof runtimeEditorSceneSchema> | undefined {
+  const parsed = runtimeEditorSceneSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
 const editorChangeSchema = z.object({
   source: z.enum(['human', 'ai', 'unknown']),
   type: z.enum([
@@ -260,6 +530,7 @@ const editorChangeSchema = z.object({
     'set_visible',
     'set_material_color',
     'set_material_value',
+    'set_material_boolean',
   ]),
   objectUuid: z.string().uuid(),
   objectName: z.string(),
@@ -269,6 +540,7 @@ const editorChangeSchema = z.object({
 const workspaceEditorStateSchema = z.object({
   schemaVersion: z.literal(1),
   operations: z.array(editorCommandSchema).max(4_096),
+  qualityTier: z.string().min(1).max(80).optional(),
   recentChanges: z.array(z.object({
     source: z.enum(['human', 'ai', 'unknown']),
     operation: editorCommandSchema,
@@ -317,6 +589,21 @@ function dshWorkspacePath(meta: Record<string, unknown> | undefined): string {
   throw new Error('current DSH workspace is unavailable; select a workspace or pass projectId')
 }
 
+function runtimeOwner(meta: Record<string, unknown> | undefined): RuntimeOwner
+function runtimeOwner(
+  meta: Record<string, unknown> | undefined,
+  required: false,
+): RuntimeOwner | undefined
+function runtimeOwner(
+  meta: Record<string, unknown> | undefined,
+  required = true,
+): RuntimeOwner | undefined {
+  const parsed = runtimeOwnerSchema.safeParse(meta?.[DSH_SESSION_META_KEY])
+  if (parsed.success) return parsed.data
+  if (!required) return undefined
+  throw new Error('Harness Session and MCP connection generation are required')
+}
+
 function decodeBase64(value: string): Buffer {
   const bytes = Buffer.from(value, 'base64')
   if (bytes.toString('base64') !== value) throw new Error('asset data is not canonical base64')
@@ -351,7 +638,11 @@ function workspaceView(snapshot: WorkspaceSnapshot): z.infer<typeof workspaceVie
     entry: snapshot.manifest.entry,
     backend: snapshot.manifest.backend,
     debugModes: snapshot.manifest.runtime.debugModes,
+    qualityTiers: snapshot.manifest.runtime.qualityTiers,
     parameters: snapshot.manifest.runtime.parameters,
+    ...snapshot.manifest.runtime.capabilities === undefined
+      ? {}
+      : { capabilities: snapshot.manifest.runtime.capabilities },
     files: Object.entries(snapshot.manifest.files).map(([path, file]) => ({
       path,
       ...file,
@@ -367,11 +658,24 @@ function buildResourceUri(
   return `threejs-build://runtime/${projectId}/${buildId}/${artifact}`
 }
 
+function assetResourceUri(projectId: string, revision: string, sha256: string): string {
+  return `threejs-asset://runtime/${projectId}/${revision}/${sha256}`
+}
+
 function buildView(build: WorkspaceBuild): z.infer<typeof buildOutputSchema> {
   if (build.status === 'failed') return build
   const { bundle: _bundle, sourceMap: _sourceMap, ...summary } = build
   return {
     ...summary,
+    assets: summary.assets.map(asset => ({
+      ...asset,
+      ...asset.external
+        ? {
+            resourceUri: assetResourceUri(build.projectId, build.revision, asset.sha256),
+            chunks: Math.ceil(asset.size / RESOURCE_CHUNK_BYTES),
+          }
+        : {},
+    })),
     bundleUri: buildResourceUri(build.projectId, build.buildId, 'bundle.js'),
     sourceMapUri: buildResourceUri(build.projectId, build.buildId, 'bundle.js.map'),
   }
@@ -421,7 +725,9 @@ function applyEditorCommands(
 
 function editorOperationKey(operation: EditorCommandOperation): string {
   return `${operation.objectUuid}\0${operation.type}${
-    operation.type === 'set_material_value' ? `\0${operation.property}` : ''
+    operation.type === 'set_material_value' || operation.type === 'set_material_boolean'
+      ? `\0${operation.property}`
+      : ''
   }`
 }
 
@@ -438,9 +744,45 @@ function compactEditorOperations(
 }
 
 function editorOperationValue(operation: EditorCommandOperation): unknown {
-  return operation.type === 'set_material_value'
+  return operation.type === 'set_material_value' || operation.type === 'set_material_boolean'
     ? { property: operation.property, value: operation.value }
     : operation.value
+}
+
+function assertEditorOperationsAdvertised(
+  objects: EditorObjectSnapshot[],
+  operations: EditorCommandOperation[],
+): void {
+  const byUuid = new Map(objects.map(object => [object.uuid, object]))
+  for (const operation of operations) {
+    const object = byUuid.get(operation.objectUuid)
+    if (object === undefined) throw new Error(`unknown object ${operation.objectUuid}`)
+    if (!object.commands.includes(operation.type)) {
+      throw new Error(
+        `object ${operation.objectUuid} does not advertise ${operation.type}`,
+      )
+    }
+    if (operation.type === 'set_material_color') {
+      const advertised = object.material?.properties.some(property => (
+        property.name === 'color' && property.command === operation.type
+      )) ?? object.color !== undefined
+      if (!advertised) {
+        throw new Error(
+          `material does not advertise color: ${operation.objectUuid}`,
+        )
+      }
+      continue
+    }
+    if (operation.type !== 'set_material_value'
+      && operation.type !== 'set_material_boolean') continue
+    if (!object.material?.properties.some(property => (
+      property.name === operation.property && property.command === operation.type
+    ))) {
+      throw new Error(
+        `material does not advertise ${operation.property}: ${operation.objectUuid}`,
+      )
+    }
+  }
 }
 
 function editorChanges(
@@ -781,7 +1123,7 @@ function viewHtml(script: string): string {
     button[aria-pressed=true]{border-color:rgb(99 184 255 / .48);background:var(--accent-soft);box-shadow:inset 0 0 18px rgb(99 184 255 / .08),0 0 22px rgb(99 184 255 / .09);color:#f4faff}
     button:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     .icon{width:32px;padding:0;font-size:15px}
-    .runtime-debug{height:32px;max-width:112px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface-control);color:var(--text);font:11px/1.2 "SFMono-Regular",Consolas,monospace}
+    .runtime-debug,.runtime-quality{height:32px;max-width:112px;border:1px solid var(--line-strong);border-radius:4px;background:var(--surface-control);color:var(--text);font:11px/1.2 "SF Pro Display","Avenir Next",ui-sans-serif,system-ui,sans-serif}
     .save{min-width:52px;border-color:rgb(132 202 255 / .9);background:var(--accent);box-shadow:inset 0 1px rgb(255 255 255 / .42),0 7px 22px rgb(38 137 218 / .26);color:var(--accent-ink)}
     .save:hover:not(:disabled){border-color:#8fd0ff;background:#8fd0ff;box-shadow:inset 0 1px rgb(255 255 255 / .5),0 9px 28px rgb(38 137 218 / .36);color:var(--accent-ink)}
     .asset-input{display:none}
@@ -895,6 +1237,7 @@ function viewHtml(script: string): string {
     .tree button[aria-selected=true]{background:var(--accent-soft);box-shadow:inset 2px 0 var(--accent),inset 0 1px rgb(255 255 255 / .035);color:#f4faff}
     canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
     .runtime-sandbox{position:absolute;inset:0;z-index:2;width:100%;height:100%;border:0;background:#050b13}
+    .validation-runtime{position:absolute;inset:0;width:100%;height:100%;border:0;opacity:0;pointer-events:none}
     .transform-tools{
       position:absolute;
       z-index:3;
@@ -975,7 +1318,7 @@ function viewHtml(script: string): string {
       .topbar{gap:5px;padding-inline:8px}
       .toolbar{gap:3px}
       .toolbar .icon{width:29px}
-      .runtime-debug{max-width:84px}
+      .runtime-debug,.runtime-quality{max-width:84px}
       .hierarchy{left:8px;width:150px}
       .inspector{right:8px;width:210px}
       .status{left:168px;max-width:180px}
@@ -1013,7 +1356,7 @@ function viewHtml(script: string): string {
   </style>
 </head>
 <body>
-  <main data-three-editor data-phase="M7" data-ui-mode="scene-only" data-ui-direction="ethereal-glass" data-visual-style="taste-ethereal-glass" data-sync="loading" data-play-state="stopped" data-webgl="pending">
+  <main data-three-editor data-phase="workspace" data-ui-mode="scene-only" data-ui-direction="ethereal-glass" data-visual-style="taste-ethereal-glass" data-sync="loading" data-play-state="stopped" data-webgl="pending">
     <header class="topbar">
       <input class="title" data-title aria-label="Project title" maxlength="120" disabled>
       <span class="spacer"></span>
@@ -1026,9 +1369,11 @@ function viewHtml(script: string): string {
         <input class="asset-input" type="file" data-asset-input accept=".glb,.png,.jpg,.jpeg,model/gltf-binary,image/png,image/jpeg">
         <button class="icon" type="button" data-export aria-label="Export project" title="Export project" disabled>↓</button>
         <span class="toolbar-divider" aria-hidden="true"></span>
-        <select class="runtime-debug" data-runtime-debug aria-label="Runtime debug mode" title="Runtime debug mode" hidden></select>
+        <select class="runtime-quality" data-runtime-quality aria-label="画质" title="画质" hidden></select>
+        <select class="runtime-debug" data-runtime-debug aria-label="画面检查" title="画面检查" hidden></select>
         <button class="icon" type="button" data-play aria-label="Play" title="Play" disabled>▶</button>
         <button class="icon" type="button" data-stop aria-label="Stop" title="Stop" disabled>■</button>
+        <button class="icon" type="button" data-active-grant aria-label="Allow one live validation" title="Allow one live validation" disabled>A</button>
         <button class="icon" type="button" data-fullscreen aria-label="Enter fullscreen" title="Enter fullscreen" hidden>⛶</button>
         <button class="save" type="button" data-save disabled>Save</button>
       </nav>
@@ -1036,7 +1381,8 @@ function viewHtml(script: string): string {
     <aside class="conflict" data-conflict hidden>
       <span>External revision available</span>
       <button type="button" data-load-external>Load external</button>
-      <button type="button" data-save-copy>Save local copy</button>
+      <button type="button" data-save-copy>Save local revision</button>
+      <button type="button" data-defer-external>Review later</button>
     </aside>
     <section class="workspace">
       <aside class="panel hierarchy">
@@ -1061,6 +1407,14 @@ function viewHtml(script: string): string {
             title="Isolated Three.js runtime"
             sandbox="allow-scripts"
             hidden
+          ></iframe>
+          <iframe
+            class="validation-runtime"
+            data-validation-runtime
+            title="Three.js validation runtime"
+            sandbox="allow-scripts"
+            tabindex="-1"
+            aria-hidden="true"
           ></iframe>
         </section>
         <p class="status" data-status role="status">Connecting</p>
@@ -1121,10 +1475,22 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   const server = new McpServer({
     name: 'threejs-editor-mcp',
     version: '0.1.0',
+  }, {
+    instructions:
+      'For ordinary Three.js scene authoring, use inspect_editor first, then read_project_files and apply_project_files with the canonical workspace-relative entry or entryAlias it returns. Do not reinterpret either as a host filesystem path. Use the public tool schemas and Runtime contract. Do not read or search the threejs-editor-mcp or deepseek-harness implementation source unless the user explicitly asks to debug or extend those systems.',
   })
   const loadWorkspace = async (projectId: string): Promise<WorkspaceSnapshot | undefined> => (
     await workspaces.has(projectId) ? workspaces.load(projectId) : undefined
   )
+
+  server.registerPrompt(M81_PROMPT_NAME, {
+    description: 'Guides bounded Three.js Runtime validation and independent scoring.',
+  }, () => ({
+    messages: [{
+      role: 'user',
+      content: { type: 'text', text: M81_PROMPT },
+    }],
+  }))
 
   registerAppTool(server, 'list_projects', {
     title: 'List Three.js projects',
@@ -1228,7 +1594,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   registerAppTool(server, 'open_editor', {
     title: 'Open Three.js editor',
     description:
-      'Opens an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath. A successful call completes an open request; do not inspect or build unless the user explicitly asks. Never compile or serve project HTML as a fallback.',
+      'Requests an existing project, the current DSH workspace, or a discovered workspace example by relative projectPath in the Editor. A successful tool result only accepts the open request; do not claim the App loaded until its follow-up status arrives. Successful project mutations update the same project-bound Editor automatically; do not call open_editor again unless the user explicitly requests a duplicate view. Never compile or serve project HTML as a fallback.',
     inputSchema: {
       projectId: projectIdSchema.optional(),
       projectPath: sessionProjectPathSchema.optional(),
@@ -1246,7 +1612,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     }
     if (projectPath !== undefined) {
       return summaryResult(
-        'Opened current DSH workspace example',
+        'Open request accepted for current DSH workspace example; App loading is pending',
         await workspaces.importSessionProject(
           dshWorkspacePath(extra._meta),
           projectPath,
@@ -1258,7 +1624,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       const candidates = await workspaces.discoverSessionProjects(path)
       if (candidates.length === 1) {
         return summaryResult(
-          'Opened current DSH workspace example',
+          'Open request accepted for current DSH workspace example; App loading is pending',
           await workspaces.importSessionProject(path, candidates[0].projectPath),
         )
       }
@@ -1268,13 +1634,15 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         )
       }
       return summaryResult(
-        'Opened current DSH workspace',
+        'Open request accepted for current DSH workspace; App loading is pending',
         await workspaces.registerSessionWorkspace(path),
       )
     }
     const workspace = await loadWorkspace(projectId)
     return summaryResult(
-      workspace === undefined ? 'Opened Three.js project' : 'Opened Three.js workspace',
+      workspace === undefined
+        ? 'Open request accepted for Three.js project; App loading is pending'
+        : 'Open request accepted for Three.js workspace; App loading is pending',
       workspace ?? await store.load(projectId),
     )
   })
@@ -1300,11 +1668,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         syntaxError: z.string().optional(),
       }),
       diagnostics: diagnosticsSchema.optional(),
+      runtime: runtimeReferenceSchema.optional(),
     }),
     _meta: { ui: { visibility: ['model'] } },
-  }, async ({ projectId }) => {
+  }, async ({ projectId }, { _meta }) => {
     const workspace = await loadWorkspace(projectId)
     const snapshot = workspace ?? await store.load(projectId)
+    const owner = runtimeOwner(_meta, false)
     const parsedScene = new THREE.ObjectLoader().parse(withoutTextureImages(snapshot.project.scene))
     if (!(parsedScene instanceof THREE.Scene)) {
       throw new Error('project scene is not a Three.js Scene')
@@ -1317,10 +1687,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     let objects = sceneSummary(parsedScene)
     let changes: Array<z.infer<typeof editorChangeSchema>> = []
     if (workspace !== undefined) {
-      const reportedDocument = await workspaces.readEditorScene(projectId, snapshot.revision)
-      const reported = reportedDocument === undefined
-        ? undefined
-        : runtimeEditorSceneSchema.parse(reportedDocument)
+      const reportedDocument = await workspaces.readEditorScene(
+        projectId,
+        snapshot.revision,
+        undefined,
+        owner,
+      )
+      const reported = runtimeEditorScene(reportedDocument)
       if (reported !== undefined) {
         objects = reported.objects.map(object => ({
           name: object.name,
@@ -1342,9 +1715,14 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       }
     }
     const scriptError = syntaxError(snapshot.project.script.source)
-    const [diagnostics, assets] = await Promise.all([
-      workspace === undefined ? store.readDiagnostics(projectId) : undefined,
+    const [diagnostics, assets, runtime] = await Promise.all([
+      workspace === undefined
+        ? store.readDiagnostics(projectId)
+        : workspaces.readDiagnostics(projectId, owner),
       workspace === undefined ? store.listAssets(projectId) : [],
+      workspace === undefined || owner === undefined
+        ? undefined
+        : workspaces.runtimeIdentity(projectId, owner),
     ])
     const detail = {
       projectId: snapshot.projectId,
@@ -1364,10 +1742,350 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         ...scriptError === undefined ? {} : { syntaxError: scriptError },
       },
       ...diagnostics === undefined ? {} : { diagnostics },
+      ...runtime === undefined
+        ? {}
+        : {
+            runtime: {
+              projectId: runtime.projectId,
+              runtimeRef: runtime.runtimeRef,
+            },
+          },
     }
     return textResult(
       `Three.js project inspection:\n${JSON.stringify(detail)}`,
       detail,
+    )
+  })
+
+  registerAppTool(server, 'prepare_runtime_run', {
+    title: 'Prepare Three.js Runtime run',
+    description: 'Prepares an owner-scoped candidate without changing the active Runtime.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      revision: revisionSchema,
+      buildId: buildIdSchema,
+      runId: runIdSchema,
+      nonce: nonceSchema,
+      ttlMs: z.number().int().positive().max(600_000).optional(),
+    },
+    outputSchema: preparedRuntimeRunSchema,
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, revision, buildId, runId, nonce, ttlMs }, { signal, _meta }) => {
+    const prepared = await workspaces.prepareRuntimeRun(
+      projectId,
+      revision,
+      buildId,
+      runId,
+      nonce,
+      runtimeOwner(_meta),
+      signal,
+      ttlMs,
+    )
+    return textResult(`Prepared Runtime run ${runId}.`, {
+      ...prepared,
+      expiresAt: new Date(prepared.expiresAt).toISOString(),
+    })
+  })
+
+  registerAppTool(server, 'commit_runtime_run', {
+    title: 'Commit Three.js Runtime run',
+    description: 'Promotes a prepared Runtime when the expected active reference still matches.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      runtimeRef: runtimeRefSchema,
+      expectedActiveRef: runtimeRefSchema.optional(),
+    },
+    outputSchema: preparedRuntimeRunSchema,
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, runtimeRef, expectedActiveRef }, { signal, _meta }) => {
+    const committed = await workspaces.commitRuntimeRun(
+      projectId,
+      runtimeRef,
+      expectedActiveRef,
+      runtimeOwner(_meta),
+      signal,
+    )
+    return textResult(`Committed Runtime run ${committed.execution.runId}.`, {
+      ...committed,
+      expiresAt: new Date(committed.expiresAt).toISOString(),
+    })
+  })
+
+  registerAppTool(server, 'commit_runtime_projection', {
+    title: 'Commit Three.js Runtime projection',
+    description: 'CAS-commits one pending revision change after matching iframe acknowledgement.',
+    inputSchema: {
+      projectId: projectIdSchema,
+      transitionId: z.string().uuid(),
+      runtimeRef: runtimeRefSchema,
+      revision: revisionSchema,
+    },
+    outputSchema: registeredRuntimeSchema,
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({
+    projectId,
+    transitionId,
+    runtimeRef,
+    revision,
+  }, { signal, _meta }) => {
+    const registered = await workspaces.commitRuntimeProjection(
+      projectId,
+      transitionId,
+      runtimeRef,
+      revision,
+      runtimeOwner(_meta),
+      signal,
+    )
+    return textResult(`Advanced Runtime projection to ${revision}.`, {
+      ...registered,
+    })
+  })
+
+  registerAppTool(server, 'release_runtime_run', {
+    title: 'Release Three.js Runtime run',
+    description: 'Releases one active Runtime reference during cancellation or teardown.',
+    inputSchema: runtimeHarnessAddressShape,
+    outputSchema: z.object({
+      projectId: projectIdSchema,
+      released: z.boolean(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ projectId, runtimeRef }, { _meta }) => {
+    const released = await workspaces.releaseRuntimeRun(
+      projectId,
+      runtimeRef,
+      runtimeOwner(_meta),
+    )
+    return textResult(`${released ? 'Released' : 'Ignored stale'} Runtime.`, {
+      projectId,
+      released,
+    })
+  })
+
+  registerAppTool(server, 'grant_active_runtime_control', {
+    title: 'Grant one active Runtime check',
+    description: 'Grants this Harness Session one active Runtime evidence command for 60 seconds.',
+    inputSchema: runtimeHarnessAddressShape,
+    outputSchema: z.object({
+      expiresAt: z.string().datetime(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async (address, { _meta }) => {
+    const expiresAt = await workspaces.grantActiveRuntimeControl(
+      address,
+      runtimeOwner(_meta)!,
+    )
+    return textResult('Granted one active Runtime evidence command.', { expiresAt })
+  })
+
+  registerAppTool(server, 'pull_runtime_command', {
+    title: 'Pull Runtime Harness command',
+    description: 'Returns the current exact Runtime command for this Editor App.',
+    inputSchema: runtimeHarnessAddressShape,
+    outputSchema: z.object({
+      command: z.object({
+        commandId: z.string().uuid(),
+        kind: z.enum(['capture-frame', 'read-logs', 'simulate-actions']),
+        target: runtimeTargetSchema,
+        runtime: runtimeIdentitySchema,
+        evidenceToken: nonceSchema,
+        payload: z.record(z.string(), z.unknown()),
+        timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000),
+        expiresAt: z.string().datetime().optional(),
+      }).optional(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async (address, { _meta }) => {
+    const command = await workspaces.pullRuntimeCommand(
+      address,
+      runtimeOwner(_meta)!,
+    )
+    return textResult(command === undefined
+      ? 'No Runtime Harness command is pending.'
+      : `Runtime Harness command ${command.commandId} is pending.`, {
+      ...command === undefined ? {} : { command },
+    })
+  })
+
+  registerAppTool(server, 'start_runtime_command', {
+    title: 'Start Runtime Harness command',
+    description: 'Starts the execution deadline after the target Runtime is ready.',
+    inputSchema: {
+      ...runtimeHarnessAddressShape,
+      commandId: z.string().uuid(),
+      targetRuntime: runtimeEvidenceIdentitySchema,
+    },
+    outputSchema: z.object({
+      commandId: z.string().uuid(),
+      expiresAt: z.string().datetime(),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ commandId, targetRuntime, ...address }, { _meta }) => {
+    const expiresAt = await workspaces.startRuntimeCommand(
+      address,
+      runtimeOwner(_meta)!,
+      commandId,
+      targetRuntime,
+    )
+    return textResult(`Started Runtime Harness command ${commandId}.`, {
+      commandId,
+      expiresAt,
+    })
+  })
+
+  registerAppTool(server, 'settle_runtime_command', {
+    title: 'Settle Runtime Harness command',
+    description: 'Idempotently settles one Runtime Harness command with a typed terminal outcome.',
+    inputSchema: {
+      ...runtimeHarnessAddressShape,
+      commandId: z.string().uuid(),
+      outcome: runtimeCommandOutcomeSchema,
+    },
+    outputSchema: z.object({
+      commandId: z.string().uuid(),
+      accepted: z.literal(true),
+    }),
+    _meta: { ui: { visibility: ['app'] } },
+  }, async ({ commandId, outcome, ...address }, { _meta }) => {
+    await workspaces.settleRuntimeCommand(
+      address,
+      runtimeOwner(_meta)!,
+      commandId,
+      outcome,
+    )
+    return textResult(`Settled Runtime Harness command ${commandId}.`, {
+      commandId,
+      accepted: true,
+    })
+  })
+
+  registerAppTool(server, 'capture_runtime_frame', {
+    title: 'Capture Three.js Runtime frame',
+    description: 'Captures only the Runtime canvas. Use runtimeRef from the latest Editor context. Omit target for ordinary checks; validation is isolated and requires no Editor grant. Active access consumes an Editor-issued one-shot authorization.',
+    inputSchema: {
+      ...runtimeHarnessAddressShape,
+      target: runtimeHarnessTargetSchema,
+      activeIntent: activeIntentSchema,
+      format: z.enum(['png', 'jpeg']).default('png'),
+      maxWidth: z.number().int().min(64).max(1_024).default(768),
+      maxHeight: z.number().int().min(64).max(1_024).default(768),
+      deterministic: z.boolean().default(true),
+      timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000).default(20_000),
+    },
+    outputSchema: runtimeEvidenceSchema.options[0].omit({
+      data: true,
+      evidenceToken: true,
+    }),
+    _meta: { ui: { visibility: ['model', 'app'] } },
+  }, async ({
+    target,
+    activeIntent,
+    format,
+    maxWidth,
+    maxHeight,
+    deterministic,
+    timeoutMs,
+    ...address
+  }, { _meta, signal }) => {
+    const owner = runtimeOwner(_meta)!
+    void activeIntent
+    const evidence = runtimeEvidenceSchema.options[0].parse(
+      await workspaces.requestRuntimeCommand(
+        address,
+        owner,
+        'capture-frame',
+        target,
+        { format, maxWidth, maxHeight, deterministic },
+        timeoutMs,
+        signal,
+      ),
+    )
+    const { data, evidenceToken: _evidenceToken, ...structuredContent } = evidence
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Captured ${evidence.runtime.target} Runtime evidence ${evidence.evidenceId} at frame ${String(evidence.frame)}.`,
+        },
+        { type: 'image', data, mimeType: evidence.mimeType },
+      ],
+      structuredContent,
+    }
+  })
+
+  registerAppTool(server, 'read_runtime_logs', {
+    title: 'Read Three.js Runtime logs',
+    description: 'Reads bounded cursor-based logs. Use runtimeRef from the latest Editor context. Omit target for ordinary checks; validation is isolated and requires no Editor grant. Active access consumes an Editor-issued one-shot authorization.',
+    inputSchema: {
+      ...runtimeHarnessAddressShape,
+      target: runtimeHarnessTargetSchema,
+      activeIntent: activeIntentSchema,
+      cursor: z.number().int().nonnegative().default(0),
+      level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
+      limit: z.number().int().min(1).max(500).default(100),
+      timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000).default(20_000),
+    },
+    outputSchema: runtimeEvidenceSchema.options[1].omit({ evidenceToken: true }),
+    _meta: { ui: { visibility: ['model', 'app'] } },
+  }, async ({
+    target,
+    activeIntent,
+    cursor,
+    level,
+    limit,
+    timeoutMs,
+    ...address
+  }, { _meta, signal }) => {
+    void activeIntent
+    const owner = runtimeOwner(_meta)!
+    const evidence = runtimeEvidenceSchema.options[1].parse(
+      await workspaces.requestRuntimeCommand(
+        address,
+        owner,
+        'read-logs',
+        target,
+        { cursor, level, limit },
+        timeoutMs,
+        signal,
+      ),
+    )
+    const { evidenceToken: _evidenceToken, ...structuredContent } = evidence
+    return textResult(
+      `Read ${String(evidence.entries.length)} Runtime log entries through cursor ${String(evidence.nextCursor)}.`,
+      structuredContent,
+    )
+  })
+
+  registerAppTool(server, 'simulate_player_actions', {
+    title: 'Simulate Three.js player actions',
+    description: 'Runs bounded normalized actions. Use runtimeRef from the latest Editor context. Omit target for ordinary checks; validation is isolated and requires no Editor grant. Active access consumes an Editor-issued one-shot authorization.',
+    inputSchema: {
+      ...runtimeHarnessAddressShape,
+      target: runtimeHarnessTargetSchema,
+      activeIntent: activeIntentSchema,
+      actions: z.array(playerActionSchema).min(1).max(32),
+      timeoutMs: z.number().int().min(RUNTIME_COMMAND_MIN_TIMEOUT_MS).max(20_000).default(20_000),
+    },
+    outputSchema: runtimeEvidenceSchema.options[2].omit({ evidenceToken: true }),
+    _meta: { ui: { visibility: ['model', 'app'] } },
+  }, async ({ target, activeIntent, actions, timeoutMs, ...address }, { _meta, signal }) => {
+    void activeIntent
+    const owner = runtimeOwner(_meta)!
+    const evidence = runtimeEvidenceSchema.options[2].parse(
+      await workspaces.requestRuntimeCommand(
+        address,
+        owner,
+        'simulate-actions',
+        target,
+        { actions },
+        timeoutMs,
+        signal,
+      ),
+    )
+    const { evidenceToken: _evidenceToken, ...structuredContent } = evidence
+    return textResult(
+      `Runtime action evidence ${evidence.evidenceId}: ${evidence.status} at frame ${String(evidence.endFrame)}.`,
+      structuredContent,
     )
   })
 
@@ -1377,6 +2095,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       revision: revisionSchema,
+      runId: z.string().uuid(),
       objects: z.array(runtimeEditorObjectSchema).max(MAX_RUNTIME_EDITOR_OBJECTS),
     },
     outputSchema: z.object({
@@ -1385,12 +2104,19 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       objects: z.number().int().nonnegative(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, revision, objects }) => {
+  }, async ({ projectId, revision, runId, objects }, { _meta }) => {
     const document = runtimeEditorSceneSchema.parse({
       schemaVersion: 1,
+      runId,
       objects,
     })
-    await workspaces.reportEditorScene(projectId, revision, document)
+    await workspaces.reportEditorScene(
+      projectId,
+      revision,
+      document,
+      runId,
+      runtimeOwner(_meta, false),
+    )
     return textResult(`Recorded ${objects.length} Runtime editor objects.`, {
       projectId,
       revision,
@@ -1400,41 +2126,71 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'inspect_editor', {
     title: 'Inspect Three.js editor objects',
-    description: 'Lists object UUIDs and the official Three.js Editor commands available for each object.',
+    description:
+      'Inspect this first for the canonical scene source route, object UUIDs, current material values, and the official Three.js Editor commands advertised for each object. For ordinary project edits, use only the returned project tools and canonical entry; do not inspect MCP or Harness implementation source.',
     inputSchema: { projectId: projectIdSchema },
     outputSchema: z.object({
       projectId: projectIdSchema,
       title: z.string(),
       revision: revisionSchema,
+      source: editorSourceSchema,
+      runtimeContract: z.object({
+        setupContext: z.string(),
+        inputEvents: z.string(),
+      }),
       objects: z.array(editorObjectSchema),
       editorChanges: z.array(editorChangeSchema),
     }),
     _meta: { ui: { visibility: ['model', 'app'] } },
-  }, async ({ projectId }) => {
+  }, async ({ projectId }, { _meta }) => {
     const workspace = await loadWorkspace(projectId)
     const snapshot = workspace ?? await store.load(projectId)
     const reported = workspace === undefined
       ? undefined
-      : await workspaces.readEditorScene(projectId, snapshot.revision)
-    const objects = reported === undefined
-      ? inspectEditor(snapshot.project)
-      : runtimeEditorSceneSchema.parse(reported).objects
+      : await workspaces.readEditorScene(
+          projectId,
+          snapshot.revision,
+          undefined,
+          runtimeOwner(_meta, false),
+        )
+    const parsedReported = runtimeEditorScene(reported)
+    const objects = parsedReported?.objects ?? inspectEditor(snapshot.project)
     let changes: Array<z.infer<typeof editorChangeSchema>> = []
     if (workspace !== undefined
-      && reported !== undefined
+      && parsedReported !== undefined
       && workspace.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
       const [file] = await workspaces.readFiles(projectId, [{
         path: WORKSPACE_EDITOR_STATE_PATH,
       }])
       changes = editorChanges(
         workspaceEditorStateSchema.parse(JSON.parse(file!.text!)),
-        runtimeEditorSceneSchema.parse(reported).objects as EditorObjectSnapshot[],
+        parsedReported.objects as EditorObjectSnapshot[],
       )
     }
     const detail = {
       projectId,
       title: snapshot.title,
       revision: snapshot.revision,
+      source: workspace === undefined
+        ? {
+            kind: 'scene-script' as const,
+            readTool: 'inspect_project' as const,
+            editTool: 'apply_scene_changes' as const,
+            operation: 'replace_script' as const,
+          }
+        : {
+            kind: 'workspace-entry' as const,
+            entry: workspace.manifest.entry,
+            entryAlias: posix.basename(workspace.manifest.entry),
+            readTool: 'read_project_files' as const,
+            editTool: 'apply_project_files' as const,
+          },
+      runtimeContract: {
+        setupContext:
+          'setup receives THREE, canvas, renderer, scene, camera, controls, runtime, moduleUrl, and resolveAsset.',
+        inputEvents:
+          'Use browser input listeners on canvas or window. Harness keyboard events are dispatched on canvas with bubbles enabled.',
+      },
       objects,
       editorChanges: changes,
     }
@@ -1447,6 +2203,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       baseRevision: revisionSchema,
+      runId: z.string().uuid().optional(),
       source: z.enum(['human', 'ai']).default('ai'),
       operations: z.array(editorCommandSchema).min(1).max(50),
     },
@@ -1457,11 +2214,17 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       kind: z.enum(['linked-workspace', 'managed-workspace']).optional(),
       commandTypes: z.array(z.string()).optional(),
       history: z.unknown().optional(),
+      pendingProjection: pendingRuntimeProjectionSchema.optional(),
       conflict: z.literal(true).optional(),
       currentRevision: revisionSchema.optional(),
     }),
-    _meta: { ui: { visibility: ['model', 'app'] } },
-  }, async ({ projectId, baseRevision, source, operations }) => {
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+        visibility: ['model', 'app'],
+      },
+    },
+  }, async ({ projectId, baseRevision, runId, source, operations }, { signal, _meta }) => {
     try {
       const workspace = await loadWorkspace(projectId)
       const snapshot = workspace ?? await store.load(projectId)
@@ -1470,17 +2233,32 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       }
       let applied: ReturnType<typeof applyEditorCommands>
       let summary: ProjectSummary | WorkspaceSummary
+      let pendingProjection: z.infer<typeof pendingRuntimeProjectionSchema> | undefined
       if (workspace === undefined) {
         applied = applyEditorCommands(snapshot.project, operations)
         summary = await store.push(projectId, baseRevision, applied.project)
       } else {
-        const reportedDocument = await workspaces.readEditorScene(projectId, baseRevision)
-        if (reportedDocument === undefined) {
+        if (source === 'human' && runId === undefined) {
+          throw new Error('Human Workspace editor commands require a Runtime runId')
+        }
+        const owner = runtimeOwner(_meta, false)
+        const reported = runtimeEditorScene(await workspaces.readEditorScene(
+          projectId,
+          baseRevision,
+          undefined,
+          owner,
+        ))
+        if (reported === undefined) {
+          if (runId !== undefined) {
+            throw new Error('Runtime editor scene is unavailable for this run')
+          }
           applied = applyEditorCommands(snapshot.project, operations)
           summary = await workspaces.apply(
             projectId,
             baseRevision,
             workspaceProjectChanges(applied.project),
+            undefined,
+            signal,
           )
           return textResult(
             `Applied official Three.js Editor commands to ${projectId}: `
@@ -1495,7 +2273,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             },
           )
         }
-        const reported = runtimeEditorSceneSchema.parse(reportedDocument)
+        if (runId !== undefined && runId !== reported.runId) {
+          throw new Error('Runtime editor scene is unavailable for this run')
+        }
+        assertEditorOperationsAdvertised(
+          reported.objects as EditorObjectSnapshot[],
+          operations,
+        )
         applied = applyEditorCommands(
           editorProjectFromSnapshots(
             snapshot.project,
@@ -1519,6 +2303,9 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             ...editorState.operations,
             ...operations,
           ]),
+          ...editorState.qualityTier === undefined
+            ? {}
+            : { qualityTier: editorState.qualityTier },
           recentChanges: [
             ...(editorState.recentChanges ?? editorState.operations.map(operation => ({
               source: 'unknown' as const,
@@ -1527,34 +2314,18 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             ...operations.map(operation => ({ source, operation })),
           ].slice(-200),
         })
-        summary = await workspaces.apply(projectId, baseRevision, [{
+        const committed = await workspaces.apply(projectId, baseRevision, [{
           type: 'write',
           path: WORKSPACE_EDITOR_STATE_PATH,
           text: `${JSON.stringify(nextState, null, 2)}\n`,
-        }])
-        const inspected = new Map(
-          inspectOfficialEditor(applied.project).map(object => [object.uuid, object]),
-        )
-        const carried = reported.objects.map(object => {
-          const updated = inspected.get(object.uuid)
-          if (updated === undefined) {
-            throw new Error(`official Editor omitted Runtime object ${object.uuid}`)
+        }], reported.runId, signal, owner, owner === undefined ? undefined : 600_000)
+        summary = committed
+        if (committed.pendingProjection !== undefined) {
+          pendingProjection = {
+            ...committed.pendingProjection,
+            expiresAt: new Date(committed.pendingProjection.expiresAt).toISOString(),
           }
-          return {
-            ...object,
-            name: updated.name,
-            visible: updated.visible,
-            position: updated.position,
-            rotationDegrees: updated.rotationDegrees,
-            scale: updated.scale,
-            commands: updated.commands,
-            ...updated.color === undefined ? {} : { color: updated.color },
-          }
-        })
-        await workspaces.reportEditorScene(projectId, summary.revision, {
-          schemaVersion: 1,
-          objects: carried,
-        })
+        }
       }
       return textResult(
         `Applied official Three.js Editor commands to ${projectId}: `
@@ -1566,6 +2337,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
           ...'kind' in summary ? { kind: summary.kind } : {},
           commandTypes: applied.commandTypes,
           history: applied.history,
+          ...pendingProjection === undefined ? {} : { pendingProjection },
         },
       )
     } catch (error) {
@@ -1576,7 +2348,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'read_project_files', {
     title: 'Read Three.js workspace files',
-    description: 'Reads bounded files from an explicitly registered workspace by projectId.',
+    description:
+      'Reads bounded files from an explicitly registered workspace by projectId. For scene source, use the canonical entry or entryAlias returned by inspect_editor instead of searching first; do not search MCP or Harness implementation repositories for ordinary scene authoring.',
     inputSchema: {
       projectId: projectIdSchema,
       files: z.array(z.object({
@@ -1594,7 +2367,10 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
   }, async ({ projectId, files }) => {
     const snapshot = await workspaces.load(projectId)
     const result = await workspaces.readFiles(projectId, files)
-    return textResult(`Workspace files:\n${JSON.stringify(result)}`, {
+    const modelResult = result.map(({ base64, ...file }) => (
+      base64 === undefined ? file : { ...file, binary: 'available in structuredContent' }
+    ))
+    return textResult(`Workspace files:\n${JSON.stringify(modelResult)}`, {
       projectId,
       revision: snapshot.revision,
       files: result,
@@ -1631,19 +2407,25 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'apply_project_files', {
     title: 'Apply Three.js workspace file changes',
-    description: 'Atomically writes, moves, or deletes workspace files at one exact revision.',
+    description:
+      'Atomically writes, moves, or deletes workspace files at one exact revision. Use the canonical workspace-relative entry or entryAlias returned by inspect_editor for scene source changes not represented by apply_editor_commands. The project-bound Editor is created or updated automatically; do not call open_editor again or inspect MCP/Harness implementation source.',
     inputSchema: {
       projectId: projectIdSchema,
       baseRevision: revisionSchema,
       changes: z.array(workspaceChangeSchema).min(1).max(100),
     },
     outputSchema: workspaceConflictOutputSchema,
-    _meta: { ui: { visibility: ['model', 'app'] } },
-  }, async ({ projectId, baseRevision, changes }) => {
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+        visibility: ['model', 'app'],
+      },
+    },
+  }, async ({ projectId, baseRevision, changes }, { signal }) => {
     try {
       return summaryResult(
         'Updated Three.js workspace files',
-        await workspaces.apply(projectId, baseRevision, changes),
+        await workspaces.apply(projectId, baseRevision, changes, undefined, signal),
       )
     } catch (error) {
       if (!(error instanceof RevisionConflictError)) throw error
@@ -1687,7 +2469,12 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       conflict: z.literal(true).optional(),
       currentRevision: revisionSchema.optional(),
     }),
-    _meta: { ui: { visibility: ['model'] } },
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+        visibility: ['model'],
+      },
+    },
   }, async ({ projectId, baseRevision, operations }) => {
     try {
       const snapshot = await store.load(projectId)
@@ -1725,7 +2512,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
 
   registerAppTool(server, 'check_project', {
     title: 'Check Three.js project',
-    description: 'Checks scene projects or builds the exact current Workspace revision.',
+    description: 'Checks project sources/build and reports Runtime verification separately.',
     inputSchema: { projectId: projectIdSchema },
     outputSchema: z.object({
       projectId: projectIdSchema,
@@ -1733,11 +2520,13 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       revision: revisionSchema,
       errors: z.array(z.string()),
       warnings: z.array(z.string()),
+      runtimeStatus: z.enum(['not-reported', 'stale', 'current']),
       testedRevision: revisionSchema.optional(),
       testedAt: z.string().optional(),
+      runId: z.string().uuid().optional(),
     }),
     _meta: { ui: { visibility: ['model'] } },
-  }, async ({ projectId }) => {
+  }, async ({ projectId }, { _meta }) => {
     const workspace = await loadWorkspace(projectId)
     const snapshot = workspace ?? await store.load(projectId)
     const errors: string[] = []
@@ -1772,16 +2561,26 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     }
     const playDiagnostics = workspace === undefined
       ? await store.readDiagnostics(projectId)
-      : undefined
+      : await workspaces.readDiagnostics(projectId, runtimeOwner(_meta, false))
+    let runtimeStatus: 'not-reported' | 'stale' | 'current'
+    let diagnosticsProvenance: string
     if (playDiagnostics === undefined) {
-      if (workspace === undefined) warnings.push('Play diagnostics have not been reported')
+      runtimeStatus = 'not-reported'
+      warnings.push('Play diagnostics have not been reported')
+      diagnosticsProvenance =
+        ' Runtime verification is inconclusive because Play diagnostics have not been reported.'
+    } else if (playDiagnostics.testedRevision !== snapshot.revision) {
+      runtimeStatus = 'stale'
+      warnings.push(`Play diagnostics apply to older revision ${playDiagnostics.testedRevision}`)
+      diagnosticsProvenance =
+        ` Runtime verification is inconclusive because Play diagnostics apply to older revision ${playDiagnostics.testedRevision}.`
     } else {
-      if (playDiagnostics.testedRevision !== snapshot.revision) {
-        warnings.push(`Play diagnostics apply to older revision ${playDiagnostics.testedRevision}`)
-      } else {
-        errors.push(...playDiagnostics.errors)
-        warnings.push(...playDiagnostics.warnings)
-      }
+      runtimeStatus = 'current'
+      errors.push(...playDiagnostics.errors)
+      warnings.push(...playDiagnostics.warnings)
+      diagnosticsProvenance =
+        ` Diagnostics tested revision ${playDiagnostics.testedRevision}`
+        + `${playDiagnostics.runId === undefined ? '' : ` with run ${playDiagnostics.runId}`}.`
     }
     if (workspace === undefined) {
       try {
@@ -1791,17 +2590,20 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       }
     }
     return textResult(
-      `Checked ${projectId} at revision ${snapshot.revision}: `
-      + `${String(errors.length)} errors, ${String(warnings.length)} warnings.`,
+      `Checked project sources/build for ${projectId} at revision ${snapshot.revision}: `
+      + `${String(errors.length)} errors, ${String(warnings.length)} warnings.`
+      + diagnosticsProvenance,
       {
         projectId,
         title: snapshot.title,
         revision: snapshot.revision,
         errors,
         warnings,
+        runtimeStatus,
         ...playDiagnostics === undefined ? {} : {
           testedRevision: playDiagnostics.testedRevision,
           testedAt: playDiagnostics.updatedAt,
+          ...playDiagnostics.runId === undefined ? {} : { runId: playDiagnostics.runId },
         },
       },
     )
@@ -1821,13 +2623,18 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       project: projectSchema.optional(),
       workspace: workspaceViewSchema.optional(),
       editorOperations: z.array(editorCommandSchema).optional(),
+      pendingProjection: pendingRuntimeProjectionSchema.optional(),
     }),
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, currentRevision }) => {
+  }, async ({ projectId, currentRevision }, { _meta }) => {
     const workspace = await loadWorkspace(projectId)
     const snapshot = workspace ?? await store.load(projectId)
     const changed = currentRevision !== snapshot.revision
     let editorOperations: EditorCommandOperation[] | undefined
+    const owner = runtimeOwner(_meta, false)
+    const pendingProjection = changed && workspace !== undefined && owner !== undefined
+      ? await workspaces.pendingRuntimeProjection(projectId, snapshot.revision, owner)
+      : undefined
     if (changed
       && workspace?.manifest.files[WORKSPACE_EDITOR_STATE_PATH] !== undefined) {
       const [file] = await workspaces.readFiles(projectId, [{
@@ -1845,6 +2652,12 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
         project: snapshot.project,
         ...workspace === undefined ? {} : { workspace: workspaceView(workspace) },
         ...editorOperations === undefined ? {} : { editorOperations },
+        ...pendingProjection === undefined ? {} : {
+          pendingProjection: {
+            ...pendingProjection,
+            expiresAt: new Date(pendingProjection.expiresAt).toISOString(),
+          },
+        },
       } : {},
     })
   })
@@ -1859,7 +2672,7 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     },
     outputSchema: workspaceConflictOutputSchema,
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, baseRevision, project }) => {
+  }, async ({ projectId, baseRevision, project }, { signal }) => {
     try {
       const workspace = await loadWorkspace(projectId)
       return summaryResult(
@@ -1870,6 +2683,8 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
             projectId,
             baseRevision,
             workspaceProjectChanges(project),
+            undefined,
+            signal,
           ),
       )
     } catch (error) {
@@ -1901,17 +2716,24 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
     inputSchema: {
       projectId: projectIdSchema,
       testedRevision: revisionSchema,
+      runId: z.string().uuid().optional(),
       errors: z.array(z.string().min(1).max(2_000)).max(20),
       warnings: z.array(z.string().min(1).max(2_000)).max(20),
     },
     outputSchema: diagnosticsSchema,
     _meta: { ui: { visibility: ['app'] } },
-  }, async ({ projectId, testedRevision, errors, warnings }) => {
-    const diagnostics = await store.reportDiagnostics(
-      projectId,
-      testedRevision,
-      errors,
-      warnings,
+  }, async ({ projectId, testedRevision, runId, errors, warnings }, { _meta }) => {
+    const diagnostics = await (
+      await loadWorkspace(projectId) === undefined
+        ? store.reportDiagnostics(projectId, testedRevision, errors, warnings, runId)
+        : workspaces.reportDiagnostics(
+            projectId,
+            testedRevision,
+            errors,
+            warnings,
+            runId,
+            runtimeOwner(_meta, false),
+          )
     )
     return textResult(
       `Recorded Play diagnostics for ${projectId} at ${testedRevision.slice(0, 12)}.`,
@@ -2014,37 +2836,68 @@ function createServer(store: ProjectStore, workspaces: WorkspaceStore): McpServe
       const projectId = projectIdSchema.parse(projectIdValue)
       const buildId = buildIdSchema.parse(buildIdValue)
       const artifact = z.enum(['bundle.js', 'bundle.js.map']).parse(artifactValue)
+      const text = await workspaces.readBuildArtifact(projectId, buildId, artifact)
       return {
         contents: [{
           uri: uri.href,
           mimeType: artifact === 'bundle.js'
             ? 'text/javascript'
             : 'application/json',
-          text: await workspaces.readBuildArtifact(projectId, buildId, artifact),
+          text,
         }],
       }
     },
   )
 
-  server.registerResource('m5-runtime-module-graph', M5_RUNTIME_RESOURCE_URI, {
-    title: 'M5 isolated runtime module graph',
+  server.registerResource(
+    'workspace-revision-asset',
+    new ResourceTemplate(ASSET_RESOURCE_TEMPLATE, { list: undefined }),
+    {
+      title: 'Three.js Workspace revision asset',
+      description: 'A hash-verified binary chunk bound to one exact project revision.',
+    },
+    async (uri): Promise<ReadResourceResult> => {
+      const [projectIdValue, revisionValue, sha256Value, chunkValue] =
+        uri.pathname.split('/').filter(Boolean)
+      const projectId = projectIdSchema.parse(projectIdValue)
+      const revision = revisionSchema.parse(revisionValue)
+      const sha256 = revisionSchema.parse(sha256Value)
+      const chunk = z.coerce.number().int().nonnegative().parse(chunkValue)
+      const resource = await workspaces.readResourceChunk(
+        projectId,
+        revision,
+        sha256,
+        chunk,
+      )
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: resource.mediaType,
+          blob: resource.bytes.toString('base64'),
+        }],
+      }
+    },
+  )
+
+  server.registerResource('runtime-isolation-module-graph', RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI, {
+    title: 'Runtime isolation module graph',
     description: 'A deterministic two-module WebGL2 and WebGPU capability fixture.',
     mimeType: 'application/json',
   }, async (): Promise<ReadResourceResult> => ({
     contents: [{
-      uri: M5_RUNTIME_RESOURCE_URI,
+      uri: RUNTIME_ISOLATION_FIXTURE_RESOURCE_URI,
       mimeType: 'application/json',
-      text: JSON.stringify(M5_RUNTIME_MANIFEST),
+      text: JSON.stringify(RUNTIME_ISOLATION_FIXTURE_MANIFEST),
     }],
   }))
 
-  server.registerResource('m5-official-editor-command-proof', M5_COMMAND_PROOF_RESOURCE_URI, {
-    title: 'M5 Three.js Editor command proof',
+  server.registerResource('runtime-isolation-command-proof', RUNTIME_ISOLATION_COMMAND_PROOF_URI, {
+    title: 'Runtime isolation Three.js Editor command proof',
     description: 'Round-trip evidence from the pinned Three.js r185 Command and History sources.',
     mimeType: 'application/json',
   }, async (): Promise<ReadResourceResult> => ({
     contents: [{
-      uri: M5_COMMAND_PROOF_RESOURCE_URI,
+      uri: RUNTIME_ISOLATION_COMMAND_PROOF_URI,
       mimeType: 'application/json',
       text: JSON.stringify(officialCommandProof()),
     }],
@@ -2083,12 +2936,40 @@ const { values } = parseArgs({
     root: { type: 'string' },
     'workspace-root': { type: 'string', multiple: true },
     workspace: { type: 'string', multiple: true },
+    'workspace-max-files': { type: 'string' },
+    'workspace-max-file-bytes': { type: 'string' },
+    'workspace-max-total-bytes': { type: 'string' },
   },
   strict: true,
 })
 const root = values.root ?? process.env.THREEJS_EDITOR_PROJECT_ROOT
 if (root === undefined || root === '') {
   throw new Error('project root is required: pass --root or THREEJS_EDITOR_PROJECT_ROOT')
+}
+const positiveInteger = (name: string, value: string | undefined): number | undefined => {
+  if (value === undefined) return undefined
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`)
+  return parsed
+}
+
+class SerializedStdioServerTransport extends StdioServerTransport {
+  private sendTail = Promise.resolve()
+
+  override send(
+    message: Parameters<StdioServerTransport['send']>[0],
+  ): Promise<void> {
+    const send = this.sendTail.then(() => this.sendOne(message))
+    this.sendTail = send.catch(() => {})
+    return send
+  }
+
+  private async sendOne(
+    message: Parameters<StdioServerTransport['send']>[0],
+  ): Promise<void> {
+    const before = process.stdout.listenerCount('drain')
+    await super.send(message)
+  }
 }
 
 await createServer(
@@ -2097,5 +2978,16 @@ await createServer(
     root,
     values['workspace-root'] ?? [],
     (values.workspace ?? []).map(workspaceRegistration),
+    {
+      maxFiles: positiveInteger('workspace-max-files', values['workspace-max-files']),
+      maxFileBytes: positiveInteger(
+        'workspace-max-file-bytes',
+        values['workspace-max-file-bytes'],
+      ),
+      maxTotalBytes: positiveInteger(
+        'workspace-max-total-bytes',
+        values['workspace-max-total-bytes'],
+      ),
+    },
   ),
-).connect(new StdioServerTransport())
+).connect(new SerializedStdioServerTransport())

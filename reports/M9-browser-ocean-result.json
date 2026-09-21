@@ -1,0 +1,104 @@
+{
+  "corpusCommit": "98453747cc0678f6a5d910f38d7483596a5f9a40",
+  "browser": "149.0.7827.55",
+  "ocean": {
+    "projectId": "example-da719c074fee77bcd821cc163e9e7d046088344d84df5c9c877acdc5",
+    "revision": "d5e37a75a13cc143b492a730761fcb7b530d869b2616966351927d963fe62d36",
+    "buildId": "9ee1110c0d86b409255b29c3d6554bc90e32be64f2dcace61f86e80470fbe1e0",
+    "metrics": {
+      "frame": 11,
+      "mode": "run",
+      "cameraPosition": [
+        0,
+        15.999999999999988,
+        67.99999999999999
+      ],
+      "cameraQuaternion": [
+        -0.08980559531591702,
+        0,
+        0,
+        0.9959593139531122
+      ],
+      "cameraUp": [
+        0,
+        1,
+        0
+      ],
+      "cameraZoom": 1,
+      "controlsTarget": [
+        0,
+        0,
+        -20
+      ],
+      "editorObjectCount": 2,
+      "selectedScreenPosition": null,
+      "selectedBoundsCenter": null,
+      "gizmoWorldPosition": [
+        0,
+        0,
+        0
+      ],
+      "transformAxis": null,
+      "transformDragging": false,
+      "inputOwner": "runtime",
+      "runtimeInputListeners": 0,
+      "runtimeInputEvents": {},
+      "capturedPointers": 0,
+      "rendererCanvasFacade": true,
+      "resizeCount": 1,
+      "devicePixelRatio": 1,
+      "clientSize": [
+        1280,
+        800
+      ],
+      "drawingBufferSize": [
+        1280,
+        800
+      ],
+      "gpuTextures": 37,
+      "gpuGeometries": 11,
+      "gpuPrograms": 7,
+      "rendererCount": 1,
+      "secureContext": true,
+      "webgpuApi": true,
+      "rendererBackend": "WebGLRenderer",
+      "renderPath": "example-render",
+      "buildId": "9ee1110c0d86b409255b29c3d6554bc90e32be64f2dcace61f86e80470fbe1e0",
+      "qualityTier": "default",
+      "debugMode": "final",
+      "gpuRenderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+      "gpuRendererUnmasked": true,
+      "draws": 2,
+      "triangles": 1622208,
+      "resolution": "256² × 3",
+      "fftTest": "pass 7.6e-5"
+    },
+    "pixels": {
+      "sampled": 10240,
+      "lit": 8140,
+      "colors": 4661
+    },
+    "deterministic": {
+      "firstDigest": "98b25618610c5053d713329b16c09d3de3d073190e557969291dc7d5d74fe516",
+      "repeatedDigest": "98b25618610c5053d713329b16c09d3de3d073190e557969291dc7d5d74fe516",
+      "reloadDigest": "98b25618610c5053d713329b16c09d3de3d073190e557969291dc7d5d74fe516",
+      "frameBeforeResume": 227,
+      "frameAfterResume": 244,
+      "independentRunIds": [
+        "2eb83968-1088-43fe-a45d-e8b75128fad5",
+        "24a80d07-523d-446e-8c30-cd258f3e7fd7"
+      ]
+    },
+    "transfer": {
+      "bytes": 0,
+      "chunks": 0
+    },
+    "contactSheet": "/Users/bytedanceo/Workspace/DeepSeekSpace/threejs-editor-mcp/reports/assets/m9-p4-contact-sheet.png"
+  },
+  "browserProblems": [
+    "warning: [.WebGL-0x13c00514200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+    "warning: [.WebGL-0x13c00514200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+    "warning: [.WebGL-0x13c00514200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+    "warning: [.WebGL-0x13c00514200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+  ]
+}

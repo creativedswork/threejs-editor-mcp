@@ -20,6 +20,40 @@ import { SetValueCommand } from '../vendor/three-editor/r185/editor/js/commands/
 import type { Project } from './projects.js'
 
 type Listener = (...values: unknown[]) => void
+export const MATERIAL_NUMBER_PROPERTIES = ['roughness', 'metalness', 'opacity'] as const
+export const MATERIAL_BOOLEAN_PROPERTIES = ['transparent', 'wireframe'] as const
+
+export type MaterialNumberProperty = typeof MATERIAL_NUMBER_PROPERTIES[number]
+export type MaterialBooleanProperty = typeof MATERIAL_BOOLEAN_PROPERTIES[number]
+
+export type EditorMaterialProperty =
+  | {
+      name: 'color'
+      kind: 'color'
+      value: string
+      command: 'set_material_color'
+    }
+  | {
+      name: MaterialNumberProperty
+      kind: 'number'
+      value: number
+      min: 0
+      max: 1
+      command: 'set_material_value'
+    }
+  | {
+      name: MaterialBooleanProperty
+      kind: 'boolean'
+      value: boolean
+      command: 'set_material_boolean'
+    }
+
+export interface EditorMaterialSnapshot {
+  uuid: string
+  type: string
+  name?: string
+  properties: EditorMaterialProperty[]
+}
 
 class Signal {
   active = true
@@ -57,7 +91,18 @@ export type EditorCommandOperation =
   | { type: 'set_name'; objectUuid: string; value: string }
   | { type: 'set_visible'; objectUuid: string; value: boolean }
   | { type: 'set_material_color'; objectUuid: string; value: string }
-  | { type: 'set_material_value'; objectUuid: string; property: 'roughness'; value: number }
+  | {
+      type: 'set_material_value'
+      objectUuid: string
+      property: MaterialNumberProperty
+      value: number
+    }
+  | {
+      type: 'set_material_boolean'
+      objectUuid: string
+      property: MaterialBooleanProperty
+      value: boolean
+    }
 
 export interface EditorObjectSnapshot {
   uuid: string
@@ -70,7 +115,51 @@ export interface EditorObjectSnapshot {
   rotationDegrees: [number, number, number]
   scale: [number, number, number]
   color?: string
+  material?: EditorMaterialSnapshot
   commands: EditorCommandOperation['type'][]
+}
+
+function materialSnapshot(material: THREE.Material | undefined): EditorMaterialSnapshot | undefined {
+  if (material === undefined) return undefined
+  const record = material as unknown as Record<string, unknown>
+  const properties: EditorMaterialProperty[] = []
+  if (record.color instanceof THREE.Color) {
+    properties.push({
+      name: 'color',
+      kind: 'color',
+      value: `#${record.color.getHexString()}`,
+      command: 'set_material_color',
+    })
+  }
+  for (const name of MATERIAL_NUMBER_PROPERTIES) {
+    const value = record[name]
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue
+    properties.push({
+      name,
+      kind: 'number',
+      value,
+      min: 0,
+      max: 1,
+      command: 'set_material_value',
+    })
+  }
+  for (const name of MATERIAL_BOOLEAN_PROPERTIES) {
+    const value = record[name]
+    if (typeof value !== 'boolean') continue
+    properties.push({
+      name,
+      kind: 'boolean',
+      value,
+      command: 'set_material_boolean',
+    })
+  }
+  if (properties.length === 0) return undefined
+  return {
+    uuid: material.uuid,
+    type: material.type,
+    ...material.name === '' ? {} : { name: material.name },
+    properties,
+  }
 }
 
 function createEditor(inputScene?: THREE.Scene): ProofEditor {
@@ -151,12 +240,23 @@ export function editorProjectFromSnapshots(
   const scene = new THREE.Scene()
   const objects = new Map<string, THREE.Object3D>()
   for (const snapshot of snapshots) {
+    const color = snapshot.material?.properties.find(property => property.name === 'color')
+    const material = snapshot.material === undefined && snapshot.color === undefined
+      ? new THREE.MeshNormalMaterial()
+      : new THREE.MeshStandardMaterial({
+          color: color?.kind === 'color' ? color.value : snapshot.color ?? '#ffffff',
+        })
+    if (snapshot.material !== undefined) {
+      Object.defineProperty(material, 'uuid', { value: snapshot.material.uuid })
+      for (const property of snapshot.material.properties) {
+        if (property.kind === 'color') continue
+        ;(material as unknown as Record<string, unknown>)[property.name] = property.value
+      }
+    }
     const object = snapshot.type === 'Mesh'
       ? new THREE.Mesh(
           new THREE.BufferGeometry(),
-          snapshot.color === undefined
-            ? new THREE.Material()
-            : new THREE.MeshStandardMaterial({ color: snapshot.color }),
+          material,
         )
       : new THREE.Group()
     object.uuid = snapshot.uuid
@@ -214,12 +314,29 @@ function commandForOperation(
     return new SetValueCommand(editor, object, 'visible', operation.value)
   }
   if (operation.type === 'set_material_color') {
+    const material = editor.getObjectMaterial(object)
+    if (material === undefined
+      || !('color' in material)
+      || !(material.color instanceof THREE.Color)) {
+      throw new Error(`object has no editable material color: ${operation.objectUuid}`)
+    }
     return new SetMaterialColorCommand(
       editor,
       object,
       'color',
       new THREE.Color(operation.value).getHex(),
     )
+  }
+  const material = editor.getObjectMaterial(object)
+  if (material === undefined) {
+    throw new Error(`object has no editable material: ${operation.objectUuid}`)
+  }
+  const current = (material as unknown as Record<string, unknown>)[operation.property]
+  if (operation.type === 'set_material_value' && typeof current !== 'number') {
+    throw new Error(`material does not support ${operation.property}: ${operation.objectUuid}`)
+  }
+  if (operation.type === 'set_material_boolean' && typeof current !== 'boolean') {
+    throw new Error(`material does not support ${operation.property}: ${operation.objectUuid}`)
   }
   return new SetMaterialValueCommand(
     editor,
@@ -245,6 +362,7 @@ export function inspectOfficialEditor(project: Project): Array<{
   rotationDegrees: number[]
   scale: number[]
   color?: string
+  material?: EditorMaterialSnapshot
   commands: string[]
 }> {
   const scene = new THREE.ObjectLoader().parse(project.scene)
@@ -255,11 +373,11 @@ export function inspectOfficialEditor(project: Project): Array<{
     const material = object instanceof THREE.Mesh
       ? Array.isArray(object.material) ? object.material[0] : object.material
       : undefined
-    const color = material !== undefined
-      && 'color' in material
-      && material.color instanceof THREE.Color
-      ? `#${material.color.getHexString()}`
-      : undefined
+    const materialDetail = materialSnapshot(material)
+    const color = materialDetail?.properties.find(property => property.name === 'color')
+    const materialCommands = new Set(
+      materialDetail?.properties.map(property => property.command) ?? [],
+    )
     objects.push({
       uuid: object.uuid,
       name: object.name || object.type,
@@ -272,14 +390,15 @@ export function inspectOfficialEditor(project: Project): Array<{
         THREE.MathUtils.radToDeg(object.rotation.z),
       ],
       scale: object.scale.toArray(),
-      ...color === undefined ? {} : { color },
+      ...color?.kind === 'color' ? { color: color.value } : {},
+      ...materialDetail === undefined ? {} : { material: materialDetail },
       commands: [
         'set_position',
         'set_rotation',
         'set_scale',
         'set_name',
         'set_visible',
-        ...color === undefined ? [] : ['set_material_color'],
+        ...materialCommands,
       ],
     })
   })

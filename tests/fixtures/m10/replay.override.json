@@ -1,0 +1,39 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "tool-call" },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_threejs_m10_open",
+          "name": "mcp__threejs__open_editor",
+          "arguments": "{}"
+        }
+      },
+      { "type": "finish", "reason": { "kind": "tool-calls" } }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      { "type": "block-start", "index": 0, "blockType": "text" },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "已打开 M10 Volumetric Fluid Fire。"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "已打开 M10 Volumetric Fluid Fire。"
+        }
+      },
+      { "type": "finish", "reason": { "kind": "stop" } }
+    ]
+  }
+]
