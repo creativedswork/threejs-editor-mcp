@@ -178,8 +178,13 @@ async function captureCase(options) {
       locale: 'en-US',
     })
     page.on('console', message => {
-      if (message.type() === 'error' || message.type() === 'warning') {
-        problems.push(`${message.type()}: ${message.text()}`)
+      const text = message.text()
+      const ignoredReadbackWarning = message.type() === 'warning'
+        && text.includes('GL Driver Message')
+        && text.includes('GPU stall due to ReadPixels')
+      if (!ignoredReadbackWarning
+        && (message.type() === 'error' || message.type() === 'warning')) {
+        problems.push(`${message.type()}: ${text}`)
       }
     })
     page.on('pageerror', error => problems.push(`pageerror: ${error.message}`))
